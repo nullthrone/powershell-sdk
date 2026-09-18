@@ -57,10 +57,12 @@ function Invoke-BuildScriptAnalysis {
     .SYNOPSIS
         Runs PSScriptAnalyzer over one path with the repository settings and custom rules.
     .DESCRIPTION
-        PSScriptAnalyzer 1.25 occasionally fails with "The term 'Get-Command' is not recognized" from its internal
-        command-info lookup. The failure is not reproducible on demand and disappears on the next run, so the
-        analysis (idempotent, a few seconds) is retried up to three times before it counts as an error. A retry is
-        reported as a build warning so that it stays visible in the logs.
+        PSScriptAnalyzer 1.25 occasionally fails while initialising its internal command-info cache and the runspace
+        that runs custom rules: either with "The term 'Get-Command' is not recognized" or with a
+        NullReferenceException ("Object reference not set to an instance of an object"). Neither failure is
+        reproducible on demand and both disappear on the next run, so the analysis (idempotent, a few seconds) is
+        retried up to three times before it counts as an error. A retry is reported as a build warning so that it
+        stays visible in the logs.
     #>
     param(
         [Parameter(Mandatory)]
@@ -73,7 +75,11 @@ function Invoke-BuildScriptAnalysis {
             return Invoke-ScriptAnalyzer -Path $Path -Recurse -Settings $script:AnalyzerSettings -CustomRulePath $script:CustomRulePath -IncludeDefaultRules -ErrorAction Stop
         } catch {
             $message = $_.Exception.Message
-            if ($attempt -lt $maximumAttempts -and $message -like "*'Get-Command' is not recognized*") {
+            $transient = $_.Exception -is [System.NullReferenceException]
+            foreach ($pattern in "*'Get-Command' is not recognized*", '*Object reference not set to an instance of an object*') {
+                if ($message -like $pattern) { $transient = $true }
+            }
+            if ($attempt -lt $maximumAttempts -and $transient) {
                 Write-Warning ("PSScriptAnalyzer failed transiently on '{0}' (attempt {1} of {2}): {3} Retrying." -f $Path, $attempt, $maximumAttempts, $message.Split("`n")[0].Trim())
                 Start-Sleep -Seconds 2
                 continue
@@ -106,6 +112,13 @@ task Build {
 # Synopsis: Run PSScriptAnalyzer (default rules, formatting rules and the repository's custom rules).
 task Analyze {
     Import-Module -Name PSScriptAnalyzer -MinimumVersion 1.25.0 -ErrorAction Stop
+    # Warm-up on a trivial script: initialises the analyzer's command-info cache and the custom-rule runspace in this
+    # session, where the transient failures described in Invoke-BuildScriptAnalysis originate. Its outcome is ignored.
+    try {
+        $null = Invoke-ScriptAnalyzer -ScriptDefinition 'param() Get-Date' -Settings $script:AnalyzerSettings -CustomRulePath $script:CustomRulePath -IncludeDefaultRules -ErrorAction Stop
+    } catch {
+        Write-Warning ("PSScriptAnalyzer warm-up failed: {0}" -f $_.Exception.Message.Split("`n")[0].Trim())
+    }
     $paths = @('src', 'tests', 'tools', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
     $findings = @(foreach ($path in $paths) { Invoke-BuildScriptAnalysis -Path $path })
     if ($findings.Count -gt 0) {
