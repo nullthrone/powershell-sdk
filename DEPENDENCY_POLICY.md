@@ -36,6 +36,8 @@ and installed by `./build.ps1 -Bootstrap`. They are never needed to *use* the mo
 | Pester | `[6.2.0,7.0)` | Tests |
 | PSScriptAnalyzer | `[1.25.0,2.0)` | Static analysis, formatting rules, custom rules |
 | ModuleBuilder | `[3.1.0,4.0)` | Assembling `src/` into a single `.psm1` |
+| Configuration | `[1.5.0,2.0)` | Required by ModuleBuilder (declared explicitly so that the version is pinned) |
+| Metadata | `[1.5.1,2.0)` | Required by Configuration (declared explicitly so that the version is pinned) |
 | InvokeBuild | `[5.12.0,6.0)` | Task runner |
 | Microsoft.PowerShell.PlatyPS | `[1.0.0,2.0)` | Help generation (optional locally, required for releases) |
 | `@modelcontextprotocol/conformance` (npm) | exact version | Conformance suite (from milestone M2) |

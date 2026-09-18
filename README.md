@@ -19,7 +19,7 @@ and clients, targeting specification revision **2026-07-28** with dual-era suppo
 ```powershell
 git clone https://github.com/nullthrone/powershell-sdk.git
 cd powershell-sdk
-./build.ps1 -Bootstrap        # installs Pester, PSScriptAnalyzer, ModuleBuilder, InvokeBuild, PlatyPS
+./build.ps1 -Bootstrap        # installs Pester, PSScriptAnalyzer, ModuleBuilder (+ Configuration, Metadata), InvokeBuild, PlatyPS
 ./build.ps1 -Task CI          # Analyze, Test, Package, PublishLocal
 Import-Module ./output/ModelContextProtocol/0.1.0/ModelContextProtocol.psd1
 ```

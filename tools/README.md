@@ -14,7 +14,7 @@ Environments without access to the PowerShell Gallery can still build and test:
 1. On a machine with Gallery access, download the packages declared in `requirements.psd1`:
 
    ```powershell
-   Save-PSResource -Name Pester, PSScriptAnalyzer, ModuleBuilder, InvokeBuild, Microsoft.PowerShell.PlatyPS -Repository PSGallery -AsNupkg -Path ./tools/packages -TrustRepository
+   Save-PSResource -Name Pester, PSScriptAnalyzer, ModuleBuilder, Configuration, Metadata, InvokeBuild, Microsoft.PowerShell.PlatyPS -Repository PSGallery -AsNupkg -Path ./tools/packages -TrustRepository
    ```
 
 2. Copy `tools/packages/*.nupkg` to the restricted machine and run
@@ -25,3 +25,6 @@ Environments without access to the PowerShell Gallery can still build and test:
 
 `./build.ps1 -Bootstrap` (source `Auto`) tries the Gallery first, then `api.nuget.org` for Pester and
 Invoke-Build (which are published there in Chocolatey layout and are unpacked accordingly), then this folder.
+Every module the build needs is listed in `requirements.psd1`, including the transitive dependencies of
+ModuleBuilder (Configuration, Metadata); the bootstrap installs each of them individually with
+`-SkipDependencyCheck`, so this folder must contain all of them.

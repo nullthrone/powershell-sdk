@@ -13,6 +13,10 @@
       2. NuGet      - api.nuget.org for packages that are also published there (Pester, Invoke-Build).
       3. Offline    - a local repository made from the .nupkg files in tools/packages (see tools/README.md).
 
+    requirements.psd1 lists every module the build needs, including the transitive dependencies of ModuleBuilder
+    (Configuration, Metadata), so that all versions are pinned. Install-PSResource therefore runs with
+    -SkipDependencyCheck: the package source's own dependency resolution is neither needed nor trusted.
+
 .PARAMETER Task
     One or more Invoke-Build task names (default: Build), separated by spaces or commas so that both
     `./build.ps1 -Task Analyze, Test` and `pwsh -File build.ps1 -Task Analyze,Test` work. Use '?' to list the tasks.
@@ -173,7 +177,8 @@ function Install-BuildDependencyFromGallery {
         [string] $Range
     )
 
-    Install-PSResource -Name $Name -Version $Range -Repository PSGallery -TrustRepository -Scope CurrentUser -Quiet -ErrorAction Stop
+    # Transitive dependencies are declared in requirements.psd1 (see the header), hence -SkipDependencyCheck.
+    Install-PSResource -Name $Name -Version $Range -Repository PSGallery -TrustRepository -Scope CurrentUser -SkipDependencyCheck -Quiet -ErrorAction Stop
 }
 
 function Install-BuildDependencyFromNuGet {
@@ -256,7 +261,7 @@ function Install-BuildDependencyFromOffline {
     if (-not $existing) {
         Register-PSResourceRepository -Name $repositoryName -Uri $uri -Trusted
     }
-    Install-PSResource -Name $Name -Version $Range -Repository $repositoryName -TrustRepository -Scope CurrentUser -Quiet -ErrorAction Stop
+    Install-PSResource -Name $Name -Version $Range -Repository $repositoryName -TrustRepository -Scope CurrentUser -SkipDependencyCheck -Quiet -ErrorAction Stop
 }
 
 function Install-BuildDependency {

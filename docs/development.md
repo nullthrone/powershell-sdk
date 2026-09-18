@@ -6,7 +6,7 @@
 |---|---|---|
 | PowerShell 7.4+ | runtime and build host | you (see [DEPENDENCY_POLICY.md](../DEPENDENCY_POLICY.md) for the version table) |
 | InvokeBuild | task runner (`ModelContextProtocol.build.ps1`) | `./build.ps1 -Bootstrap` |
-| ModuleBuilder | assembles `src/` into one `.psm1` | `./build.ps1 -Bootstrap` |
+| ModuleBuilder (with Configuration and Metadata) | assembles `src/` into one `.psm1` | `./build.ps1 -Bootstrap` |
 | PSScriptAnalyzer | static analysis, formatting, custom rules | `./build.ps1 -Bootstrap` |
 | Pester 6 | tests | `./build.ps1 -Bootstrap` |
 | Microsoft.PowerShell.PlatyPS | help generation (optional locally) | `./build.ps1 -Bootstrap` |
@@ -69,6 +69,6 @@ run, uploads the `.nupkg`, drafts a GitHub release with the changelog section
 ## Restricted environments
 
 Without access to the PowerShell Gallery, `./build.ps1 -Bootstrap` falls back to `api.nuget.org` for Pester
-and Invoke-Build. PSScriptAnalyzer, ModuleBuilder and PlatyPS are not published there; put their `.nupkg`
-files into `tools/packages/` (see `tools/README.md`) or install them from another source. The `Help` task
-skips itself when PlatyPS is missing.
+and Invoke-Build. PSScriptAnalyzer, ModuleBuilder (with Configuration and Metadata) and PlatyPS are not
+published there; put their `.nupkg` files into `tools/packages/` (see `tools/README.md`) or install them from
+another source. The `Help` task skips itself when PlatyPS is missing.
