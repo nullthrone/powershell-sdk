@@ -1,0 +1,301 @@
+{
+ "source": "Local spec pages: specification__2026-07-28__basic__transports__streamable-http.md, __transports__stdio.md, __transports__index.md, __basic__index.md (statelessness, error codes), __basic__versioning.md, __patterns__cancellation.md, __patterns__subscriptions.md, __authorization__index.md, __authorization__authorization-server-discovery.md, __authorization__client-registration.md, __authorization__security-considerations.md, __changelog.md; schema.ts (HEADER_MISMATCH/UNSUPPORTED_PROTOCOL_VERSION/MISSING_REQUIRED_CLIENT_CAPABILITY); conformance_README.md. Platform facts verified via curl of dotnet/runtime main sources (System.Net.HttpListener managed/Windows, HttpClient.cs, RedirectHandler.cs, HttpEnvironmentProxy.cs, System.Net.ServerSentEvents ref/csproj, NetCoreAppLibrary.props) and MicrosoftDocs/PowerShell-Docs (Invoke-WebRequest 7.6/7.7 syntax, What's New 7.4/7.5/7.6/7.7). Topic: HTTP hosting (HttpListener/Kestrel/Pode/PSU) and HTTP client (HttpClient/SSE/OAuth/PKCE/loopback) in PowerShell 7.x for Streamable HTTP.",
+ "summary": "Streamable HTTP 2026-07-28 is a single POST endpoint: every JSON-RPC request/notification is one POST; the server answers with application/json or a request-scoped text/event-stream; closing the response stream is cancellation; there is no GET stream, no Mcp-Session-Id, no Last-Event-ID; long-lived notifications ride the SSE response of subscriptions/listen. Required headers per POST: MCP-Protocol-Version, Mcp-Method, Mcp-Name (tools/call, resources/read, prompts/get), optional Mcp-Param-{Name} from x-mcp-header; mismatches are 400 + -32020. Origin MUST be validated (403), bind loopback locally, X-Accel-Buffering: no on SSE, periodic ':' keep-alives.\n\nServer hosting in pwsh 7.x: System.Net.HttpListener is the only in-box option that works cross-platform. Windows uses http.sys (URL ACL for non-loopback prefixes, TLS via netsh sslcert); Linux/macOS use the managed listener which has NO working HTTPS (LoadCertificateAndKey returns null; secure accepts are closed). HttpResponseStream.Flush() is a no-op; each Write with SendChunked=true emits a chunk, so SSE works by writing per event. Client disconnect is only observable via a failing Write, so keep-alive comments double as cancellation probes. Kestrel is not shipped with pwsh (Microsoft.NETCore.App only) and would require loading Microsoft.AspNetCore.App assemblies in a custom AssemblyLoadContext; treat it, Pode and PowerShell Universal as optional adapters behind a host abstraction, with a JSON-only (non-streaming) mode for hosts that cannot stream.\n\nClient: System.Net.Http.HttpClient + SocketsHttpHandler, SendAsync(..., ResponseHeadersRead, ct); HttpClient.Timeout does not cover body reads after headers (cts disposed in FinishSend), so use Timeout.InfiniteTimeSpan plus per-request/idle CancellationTokenSources. AllowAutoRedirect must be off (RedirectHandler strips Authorization and converts POST to GET). SSE parsing: System.Net.ServerSentEvents (in-box .NET 9+ = pwsh 7.5+, NuGet netstandard2.0 for 7.4) or a hand-written parser. Invoke-WebRequest/Invoke-RestMethod buffer bodies and have no SSE parameter in 7.4-7.7 (no -SseTimeout exists) and are unusable for the transport. OAuth: parse WWW-Authenticate, RFC 9728/8414 discovery, PKCE S256 via RandomNumberGenerator/SHA256, resource parameter, iss check, loopback redirect via HttpListener on 127.0.0.1 with fixed registered ports.",
+ "methods": [
+  {
+   "name": "POST {mcp-endpoint} (JSON-RPC request)",
+   "direction": "client->server",
+   "params": "HTTP headers: Content-Type: application/json (body is one JSON-RPC request); Accept: application/json, text/event-stream (both, MUST); MCP-Protocol-Version: <string> (MUST equal params._meta[\"io.modelcontextprotocol/protocolVersion\"]); Mcp-Method: <method> (MUST, all requests); Mcp-Name: params.name|params.uri (MUST for tools/call, resources/read, prompts/get; Base64 sentinel =?base64?...?= when not header-safe); Mcp-Param-{Name}: value (MUST when tool inputSchema property carries x-mcp-header and value present; omitted when null/absent); Authorization: Bearer <token> (when protected; MUST on every request, never in query string). Body params._meta MUST carry io.modelcontextprotocol/protocolVersion (string), io.modelcontextprotocol/clientCapabilities (object), optional io.modelcontextprotocol/clientInfo (Implementation), optional io.modelcontextprotocol/logLevel.",
+   "result": "200 + Content-Type: application/json (single JSON-RPC response) OR 200 + Content-Type: text/event-stream (SSE; zero or more request-related JSON-RPC notifications, then final JSON-RPC response which SHOULD end the stream; server SHOULD add X-Accel-Buffering: no; MAY send ':' comment keep-alives). 400 + JSON-RPC error: -32020 HeaderMismatch (missing/mismatched/invalid MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Param-*), -32022 UnsupportedProtocolVersion (data.supported: string[], data.requested: string), -32021 MissingRequiredClientCapability (data.requiredCapabilities: ClientCapabilities). 404 + JSON-RPC error -32601 when method not implemented. 403 (body MAY be id-less JSON-RPC error) on invalid Origin. 401/403 for authorization (WWW-Authenticate: Bearer resource_metadata=\"...\", scope=\"...\", error=\"insufficient_scope\").",
+   "capability_gate": "none at transport level; x-mcp-header support is mandatory for HTTP clients, optional for servers",
+   "notes": "streamable-http.md 'Sending Messages', 'Request Metadata', 'Server Validation', 'Security & Endpoint'; authorization index 'Access Token Usage'. Each request MUST be a new POST; client MUST NOT POST JSON-RPC responses."
+  },
+  {
+   "name": "POST {mcp-endpoint} (JSON-RPC notification)",
+   "direction": "notification c->s",
+   "params": "Body: single JSON-RPC notification. Note: core 2026-07-28 defines no client->server notifications on Streamable HTTP (notifications/cancelled is stdio-only); header requirements for notification POSTs are explicitly undefined by this revision.",
+   "result": "202 Accepted with no body if accepted; otherwise HTTP error status (e.g. 400), body MAY be an id-less JSON-RPC error.",
+   "capability_gate": "none",
+   "notes": "streamable-http.md 'Sending Messages' items 5 and the Note that follows."
+  },
+  {
+   "name": "subscriptions/listen over HTTP",
+   "direction": "client->server",
+   "params": "Ordinary POST as above with method subscriptions/listen and params.notifications filter {toolsListChanged?: boolean, promptsListChanged?: boolean, resourcesListChanged?: boolean, resourceSubscriptions?: string[]}.",
+   "result": "text/event-stream that stays open: first message MUST be notifications/subscriptions/acknowledged carrying _meta[\"io.modelcontextprotocol/subscriptionId\"]; then only opted-in change notifications; request-scoped progress/message notifications never appear here. Client closes stream to cancel; server SHOULD respond with a completion result before closing on graceful shutdown. Client MUST re-send subscriptions/listen after a disconnect.",
+   "capability_gate": "server capabilities (tools.listChanged etc.) per subscriptions.md; not transport-gated",
+   "notes": "streamable-http.md 'Receiving Messages'; subscriptions.md 'Opening a Stream', 'Acknowledgment', 'Closing'. Hosts that cannot stream cannot serve this method."
+  },
+  {
+   "name": "Stream close (cancellation)",
+   "direction": "client->server",
+   "params": "TCP/HTTP-level: client aborts the response stream (HttpResponseMessage.Dispose / CancellationToken on read).",
+   "result": "Server MUST treat the disconnect as cancellation, SHOULD stop work, MUST NOT send further messages for that request. No notifications/cancelled is sent on HTTP.",
+   "capability_gate": "none",
+   "notes": "streamable-http.md 'Cancellation'; cancellation.md 'Transport-Specific Cancellation', 'Timeouts' (SHOULD have per-request configurable timeouts; MAY reset on progress; SHOULD enforce a maximum)."
+  },
+  {
+   "name": "GET/DELETE {mcp-endpoint} (legacy traffic)",
+   "direction": "client->server",
+   "params": "HTTP GET (legacy standalone SSE stream) or DELETE (legacy session termination), possibly with Mcp-Session-Id / Last-Event-ID headers.",
+   "result": "A 2026-07-28-only server SHOULD answer 405 Method Not Allowed; ignore Mcp-Session-Id (never mint/echo); ignore Last-Event-ID. A dual-era server implements the 2025-11-25 behavior for these.",
+   "capability_gate": "none",
+   "notes": "streamable-http.md 'Earlier Streamable HTTP Revisions'."
+  },
+  {
+   "name": "401 challenge + Protected Resource Metadata discovery",
+   "direction": "server->client",
+   "params": "Client sends MCP request without token.",
+   "result": "401 Unauthorized with WWW-Authenticate: Bearer resource_metadata=\"<url>\" [, scope=\"...\"]; client MUST parse it and GET the PRM (RFC 9728) document; fallback order when absent: /.well-known/oauth-protected-resource/<mcp path> then /.well-known/oauth-protected-resource. PRM MUST contain authorization_servers (>=1). 403 with error=\"insufficient_scope\", scope=\"...\" triggers step-up (scope union, bounded retries).",
+   "capability_gate": "authorization is OPTIONAL; when used over HTTP SHOULD follow the spec",
+   "notes": "authorization-server-discovery.md; authorization index 'Scope Selection Strategy', 'Scope Challenge Handling', 'Error Handling' (401 unauthorized/invalid token, 403 insufficient scope, 400 malformed)."
+  },
+  {
+   "name": "Authorization server metadata GET",
+   "direction": "client->server",
+   "params": "Issuer with path: 1) /.well-known/oauth-authorization-server/<path>, 2) /.well-known/openid-configuration/<path>, 3) <path>/.well-known/openid-configuration. Issuer without path: 1) /.well-known/oauth-authorization-server, 2) /.well-known/openid-configuration. MUST try in that order.",
+   "result": "JSON metadata; client MUST verify issuer == the identifier used to build the URL; MUST refuse if code_challenge_methods_supported is absent; reads client_id_metadata_document_supported, registration_endpoint, authorization_endpoint, token_endpoint, authorization_response_iss_parameter_supported, scopes_supported.",
+   "capability_gate": "n/a",
+   "notes": "authorization-server-discovery.md 'Authorization Server Metadata Discovery'; security-considerations.md 'Authorization Code Protection'."
+  },
+  {
+   "name": "Authorization code + PKCE (browser redirect to loopback)",
+   "direction": "client->server",
+   "params": "Authorization URL query: response_type=code, client_id (pre-registered, CIMD https URL, or DCR-issued), redirect_uri (localhost or https; MUST be registered), code_challenge=BASE64URL(SHA256(verifier)), code_challenge_method=S256, resource=<canonical MCP server URI> (MUST), scope (from challenge or scopes_supported), state (SHOULD). Client MUST record expected issuer with the verifier/state before redirecting.",
+   "result": "Redirect to redirect_uri with code, state, optionally iss. Client MUST validate iss per RFC 9207 table (reject when advertised-but-absent; compare by simple string equality without normalization when present). Token POST (application/x-www-form-urlencoded): grant_type=authorization_code, code, redirect_uri, client_id, code_verifier, resource. Response: access_token, token_type, expires_in, refresh_token?, scope?.",
+   "capability_gate": "n/a",
+   "notes": "authorization index 'Authorization Flow Steps', 'Authorization Response Validation', 'Resource Parameter Implementation'; client-registration.md priority: pre-registered > CIMD > DCR > prompt user; DCR MUST send application_type (\"native\" for CLI/localhost)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Expose a single MCP endpoint path that accepts POST; answer a JSON-RPC request with either Content-Type: application/json (one JSON object) or text/event-stream (request-scoped SSE); answer an accepted notification with 202 and no body.",
+   "cite": "streamable-http.md 'Streamable HTTP' intro; 'Sending Messages' 5-6"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate the Origin header on every incoming connection; if present and not allowed respond 403 (body MAY be an id-less JSON-RPC error). Implement with HttpListenerRequest.Headers['Origin'] against an allowlist; absent Origin is acceptable.",
+   "cite": "streamable-http.md 'Security & Endpoint' 1"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Bind only to loopback (127.0.0.1) when running locally; never default to 0.0.0.0/+/*. On Windows prefer http://127.0.0.1:{port}/ or http://localhost:{port}/ prefixes (http.sys does not need a URL ACL for loopback prefixes in common experience; wildcard prefixes require admin or netsh http add urlacl).",
+   "cite": "streamable-http.md 'Security & Endpoint' 2; platform behavior needs verification"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Implement authentication for all connections (Bearer token validation as OAuth 2.1 resource server when exposed beyond loopback); MUST validate token audience and MUST NOT pass tokens through to upstreams.",
+   "cite": "streamable-http.md 'Security & Endpoint' 3; authorization index 'Token Handling'; security-considerations.md 'Access Token Privilege Restriction'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Require and validate MCP-Protocol-Version, Mcp-Method and (for tools/call, resources/read, prompts/get) Mcp-Name; decode Base64 sentinel values before comparing to the body; reject mismatches, missing headers and invalid characters with 400 + JSON-RPC error -32020. Compare header names case-insensitively (HttpListener's NameValueCollection already is), values case-sensitively; compare integer Mcp-Param values numerically.",
+   "cite": "streamable-http.md 'Protocol Version Header', 'Standard Request Headers', 'Server Validation', 'Case Sensitivity'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Respond 400 + UnsupportedProtocolVersionError (-32022, data.supported/requested) for unknown/unsupported protocol versions; 404 + -32601 for unknown RPC methods; 400 + -32021 with data.requiredCapabilities when a needed client capability was not declared.",
+   "cite": "streamable-http.md 'Protocol Version Header'; schema.ts HeaderMismatchError/UnsupportedProtocolVersionError/MissingRequiredClientCapabilityError"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Treat a POST without MCP-Protocol-Version as 2025-03-26 only if the server supports pre-2025-06-18 clients; a modern-only server MUST reject it per Server Validation.",
+   "cite": "streamable-http.md 'Protocol Version Header' last paragraph"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat client disconnect of an SSE response as cancellation: stop work as soon as practical and send nothing more. With HttpListener this is only detectable by a failed Write (HttpListenerException on Windows, IOException/SocketException on the managed listener), so the SDK must emit periodic ':' keep-alive writes and turn write failures into CancellationTokenSource.Cancel for the handler.",
+   "cite": "streamable-http.md 'Cancellation'; cancellation.md 'Transport-Specific Cancellation'; dotnet/runtime HttpListener sources (no public disconnect notification)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Send X-Accel-Buffering: no (plus Cache-Control: no-cache, Connection: keep-alive) when starting an SSE response, and periodically emit ':' comment lines on long-lived streams (subscriptions/listen) to defeat proxy/idle timeouts.",
+   "cite": "streamable-http.md 'Receiving Messages' and Note on keep-alives"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send only request-related notifications on a request's SSE stream, never independent JSON-RPC requests; final response SHOULD terminate the stream; subscriptions/listen streams MUST start with notifications/subscriptions/acknowledged.",
+   "cite": "streamable-http.md 'Receiving Messages'; subscriptions.md 'Acknowledgment'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Answer legacy GET/DELETE with 405, ignore Mcp-Session-Id and Last-Event-ID, never mint session ids (modern-only server). A dual-era server instead selects legacy semantics when it receives initialize and may serve both eras on the same endpoint.",
+   "cite": "streamable-http.md 'Earlier Streamable HTTP Revisions'; versioning.md 'Backward Compatibility'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Infer state from prior requests on the same connection (capabilities, version, identity); every request carries its own _meta. Do not key tool state on connection identity; use explicit handles.",
+   "cite": "basic/index.md 'stateless protocol' bullets"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Managed (non-Windows) HttpListener cannot serve HTTPS: HttpListener.LoadCertificateAndKey returns null and secure accepts are closed immediately. TLS on Linux/macOS therefore requires a reverse proxy (nginx/Caddy/YARP) or a different host (Kestrel/Pode). On Windows, HTTPS needs an http.sys certificate binding (netsh http add sslcert) outside the process.",
+   "cite": "dotnet/runtime src/libraries/System.Net.HttpListener/src/System/Net/Managed/HttpEndPointListener.cs (ProcessAccept: if _secure && _cert == null → Close) and HttpConnection.cs comment 'never called because LoadCertificateAndKey always returns null'"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Stream SSE through HttpListener by setting Response.SendChunked = true, Response.ContentType = 'text/event-stream', writing each event with OutputStream.Write and NOT relying on Flush (HttpResponseStream.Flush()/FlushAsync are no-ops in .NET). Write an initial ':' comment immediately so headers are sent and the client's ResponseHeadersRead completes.",
+   "cite": "dotnet/runtime src/libraries/System.Net.HttpListener/src/System/Net/HttpResponseStream.cs line 19-20"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Behind a reverse proxy: proxy must use HTTP/1.1 to the backend, disable response buffering, forward Mcp-*, MCP-Protocol-Version, Authorization and Origin headers unchanged, and set long/unlimited read timeouts for text/event-stream responses. Derive the canonical resource URI for PRM from configuration, not from X-Forwarded-* unless the proxy is trusted.",
+   "cite": "streamable-http.md X-Accel-Buffering note; authorization index 'Canonical Server URI'; Server Validation note about intermediaries"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Send every JSON-RPC request/notification as its own POST with Accept: application/json, text/event-stream; include MCP-Protocol-Version, Mcp-Method, Mcp-Name and Mcp-Param-* (from x-mcp-header, Base64 sentinel encoding when not plain ASCII or when the value itself matches the sentinel); never POST JSON-RPC responses; support both JSON and SSE responses.",
+   "cite": "streamable-http.md 'Sending Messages' 1-6, 'Client Behavior', 'Value Encoding'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Reject (exclude from tools/list, SHOULD log a warning) tool definitions whose x-mcp-header values violate the constraints (empty, non-token, control chars, case-insensitive duplicates, non-primitive or 'number' type, not reachable purely via properties keys).",
+   "cite": "streamable-http.md 'Schema Extension'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "On -32020 caused by missing/mismatched Mcp-Param-* headers, call tools/list to refresh inputSchema and retry once.",
+   "cite": "streamable-http.md 'Client Behavior' last paragraph"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "On 400 inspect the body: -32022/-32021/-32020 mean modern server (retry with a supported version or correct request); empty/unrecognized body means legacy → fall back to initialize (2025-11-25 semantics) and, if that fails with 400/404/405 without modern error, try the deprecated HTTP+SSE GET probe. Cache the era per origin.",
+   "cite": "streamable-http.md 'Backward Compatibility'; versioning.md 'Backward Compatibility with Initialization-Based Versions'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Configure HttpClient with Timeout = Timeout.InfiniteTimeSpan and drive timeouts with CancellationTokenSources (connect via SocketsHttpHandler.ConnectTimeout, per-request overall timeout, per-read idle timeout), because HttpClient.Timeout's linked CTS is disposed in FinishSend as soon as SendAsync(ResponseHeadersRead) returns and does not cover subsequent body reads.",
+   "cite": "dotnet/runtime src/libraries/System.Net.Http/src/System/Net/Http/HttpClient.cs PrepareCancellationTokenSource/FinishSend; cancellation.md 'Timeouts' (SHOULD per-request configurable, SHOULD enforce a maximum)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Set SocketsHttpHandler.AllowAutoRedirect = false for MCP endpoint POSTs: .NET's RedirectHandler clears request.Headers.Authorization on every redirect and rewrites POST to GET on 301/302/303, which would silently break MCP and leak nothing but lose auth.",
+   "cite": "dotnet/runtime src/libraries/System.Net.Http/src/System/Net/Http/SocketsHttpHandler/RedirectHandler.cs lines 52-53, 66-73, 158-167"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use Authorization: Bearer <token> on every request to a protected server, never in the query string; send only tokens issued by that server's authorization server; keep tokens/refresh tokens confidential (SecureString/DPAPI/keychain or memory only).",
+   "cite": "authorization index 'Token Requirements', 'Token Handling', 'Refresh Tokens'; security-considerations.md 'Token Theft'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Implement PKCE S256, verify code_challenge_methods_supported exists (refuse otherwise), send resource=<canonical MCP URI> in authorization and token requests, record expected issuer alongside the verifier/state, validate iss per RFC 9207 before using the code (also for error responses), and use only localhost or https redirect URIs that are registered.",
+   "cite": "security-considerations.md 'Authorization Code Protection', 'Communication Security', 'Open Redirection'; authorization index 'Authorization Response Validation', 'Resource Parameter Implementation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Parse WWW-Authenticate on 401 (resource_metadata, scope) and 403 (error=insufficient_scope, scope); support both PRM discovery paths; try both AS metadata mechanisms in the specified order and verify issuer equality; maintain separate registration/token state per authorization server issuer.",
+   "cite": "authorization-server-discovery.md; client-registration.md 'Authorization Server Binding'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Use scope from the 401 challenge, else scopes_supported (omit scope if undefined); on step-up compute the union of previous and challenged scopes; bound retries and track attempts per resource/operation.",
+   "cite": "authorization index 'Scope Selection Strategy', 'Step-Up Authorization Flow'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Use Invoke-WebRequest/Invoke-RestMethod for the MCP transport: they buffer the whole body (no incremental SSE consumption), have no SSE parameters in 7.4-7.7 (no -SseTimeout exists), parse -Headers into HttpRequestMessage with validation, and their retry/redirect policies are not MCP-aware. They remain fine for one-shot OAuth metadata/token requests.",
+   "cite": "PowerShell-Docs reference/7.6 and 7.7 Invoke-WebRequest.md syntax blocks (parameters: -ConnectionTimeoutSeconds, -OperationTimeoutSeconds, -HttpVersion, -UnixSocket, -SkipHttpErrorCheck, -AllowInsecureRedirect, -PreserveAuthorizationOnRedirect, -PreserveHttpMethodOnRedirect, -Authentication/-Token, -SslProtocol, -SkipCertificateCheck, -Proxy/-NoProxy); -OperationTimeoutSeconds doc: applies to data reads within a stream"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Honor proxy environment variables through HttpClient.DefaultProxy (ALL_PROXY, HTTP_PROXY, HTTPS_PROXY, NO_PROXY and lowercase variants; Windows also WinINet settings) and allow an explicit WebProxy override and NoProxy switch mirroring the web cmdlets' semantics.",
+   "cite": "dotnet/runtime SocketsHttpHandler/HttpEnvironmentProxy.cs constants ALL_PROXY/HTTP_PROXY/HTTPS_PROXY/NO_PROXY; PowerShell-Docs Invoke-WebRequest 'proxy configuration defined by environment variables' (7.0+)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Target PowerShell 7.4+ (.NET 8+) only for the HTTP transport; Windows PowerShell 5.1 lacks SocketsHttpHandler, System.Net.ServerSentEvents, SHA256.HashData, Base64Url, ReadLineAsync(ct), C# >5 in Add-Type and env-var proxy support. Offer at most a stdio-only or JSON-only client for 5.1 if ever required.",
+   "cite": "expert knowledge; PowerShell-Docs What's New 7.4 (.NET 8), 7.5 (.NET 9), 7.6 (.NET 10), 7.7 preview (.NET 11)"
+  }
+ ],
+ "wire_details": [
+  "MCP endpoint: one path (e.g. /mcp), POST only in 2026-07-28; GET/DELETE → 405 for modern-only servers.",
+  "Request headers (client MUST): Accept: application/json, text/event-stream; Content-Type: application/json; MCP-Protocol-Version: 2026-07-28; Mcp-Method: <method>; Mcp-Name: <params.name|params.uri> for tools/call|resources/read|prompts/get; Mcp-Param-{Name}: <value> for x-mcp-header properties; Authorization: Bearer <token>. Header names case-insensitive, values case-sensitive.",
+  "Base64 sentinel: `=?base64?<base64(utf8 value)>?=` (lowercase markers, exact); required when value has non-ASCII, control chars, leading/trailing whitespace, or itself matches the sentinel pattern; applies to Mcp-Name and Mcp-Param-*. Type conversion: integer → decimal string, boolean → 'true'/'false', string as-is.",
+  "Response statuses: 200 application/json | 200 text/event-stream | 202 no body (notification) | 400 (-32020 HeaderMismatch, -32021 MissingRequiredClientCapability, -32022 UnsupportedProtocolVersion; JSON-RPC body required from origin servers, optional from intermediaries) | 403 (Origin invalid; insufficient_scope) | 401 (auth) | 404 + -32601 (unknown method) | 405 (legacy GET/DELETE). Error codes -32020..-32099 reserved for spec; -32000..-32019 implementation-defined; -32002 and -32042 must not be emitted.",
+  "SSE framing: 'data: <json>\\n\\n' per JSON-RPC message; ':' comment lines as keep-alive (clients ignore); no 'id:' fields needed (resumability removed); response headers SHOULD include X-Accel-Buffering: no. System.Net.ServerSentEvents.SseParser.Create(Stream) → Enumerate()/EnumerateAsync(ct) yielding SseItem<string>{Data, EventType(default 'message'), EventId, ReconnectionInterval}; SseFormatter.WriteAsync(IAsyncEnumerable<SseItem<T>>, Stream, itemFormatter, ct) for servers. Assembly is in the shared framework (NetCoreAppLibrary.props) from .NET 9 (pwsh 7.5+); NuGet System.Net.ServerSentEvents targets netstandard2.0/net8 for pwsh 7.4.",
+  "Server (HttpListener): [System.Net.HttpListener]::new(); .Prefixes.Add('http://127.0.0.1:8080/') (prefix MUST end with '/'; 'localhost' vs '127.0.0.1' are distinct prefixes for http.sys Host matching); .Start(); $ctx = .GetContext() / .GetContextAsync() (Task<HttpListenerContext>) / BeginGetContext(callback,state)+EndGetContext; $ctx.Request.{HttpMethod, Url, Headers (NameValueCollection, case-insensitive), ContentType, ContentEncoding, ContentLength64, HasEntityBody, InputStream, RemoteEndPoint, IsSecureConnection}; $ctx.Response.{StatusCode, ContentType, ContentLength64, SendChunked, KeepAlive, Headers, AddHeader(), OutputStream, Close(), Abort()}; HttpListener.IsSupported; managed listener Socket.Listen(500) backlog; Windows: System.Net.HttpListenerException (Win32 error 5 access denied when prefix needs URL ACL; error 64/1229 when client gone).",
+  "Server TLS: Windows only via `netsh http add sslcert ipport=0.0.0.0:443 certhash=<thumbprint> appid={GUID}`; managed listener on Linux/macOS: https prefixes accepted at Prefixes.Add but connections are closed (cert loading unimplemented).",
+  "Client (HttpClient): $h=[System.Net.Http.SocketsHttpHandler]::new(); $h.AllowAutoRedirect=$false; $h.ConnectTimeout=[timespan]::FromSeconds(10); $h.PooledConnectionLifetime=[timespan]::FromMinutes(5); $h.PooledConnectionIdleTimeout; $h.MaxConnectionsPerServer; $h.KeepAlivePingPolicy/KeepAlivePingDelay (HTTP/2); $h.AutomaticDecompression; $h.UseProxy/$h.Proxy=[System.Net.WebProxy]::new(uri); $h.SslOptions=[System.Net.Security.SslClientAuthenticationOptions] {RemoteCertificateValidationCallback, EnabledSslProtocols, ClientCertificates}; $c=[System.Net.Http.HttpClient]::new($h); $c.Timeout=[System.Threading.Timeout]::InfiniteTimeSpan; $req=[System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post,$uri); $req.Content=[System.Net.Http.StringContent]::new($json,[System.Text.Encoding]::UTF8,'application/json'); $req.Headers.Accept.Add([System.Net.Http.Headers.MediaTypeWithQualityHeaderValue]::new('application/json')) and ('text/event-stream'); $req.Headers.TryAddWithoutValidation('Mcp-Method',$m); $req.Headers.Authorization=[System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$token); $resp=$c.SendAsync($req,[System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cts.Token).GetAwaiter().GetResult(); $resp.Content.Headers.ContentType.MediaType; $stream=$resp.Content.ReadAsStreamAsync($ct).GetAwaiter().GetResult(); $resp.Headers.WwwAuthenticate (HttpHeaderValueCollection<AuthenticationHeaderValue>: .Scheme, .Parameter raw auth-params string). HTTP/2: $req.Version=[Version]'2.0'; $req.VersionPolicy=[System.Net.Http.HttpVersionPolicy]::RequestVersionOrLower.",
+  "Cancellation on client: dispose HttpResponseMessage/stream or cancel the CancellationToken passed to ReadAsync/EnumerateAsync → closes the connection → server-side cancellation.",
+  "Environment proxy vars honored by HttpClient.DefaultProxy (HttpEnvironmentProxy): ALL_PROXY, HTTP_PROXY, HTTPS_PROXY, NO_PROXY (+ lowercase); on Windows WinINet system proxy also applies. TLS trust on Linux: OpenSSL store; SSL_CERT_FILE / SSL_CERT_DIR env vars respected by .NET.",
+  "PKCE: verifier = Base64Url(RandomNumberGenerator.GetBytes(32)) → 43 chars (allowed 43-128 of [A-Za-z0-9-._~]); challenge = Base64Url(SHA256.HashData([Text.Encoding]::ASCII.GetBytes(verifier))); code_challenge_method=S256. .NET 9+ (pwsh 7.5+): [System.Buffers.Text.Base64Url]::EncodeToString(bytes); pwsh 7.4: [Convert]::ToBase64String(b).TrimEnd('=').Replace('+','-').Replace('/','_'). state = Base64Url(RandomNumberGenerator.GetBytes(16)). Token request: [System.Net.Http.FormUrlEncodedContent]::new([Collections.Generic.Dictionary[string,string]]) with grant_type=authorization_code, code, redirect_uri, client_id, code_verifier, resource; client_secret only for confidential clients; refresh: grant_type=refresh_token, refresh_token, client_id, resource.",
+  "Loopback redirect receiver: HttpListener prefix http://127.0.0.1:{port}/callback/ (or http://localhost:{port}/callback/ matching the registered redirect_uri exactly); GetContextAsync with overall timeout (e.g. 300 s); parse $ctx.Request.QueryString (code, state, iss, error, error_description); reply 200 text/html 'You may close this window'; ignore /favicon.ico; Stop()/Close() listener afterwards. Browser launch: Start-Process $url (Windows ShellExecute; pwsh on Linux/macOS delegates to xdg-open/open — verify), fallback: print URL for headless sessions.",
+  "OAuth discovery URLs: PRM: WWW-Authenticate resource_metadata, else https://host/.well-known/oauth-protected-resource/<mcp-path>, else https://host/.well-known/oauth-protected-resource. AS metadata: /.well-known/oauth-authorization-server[/path] then /.well-known/openid-configuration[/path] then [/path]/.well-known/openid-configuration. Metadata fields consumed: issuer, authorization_endpoint, token_endpoint, registration_endpoint, code_challenge_methods_supported (MUST contain S256), client_id_metadata_document_supported, authorization_response_iss_parameter_supported, scopes_supported, grant_types_supported.",
+  "PowerShell runtime matrix: 7.4 LTS = .NET 8.0.x; 7.5 = .NET 9.0.x; 7.6 LTS = .NET 10.0.x; 7.7 preview = .NET 11 preview (per PowerShell-Docs What's New pages and PowerShell master global.json 11.0.100-rc.1)."
+ ],
+ "sdk_implications": [
+  "Define a host abstraction (e.g. IMcpHttpHost / McpHttpRequestContext with Method, Path, Headers, BodyStream, RemoteEndPoint, IsSecure, WriteJson(status, obj), BeginSse(headers) → IMcpSseWriter{WriteEvent(json), WriteComment(), CancellationToken}, Complete()) and implement it first on System.Net.HttpListener; Kestrel, Pode and PowerShell Universal become optional adapters. The protocol layer must never touch HttpListener types directly.",
+  "Support a 'JSON-only' host mode: a host that cannot stream (PSU endpoints, simple adapters) may answer every request with application/json (spec allows the server to choose per request), but must then drop request-scoped notifications, must not advertise listChanged/subscription capabilities, and must answer subscriptions/listen with a JSON-RPC error. Document this trade-off.",
+  "Threading model: HttpListener continuations run on thread-pool threads where no PowerShell runspace exists ('There is no Runspace available to run scripts in this thread'). Design a dispatcher: compiled C# (Add-Type at import or a precompiled netstandard2.0/net8 DLL shipped in the module) owns the accept loop, request parsing, header validation, SSE framing, keep-alive timer and disconnect→cancellation mapping; PowerShell tool/resource/prompt handlers execute on a RunspacePool ([runspacefactory]::CreateRunspacePool(min,max,$iss,$host)) via [powershell]::Create().AddScript/AddCommand with the registry passed as an argument. Script blocks captured in the main runspace must be re-bound (pass $sb.Ast.GetScriptBlock() or the string form; closures are lost) — document that handlers must not rely on caller-scope variables.",
+  "Alternative single-runspace mode for simple servers: loop `while ($listener.IsListening) { $t = $listener.GetContextAsync(); while (-not $t.Wait(250)) { if ($stop) { break } } ... }` keeps Ctrl+C responsive (pwsh 7 runs finally blocks on pipeline stop) but serializes requests and cannot host long-lived subscriptions/listen streams concurrently with tool calls — offer it only as 'development' mode or implement a cooperative event loop with non-blocking state machines.",
+  "Keep-alive/disconnect: emit ':' every N seconds (configurable, default ~15 s) on every open SSE response, wrap each Write in try/catch, and on failure cancel the linked CancellationToken handed to the handler and mark the request cancelled (spec MUST). Expose the token to PowerShell handlers via a $McpContext.CancellationToken parameter and honor it between pipeline steps.",
+  "Header validation module (server): normalize with NameValueCollection (case-insensitive), decode Base64 sentinel, compare Mcp-Method to body.method, Mcp-Name to params.name/uri, Mcp-Param-* to resolved property paths of x-mcp-header (only when the server declared them), numeric compare for integers, reject invalid characters, produce 400 + {code:-32020}; validate MCP-Protocol-Version against body _meta and the supported list (400 + -32022 with data.supported). Missing header on a modern-only server → -32020. Implement Origin allowlist (default: loopback origins and 'null'? decide explicitly; absent Origin allowed) and optional Host allowlist for DNS-rebinding hardening.",
+  "Body limits and content checks: HttpListener does not cap request bodies; enforce a configurable max (e.g. 4 MiB), require Content-Type application/json (accept charset param), read with Request.ContentEncoding (default UTF-8), reject batches (body must be a single request/notification), and answer 202 with ContentLength64=0 for notifications.",
+  "SSE writer: first write a ':' comment immediately after setting headers (SendChunked=true, ContentType text/event-stream, Cache-Control: no-cache, X-Accel-Buffering: no) so clients' ResponseHeadersRead completes; each event is 'data: <single-line JSON>\\n\\n' (serialize with -Compress; ensure no raw newlines inside data — JSON escapes them); final response then Response.Close(). Do not call Flush for effect (no-op) — rely on per-Write chunking; verify on Linux that the managed HttpResponseStream writes chunks immediately.",
+  "Client transport class: one HttpClient per server (SocketsHttpHandler, AllowAutoRedirect=false, Timeout infinite, ConnectTimeout, PooledConnectionLifetime, optional proxy/TLS options), per-request HttpRequestMessage with all Mcp-* headers, SendAsync(ResponseHeadersRead, ct), branch on Content-Type: application/json → read whole body; text/event-stream → SSE reader on a dedicated thread/Task feeding a BlockingCollection/Channel consumed by the PowerShell caller so Ctrl+C/timeouts can dispose the response and unblock. Treat stream end without final response as transport failure; re-issue the request with a new id (no resume).",
+  "Timeouts: implement three knobs — ConnectTimeout (handler), RequestTimeout (overall, CTS.CancelAfter; MAY be reset on progress notifications but with a hard MaxTimeout), IdleReadTimeout (per read, mirrors -OperationTimeoutSeconds); cancellation = disposing the response stream. subscriptions/listen requests use infinite RequestTimeout but keep IdleReadTimeout larger than the server keep-alive interval.",
+  "Era detection cache per origin: modern first; on 400 inspect body for -32020/-32021/-32022; otherwise (and on 404/405 without modern body) fall back to a legacy StreamableHttp2025 transport (initialize handshake, Mcp-Session-Id, optional GET stream, DELETE on close, Last-Event-ID optional) and finally to the deprecated HTTP+SSE GET probe if the SDK chooses to support it. Keep the legacy code path isolated (separate class) so the modern path stays small.",
+  "x-mcp-header support on the client is mandatory: after tools/list, precompute per tool the list of (headerName, propertyPath) with full constraint validation; drop invalid tools with a warning; at tools/call resolve values from arguments, encode, add Mcp-Param-* headers; on -32020 refresh tools/list once and retry.",
+  "OAuth client component (separate module/class): WWW-Authenticate auth-param parser (RFC 7235 quoted-string aware; .NET only gives Scheme+raw Parameter), PRM + AS metadata discovery with issuer check, registration strategy (pre-registered > CIMD when client_id_metadata_document_supported > DCR with application_type 'native' > prompt), PKCE, state, resource, iss validation, token store keyed by issuer + resource, refresh handling, 401→auth→retry once, 403 insufficient_scope→scope union→re-auth with bounded retries. Store secrets in SecureString/OS credential store; never log tokens.",
+  "Loopback receiver design: because AS MUST match redirect URIs exactly, use a configured list of fixed ports (try to bind each; HttpListener cannot bind port 0) and include all of them in the CIMD/DCR redirect_uris; prefer 127.0.0.1; accept only the first callback whose state matches; time out and clean up; support headless fallback (print URL, paste code) as an opt-in.",
+  "Add-Type compilation: pwsh 7 bundles Roslyn so C# helpers compile cross-platform at import (cost ~1-2 s, cache via -OutputAssembly not supported everywhere) — prefer shipping a precompiled netstandard2.0 (or net8.0) DLL built in CI; the dev container has no dotnet SDK so runtime Add-Type is the fallback for local iteration. Avoid C# language features newer than the bundled compiler supports (verify per pwsh version).",
+  "Kestrel adapter: only if the user supplies an ASP.NET Core runtime; load Microsoft.AspNetCore.Server.Kestrel.* and Microsoft.Extensions.* in a dedicated AssemblyLoadContext to avoid conflicts with pwsh's own Microsoft.Extensions/System.Text.Json versions; do not make it a default or a hard dependency; mark experimental.",
+  "Pode adapter: Pode has its own listener and SSE support (Set-PodeSseConnection/Send-PodeSseEvent) but its SSE model is connection-scoped, not 'SSE as the response body of this POST'; an adapter likely needs Pode's raw response stream — verify feasibility; otherwise run in JSON-only mode. PowerShell Universal: endpoints are request/response, likely JSON-only mode; both are optional and must not be dependencies of the core module.",
+  "Logging/observability: mirror Mcp-Method/Mcp-Name into structured logs; propagate _meta traceparent if present (changelog item on OpenTelemetry conventions); never log Authorization or token values."
+ ],
+ "legacy_delta": [
+  "Protocol 2026-07-28 vs 2025-11-25/2025-06-18 Streamable HTTP: sessions (Mcp-Session-Id header, DELETE to end, 404 on expired session per 2025-11-25) removed; standalone GET SSE stream removed (replaced by subscriptions/listen POST stream); server-initiated JSON-RPC requests on SSE removed (MRTR InputRequiredResult instead); Last-Event-ID resumability and SSE event ids removed; initialize/notifications/initialized removed (per-request _meta); Mcp-Method/Mcp-Name/Mcp-Param-* headers newly REQUIRED (SEP-2243); HeaderMismatch code moved -32001 → -32020; MCP-Protocol-Version header existed since 2025-06-18 (absent → server MAY assume 2025-03-26) but now MUST match body _meta; HTTP+SSE 2024-11-05 transport formally Deprecated. A dual-era server must still implement the 2025-11-25 session/GET/DELETE path when it sees initialize (cite: streamable-http.md 'Earlier Streamable HTTP Revisions'; changelog items 1,2,4,9 and 'HeaderMismatch -32001 → -32020').",
+  "PowerShell 7.4 (.NET 8): HttpClient/SocketsHttpHandler, HttpListener (managed on Unix), StreamReader.ReadLineAsync(CancellationToken), SHA256.HashData, RandomNumberGenerator.GetBytes available; NO System.Net.ServerSentEvents in box (ship NuGet netstandard2.0 build or own parser), NO System.Buffers.Text.Base64Url (hand-roll), NO X509CertificateLoader (use X509Certificate2 ctor); web cmdlets gained -ConnectionTimeoutSeconds (alias TimeoutSec), -OperationTimeoutSeconds, -AllowInsecureRedirect, -UnixSocket, Brotli decompression, UTF-8 default charset.",
+  "PowerShell 7.5 (.NET 9): System.Net.ServerSentEvents (SseParser/SseFormatter) in the shared framework; Base64Url; X509CertificateLoader; web cmdlets otherwise unchanged (-OutFile/-Resume fixes).",
+  "PowerShell 7.6 LTS (.NET 10): current LTS; web cmdlets only gained debug/verbose logging improvements; no SSE-related parameters. Recommended minimum for 'full in-box' experience: 7.5+; SDK should still support 7.4 by bundling an SSE parser.",
+  "PowerShell 7.7 preview (.NET 11 preview): Invoke-WebRequest parameter set identical to 7.6 (still no SSE/-SseTimeout parameter); experimental PSLoadAssemblyFromNativeCode — irrelevant to HTTP.",
+  "Windows PowerShell 5.1 (.NET Framework 4.x, Windows only): HttpListener present (http.sys); HttpClient present (HttpClientHandler over WinHTTP, no SocketsHttpHandler, no ConnectTimeout, HTTP/1.1 only), ResponseHeadersRead works but no CancellationToken overloads on Stream.ReadAsync line readers, no ServerSentEvents, no HashData/GetBytes static, no Base64Url, no Span; TLS 1.2 may need [Net.ServicePointManager]::SecurityProtocol; Invoke-WebRequest uses HttpWebRequest + IE parsing (-UseBasicParsing), lacks -SkipCertificateCheck, -SkipHttpErrorCheck, -Authentication/-Token, -OperationTimeoutSeconds, env-var proxies; ConvertFrom-Json lacks -AsHashtable/-Depth; Add-Type is C# 5 (CodeDom); no ForEach-Object -Parallel/ThreadJob in box. Conclusion: exclude 5.1 from the HTTP transport (and probably the whole SDK); if a 5.1 client is ever required it must be JSON-only with no streaming and reduced auth features.",
+  "Cross-version pitfalls: ConvertTo-Json default -Depth 2 truncates nested JSON-RPC params in all versions (always pass -Depth 100 -Compress); ConvertFrom-Json numbers arrive as Int64/Double (JSON-RPC ids that are large integers need care); Start-Process URL launching behaves differently per OS (ShellExecute vs xdg-open/open)."
+ ],
+ "open_questions": [
+  "Windows http.sys: confirm that a non-elevated pwsh can add prefixes http://127.0.0.1:{port}/ and http://localhost:{port}/ without `netsh http add urlacl` (widely reported but not verified here), and that `http://+:{port}/` / `http://*:{port}/` fail with HttpListenerException 5 without a URL ACL.",
+  "Managed HttpListener (Linux/macOS): verify how a 'localhost' prefix resolves (Dns first address may be ::1 vs 127.0.0.1) and whether requests with a Host header that does not match a registered prefix are rejected (400) — needed for the loopback/DNS-rebinding story; verify that Write with SendChunked=true reaches the socket immediately (no internal buffering) and what exception surfaces when the client has disconnected.",
+  "Verify whether HttpListenerResponse.Headers.Add('WWW-Authenticate', ...) / AddHeader is permitted in .NET (WebHeaderCollection restricted-header rules for response context) on both Windows and managed listeners; if restricted, find the supported way to emit the 401 challenge.",
+  "Measure HttpListener behavior under many concurrent long-lived SSE responses (subscriptions/listen): thread-pool usage, managed listener backlog (Listen(500)), and whether GetContextAsync must be kept pipelined to avoid connection queuing.",
+  "Confirm .NET HttpHeaders parsing of WWW-Authenticate with multiple quoted, comma-separated auth-params yields one AuthenticationHeaderValue with the full Parameter string rather than splitting on commas; decide on a custom RFC 7235 parser regardless.",
+  "Confirm in each supported pwsh version that System.Net.Http.HttpClient body reads after SendAsync(ResponseHeadersRead) are indeed unaffected by HttpClient.Timeout (source reading indicates cts disposal in FinishSend) and that disposing HttpResponseMessage from another thread reliably aborts a pending ReadAsync.",
+  "Determine the Roslyn/C# language version available to Add-Type in pwsh 7.4/7.5/7.6/7.7 and whether a single precompiled netstandard2.0 helper DLL (built in CI) loads cleanly in all of them; decide on Add-Type fallback for environments without the DLL.",
+  "Validate that System.Net.ServerSentEvents NuGet (netstandard2.0) loads into pwsh 7.4 without conflicting with in-box System.Memory/System.Buffers versions, and that SseParser.Enumerate() from PowerShell can be interrupted by disposing the underlying stream.",
+  "Pode: verify whether a Pode route can take over the raw response stream to emit an SSE body for a POST (rather than Pode's connection-scoped SSE API), and whether Pode's runspace model can host the SDK's protocol layer; same feasibility check for PowerShell Universal (likely JSON-only).",
+  "Kestrel-in-pwsh: test loading Microsoft.AspNetCore.App assemblies from an installed ASP.NET Core runtime folder into a custom AssemblyLoadContext inside pwsh 7.6 and check for conflicts with pwsh's Microsoft.Extensions.* / System.Text.Json versions; decide whether to keep or drop the adapter.",
+  "Start-Process behavior for URLs on Linux/macOS in pwsh 7 (xdg-open/open delegation, BROWSER env var) and the correct headless fallback UX for the authorization code flow.",
+  "Windows http.sys and Origin: confirm whether http.sys itself rejects requests whose Host header mismatches the registered prefix (400 'Invalid Hostname') so the SDK's own Host validation is only needed on the managed listener.",
+  "Conformance: obtain the list of 2026-07-28 server/client HTTP scenarios via `npx @modelcontextprotocol/conformance list --server` (README says scenarios include tools-call-with-progress, resources-subscribe, sse-retry, server-stateless, auth/basic-dcr, auth/basic-metadata-var1) and map each to the HttpListener host and the client transport before implementation.",
+  "Decide the default Origin policy for a local server: allow absent Origin; allow-list exact origins; whether to accept 'null' Origin (file:// pages) — the spec only mandates 403 for present-and-invalid."
+ ]
+}

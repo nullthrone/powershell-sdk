@@ -1,0 +1,550 @@
+{
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/pages/specification__2026-07-28__basic__authorization__index.md (primary, read in full). Supplementary, read in full for the focus items PKCE / audience validation / PRM discovery: .../specification__2026-07-28__basic__authorization__authorization-server-discovery.md and .../specification__2026-07-28__basic__authorization__security-considerations.md. Delta sources: .../specification__2026-07-28__changelog.md (local), and the 2025-11-25 and 2025-06-18 authorization pages fetched read-only via curl from modelcontextprotocol.io. Conformance: conformance_README.md, conformance_SDK_INTEGRATION.md (local). Citations below use 'index Lnn' (index page line), 'disc Lnn' (discovery page), 'sec Lnn' (security-considerations page), 'changelog Lnn'.",
+ "summary": "The 2026-07-28 Authorization page defines transport-level (HTTP-only) OAuth 2.1 authorization; it is OPTIONAL, SHOULD be used on HTTP transports, SHOULD NOT on STDIO (index L19-25). Roles: MCP server = OAuth 2.1 resource server; MCP client = OAuth 2.1 client; authorization server (AS) is out of scope but must be discoverable (index L48-59). Servers MUST publish RFC 9728 Protected Resource Metadata (PRM) with >=1 authorization_servers and MUST expose it via WWW-Authenticate resource_metadata on 401 or a .well-known/oauth-protected-resource URI; clients MUST support both, must try RFC 8414 and OIDC discovery in a fixed order, and MUST validate issuer equality (index L74-82, disc L15-96). Client registration: CIMD SHOULD, pre-registration, DCR MAY (deprecated) (index L66-72, L94-97). Clients MUST use PKCE S256, MUST refuse if code_challenge_methods_supported is absent, MUST send RFC 8707 resource (canonical server URI) in authorization and token requests, MUST record the issuer and validate RFC 9207 iss per a four-row table before redeeming the code, MUST send Authorization: Bearer on every request and never in the query string. Servers MUST validate tokens per OAuth 2.1 §5.2, MUST enforce audience, MUST return 401 for invalid/expired tokens, 403 for insufficient scope (SHOULD carry WWW-Authenticate Bearer error=\"insufficient_scope\", scope, resource_metadata), 400 for malformed requests, MUST honor scope hierarchies, MUST NOT pass through tokens. Scope strategy: challenge scope is authoritative; fallback to PRM scopes_supported; step-up re-auth uses the union of previously requested and challenged scopes with retry limits. Refresh tokens: confidential storage, offline_access only via AS scopes_supported, never assumed. No JSON-RPC methods or MCP capabilities are defined by this page.",
+ "methods": [
+  {
+   "name": "HTTP: protected MCP request (bearer token)",
+   "direction": "client->server",
+   "capability_gate": "None. Authorization is transport-level; no MCP JSON-RPC capability (ClientCapabilities/ServerCapabilities) gates it (index L13-15, L19). Applies only to HTTP-based transports (index L21-23).",
+   "params": "HTTP request header `Authorization: Bearer <access-token>` (string, REQUIRED on every client->server HTTP request, index L264-271). Token MUST NOT appear in the URI query string (index L273). Only tokens issued by the MCP server's own AS may be sent (index L294). Body/method are the normal Streamable HTTP JSON-RPC payload (not defined on this page).",
+   "result": "HTTP 200 with normal MCP response if token valid (index L187-189); HTTP 401 if authorization required or token invalid/expired (index L291-292, L323); HTTP 403 for invalid scopes / insufficient permissions (index L324); HTTP 400 for malformed authorization request (index L325). No JSON-RPC-level resultType/CacheableResult/pagination aspects apply.",
+   "notes": "Client MUST be able to parse WWW-Authenticate and react to 401 (disc L51). Not a JSON-RPC method; listed because an SDK transport must implement it."
+  },
+  {
+   "name": "HTTP: 401 Unauthorized challenge",
+   "direction": "server->client",
+   "capability_gate": "None (transport-level).",
+   "params": "Response status 401. Header `WWW-Authenticate: Bearer` with parameters: `resource_metadata=\"<PRM URI>\"` (string URI; one of the two MUST-implement discovery mechanisms, disc L41-43, RFC 9728 §5.1); `scope=\"<space-separated scopes>\"` (string, SHOULD be included, index L101-105; may be any relation to scopes_supported, index L107-109); RFC 6750 `error`/`error_description` are permitted by reference to RFC 6750 §3 (index L101-102) but the page enumerates only resource_metadata and scope for 401. Example: `WWW-Authenticate: Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource\", scope=\"files:read\"` (index L120-124).",
+   "result": "Client extracts resource_metadata URL (index L154), fetches PRM, applies scope selection strategy (index L128-131).",
+   "notes": "If the server chooses the well-known-URI mechanism instead, a 401 without resource_metadata is allowed and the client MUST fall back to constructing well-known URIs (disc L45-49)."
+  },
+  {
+   "name": "HTTP: 403 insufficient_scope challenge",
+   "direction": "server->client",
+   "capability_gate": "None (transport-level).",
+   "params": "Response status 403 (SHOULD, RFC 6750 §3.1) with `WWW-Authenticate: Bearer` parameters: `error=\"insufficient_scope\"` (string constant), `scope=\"required_scope1 required_scope2\"` (string, minimum scopes needed for the operation; SHOULD contain ALL scopes needed for the current operation in a single challenge; previously granted scopes need not be repeated), `resource_metadata=\"<PRM URI>\"` (string, for consistency with 401), `error_description=\"...\"` (string, optional, human-readable) (index L336-344, L346-361). Example index L373-379.",
+   "result": "Client SHOULD run the step-up flow: union(previously requested scopes, challenge scopes) -> re-authorize -> retry a bounded number of times (index L381-404).",
+   "notes": "Server MUST account for scope hierarchies when judging sufficiency (index L406-407). Server SHOULD NOT include `offline_access` in challenge scope (index L313-315)."
+  },
+  {
+   "name": "HTTP: GET Protected Resource Metadata (RFC 9728)",
+   "direction": "client->server",
+   "capability_gate": "None. Server MUST implement RFC 9728 (index L74, disc L15).",
+   "params": "GET to (a) the `resource_metadata` URI from WWW-Authenticate if present, else (b) `<origin>/.well-known/oauth-protected-resource<mcp-endpoint-path>` then (c) `<origin>/.well-known/oauth-protected-resource`, in that order (disc L43-49). No request parameters defined by MCP.",
+   "result": "JSON document per RFC 9728. Fields named by the MCP pages: `authorization_servers` (array of issuer URL strings, REQUIRED, >=1 entry, disc L16-17); `scopes_supported` (array of strings, OPTIONAL, used as fallback scope set and 'intended to represent the minimal set of scopes necessary for basic functionality', index L131-136; MUST NOT assume relation to challenge scopes, index L109); `resource` (the canonical resource identifier the client's RFC 8707 `resource` parameter aligns with, index L228-230). All other RFC 9728 fields are not enumerated by the MCP page.",
+   "notes": "Client selects the AS when several are listed (RFC 9728 §7.6, disc L23-27) and MUST keep separate registration state per AS (disc L32-35)."
+  },
+  {
+   "name": "HTTP: GET Authorization Server Metadata (RFC 8414 / OIDC Discovery)",
+   "direction": "client->server",
+   "capability_gate": "None. Client MUST support both RFC 8414 and OIDC Discovery (index L82); AS MUST offer at least one (index L77-80).",
+   "params": "For issuer with path (https://auth.example.com/tenant1) try in order: 1) https://auth.example.com/.well-known/oauth-authorization-server/tenant1, 2) https://auth.example.com/.well-known/openid-configuration/tenant1, 3) https://auth.example.com/tenant1/.well-known/openid-configuration. For issuer without path: 1) https://auth.example.com/.well-known/oauth-authorization-server, 2) https://auth.example.com/.well-known/openid-configuration (disc L77-95). Suffix is the default `oauth-authorization-server`; MCP defines no app-specific suffix (disc L59-63).",
+   "result": "JSON metadata. Fields named by the MCP pages: `issuer` (string, MUST be identical to the issuer identifier used to build the URL, else MUST NOT use the document, disc L96; recorded for RFC 9207 validation, index L194); `code_challenge_methods_supported` (array of strings; if ABSENT the client MUST refuse to proceed, for both RFC 8414 and OIDC documents, sec L56-60); `authorization_response_iss_parameter_supported` (boolean, optional; true means the AS emits iss and the client MUST reject responses lacking iss, index L196, L200-205); `scopes_supported` (array of strings; `offline_access` MAY be requested only if listed here, index L310); `client_id_metadata_document_supported` (boolean, referenced by the client-registration page, not defined on the index page). Endpoint URL fields (authorization_endpoint, token_endpoint, registration_endpoint) are RFC 8414 fields and are not enumerated on these pages.",
+   "notes": "Direction is client -> authorization server (a third party), listed as client->server for schema purposes."
+  },
+  {
+   "name": "OAuth: Authorization request (browser redirect)",
+   "direction": "client->server",
+   "capability_gate": "None. Client MUST have obtained a client_id via CIMD, pre-registration or DCR first (index L94-97).",
+   "params": "Parameters named by the MCP pages: `resource` (string, REQUIRED, canonical MCP server URI, e.g. resource=https%3A%2F%2Fmcp.example.com, index L219-254); `code_challenge` (PKCE, REQUIRED, index L178-179, sec L51) with method `S256` (sec L54; parameter name `code_challenge_method` comes from RFC 7636/OAuth 2.1, not spelled on the page); `scope` (string, per scope selection strategy; OMIT if no challenge scope and no scopes_supported, index L128-131; MAY add `offline_access`, index L310); `state` (SHOULD be used and verified, sec L76-77); `client_id` (HTTPS URL for CIMD, index L166-167); `redirect_uri` (MUST be registered; MUST be localhost or HTTPS, sec L44, L72). Standard OAuth parameters such as response_type=code are not enumerated on the MCP pages.",
+   "result": "Authorization response delivered to the redirect URI (see next entry).",
+   "notes": "Before redirecting, client MUST record the validated `issuer` in the same per-request record as the PKCE code_verifier and state (index L194)."
+  },
+  {
+   "name": "OAuth: Authorization response (redirect callback)",
+   "direction": "server->client",
+   "capability_gate": "None.",
+   "params": "`application/x-www-form-urlencoded` query parameters (index L213): authorization `code` (index L182-183); `iss` (string, AS SHOULD include, also on error responses, index L196); `state` (echoed; client SHOULD discard mismatches, sec L76-77); error responses: `error`, `error_description`, `error_uri` (index L215).",
+   "result": "Client MUST apply the RFC 9207 §2.4 table before sending the code to any token endpoint: iss_supported=true & iss present -> simple string compare to recorded issuer; true & absent -> REJECT; false/absent & present -> compare; false/absent & absent -> proceed (index L198-205). No case folding, default-port elision, trailing-slash or percent-encoding normalization before comparison (index L213). On mismatch MUST NOT act on or display error/error_description/error_uri (index L215).",
+   "notes": "Future revision expected to upgrade AS iss inclusion to MUST (index L211)."
+  },
+  {
+   "name": "OAuth: Token request (authorization_code / refresh_token)",
+   "direction": "client->server",
+   "capability_gate": "None.",
+   "params": "Parameters named by the MCP pages: `code_verifier` (PKCE, index L185); `resource` (REQUIRED, same canonical URI as in the authorization request, index L222); `scope` (MAY include `offline_access` when in AS scopes_supported, index L310). Refresh: client SHOULD declare `refresh_token` in its `grant_types` client metadata (index L309). grant_type/code/redirect_uri/refresh_token parameter names are OAuth 2.1 standard and not enumerated on the page.",
+   "result": "Access token (+ optional refresh token) (index L186). Client MUST NOT assume a refresh token is issued (index L311). Token response field names (access_token, token_type, expires_in, refresh_token, scope) are not enumerated on the page.",
+   "notes": "Client MUST keep refresh tokens confidential in transit and storage (index L308). AS MUST rotate refresh tokens for public clients (sec L35)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementations using an HTTP-based transport conform to this authorization specification.",
+   "cite": "index L21 (Protocol Requirements)"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "Implementations using STDIO transport follow this specification; they retrieve credentials from the environment instead.",
+   "cite": "index L22-23"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementations using alternative transports follow established security best practices for their protocol.",
+   "cite": "index L24-25"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Authorization servers implement OAuth 2.1 with appropriate security measures for confidential and public clients (AS is out of MCP scope; relevant if the SDK ships an AS helper).",
+   "cite": "index L63-64 (Overview 1)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Support OAuth Client ID Metadata Documents (draft-ietf-oauth-client-id-metadata-document-00).",
+   "cite": "index L66-67 (Overview 2)"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Support OAuth 2.0 Dynamic Client Registration (RFC 7591); DCR is deprecated and retained only for AS that lack CIMD support.",
+   "cite": "index L69-72 (Overview 3); changelog L95-101"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement OAuth 2.0 Protected Resource Metadata (RFC 9728).",
+   "cite": "index L74 (Overview 4); disc L15-16"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use OAuth 2.0 Protected Resource Metadata for authorization server discovery.",
+   "cite": "index L75 (Overview 4)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Support both AS metadata discovery mechanisms (RFC 8414 and OpenID Connect Discovery 1.0).",
+   "cite": "index L77-82 (Overview 5)"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Follow the normative discovery requirements of the Authorization Server Discovery page.",
+   "cite": "index L88-90"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Obtain a client ID via CIMD, pre-registration or DCR (per the Client Registration page's selection priority) before initiating the authorization flow.",
+   "cite": "index L94-97"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include a `scope` parameter in the WWW-Authenticate header (RFC 6750 §3) indicating the scopes required to access the resource.",
+   "cite": "index L101-105 (Scope Selection Strategy)"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Challenge scopes may equal, be a subset, superset, or an unrelated collection relative to `scopes_supported`.",
+   "cite": "index L107-109"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Assume any particular set relationship between the challenged scope set and `scopes_supported`.",
+   "cite": "index L109-110"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat the scopes provided in the WWW-Authenticate challenge as authoritative for the current operation.",
+   "cite": "index L110-112"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "When re-authorizing, include the challenge scopes alongside previously granted scopes to avoid losing permissions needed for other operations.",
+   "cite": "index L112-114"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Strive for consistency in how scope sets are constructed; not required to surface every dynamically issued scope via `scopes_supported`.",
+   "cite": "index L114-116"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Follow least privilege: request only scopes necessary for intended operations.",
+   "cite": "index L126-127"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Initial scope selection priority: (1) `scope` from the initial 401 WWW-Authenticate header; (2) else all `scopes_supported` from PRM; omit the `scope` parameter entirely if `scopes_supported` is undefined.",
+   "cite": "index L128-131"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Before redirecting the user-agent, record the `issuer` value from the selected AS's validated metadata and associate it with the same per-request record as the PKCE code verifier (and `state`, if used).",
+   "cite": "index L194 (Authorization Response Validation)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Authorization servers include the `iss` parameter in authorization responses, including error responses (RFC 9207 §2).",
+   "cite": "index L196"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Authorization servers that include `iss` advertise `authorization_response_iss_parameter_supported: true` in metadata.",
+   "cite": "index L196"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Apply RFC 9207 §2.4 validation before transmitting the authorization code to any token endpoint: if metadata says supported=true and iss absent -> reject; if iss present (regardless of metadata) -> simple string comparison against recorded issuer; if supported false/absent and iss absent -> proceed.",
+   "cite": "index L198-209 (table)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Apply scheme/host case folding, default-port elision, trailing-slash or percent-encoding normalization to the decoded `iss` value before comparison.",
+   "cite": "index L213"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "On `iss` mismatch, act on or display `error`, `error_description`, or `error_uri` from an error authorization response.",
+   "cite": "index L215"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Implement Resource Indicators (RFC 8707); the `resource` parameter MUST be in both authorization and token requests, MUST identify the target MCP server, and MUST use the server's canonical URI.",
+   "cite": "index L219-224 (Resource Parameter Implementation)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Provide the most specific URI possible for the MCP server as the `resource` value.",
+   "cite": "index L232"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Accept uppercase scheme and host components in resource URIs for robustness, even though canonical form is lowercase.",
+   "cite": "index L232"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Consistently use the canonical URI form without a trailing slash unless the slash is semantically significant. Canonical URI MUST have a scheme and MUST NOT contain a fragment (examples of invalid: `mcp.example.com`, `https://mcp.example.com#fragment`).",
+   "cite": "index L234-246"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Send the `resource` parameter regardless of whether the AS supports it.",
+   "cite": "index L254"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use the `Authorization: Bearer <access-token>` request header (OAuth 2.1 §5.1.1) and include it in EVERY HTTP request from client to server.",
+   "cite": "index L264-271 (Token Requirements)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Include access tokens in the URI query string.",
+   "cite": "index L273"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate access tokens as described in OAuth 2.1 §5.2 before processing the request.",
+   "cite": "index L285-286; sec L121-123"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate that access tokens were issued specifically for this server as the intended audience (RFC 8707 §2); reject tokens that do not include the server in the audience claim or otherwise fail to prove the server is the intended recipient.",
+   "cite": "index L287-288; sec L21, L125"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On token validation failure respond per OAuth 2.1 §5.3; invalid or expired tokens receive HTTP 401.",
+   "cite": "index L289-292"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Send tokens to the MCP server other than ones issued by that MCP server's authorization server.",
+   "cite": "index L294"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Only accept tokens valid for use with the server's own resources.",
+   "cite": "index L296-297"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Accept or transit (pass through) any other tokens; when calling upstream APIs use a separate token issued by the upstream AS, never the token received from the MCP client.",
+   "cite": "index L299; sec L127"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Keep refresh tokens confidential in transit and storage (OAuth 2.1 §4.3).",
+   "cite": "index L308 (Refresh Tokens)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Include `refresh_token` in the `grant_types` client metadata when refresh tokens are desired.",
+   "cite": "index L309"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Add `offline_access` to the `scope` parameter of authorization and token requests only when the AS metadata lists it in `scopes_supported`.",
+   "cite": "index L310"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Assume refresh tokens will be issued; the AS retains discretion.",
+   "cite": "index L311"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Include `offline_access` in WWW-Authenticate `scope` or in PRM `scopes_supported`.",
+   "cite": "index L313-315"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return appropriate HTTP status codes for authorization errors: 401 (authorization required or token invalid), 403 (invalid scopes / insufficient permissions), 400 (malformed authorization request).",
+   "cite": "index L319-325 (Error Handling)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "On insufficient scope at runtime respond 403 with `WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"...\", resource_metadata=\"...\"` and optional `error_description`.",
+   "cite": "index L336-344"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include the scopes needed to satisfy the current operation in `scope`; previously granted scopes need not be included.",
+   "cite": "index L346-352"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include ALL scopes required for the current operation in a single challenge rather than challenging incrementally.",
+   "cite": "index L354-361"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Be consistent in scope inclusion strategy and consider user-experience impact of scope choices.",
+   "cite": "index L363-366"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Respond to scope-related errors (initial or runtime `insufficient_scope`) by requesting a new token with increased scopes via step-up authorization, or handle the error otherwise appropriately; clients acting on behalf of a user SHOULD attempt step-up.",
+   "cite": "index L383-385 (Step-Up Authorization Flow)"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients acting on their own behalf (`client_credentials`) attempt step-up or abort immediately.",
+   "cite": "index L385-386"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Step-up flow: parse error info from AS response or WWW-Authenticate; determine required scopes as the UNION of previously requested scopes and the current challenge's scopes (scope accumulation is a client responsibility); re-authorize with that set; retry the original request no more than a few times, then treat as permanent authorization failure.",
+   "cite": "index L368-369, L388-401"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Also consult the Scope Selection Strategy for initial scope selection during step-up.",
+   "cite": "index L397-399"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Implement retry limits and track scope-upgrade attempts per resource+operation combination to avoid repeated failures.",
+   "cite": "index L403-404"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Account for scope hierarchies (a broader scope implies narrower ones) when deciding whether a token is sufficient.",
+   "cite": "index L406-407"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Follow the normative Security Considerations page (audience binding, token theft, communication security, authorization code protection, mix-up, confused deputy, open redirection, CIMD security).",
+   "cite": "index L411-415"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "PRM document includes `authorization_servers` with at least one authorization server.",
+   "cite": "disc L15-17"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Maintain separate registration state (client credentials, tokens) per authorization server; MUST NOT assume credentials valid for one AS are accepted by another.",
+   "cite": "disc L29-35"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement at least one PRM discovery mechanism: `resource_metadata` in WWW-Authenticate on 401, or serve PRM at `/.well-known/oauth-protected-resource[<endpoint path>]` or root.",
+   "cite": "disc L41-47"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Support both PRM discovery mechanisms: use the WWW-Authenticate `resource_metadata` URL when present, otherwise fall back to the path-suffixed well-known URI then the root well-known URI, in that order.",
+   "cite": "disc L49"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Be able to parse WWW-Authenticate headers and respond appropriately to HTTP 401 responses.",
+   "cite": "disc L51"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Attempt multiple AS metadata well-known endpoints in the specified priority order (path-insertion RFC 8414, path-insertion OIDC, path-appending OIDC; or RFC 8414 then OIDC for path-less issuers).",
+   "cite": "disc L66-95"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Validate AS metadata: `issuer` MUST be identical to the issuer identifier used to build the well-known URL; otherwise MUST NOT use the metadata.",
+   "cite": "disc L96"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implement secure token storage and follow OAuth 2.1 §7.1 best practices.",
+   "cite": "sec L31-32"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "All AS endpoints served over HTTPS; all redirect URIs either `localhost` or HTTPS (OAuth 2.1 §1.5).",
+   "cite": "sec L39-44"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Implement PKCE (OAuth 2.1 §7.5.2) and verify PKCE support before proceeding with authorization.",
+   "cite": "sec L51"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use the `S256` code challenge method when technically capable.",
+   "cite": "sec L54"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Refuse to proceed if `code_challenge_methods_supported` is absent from AS metadata (both RFC 8414 and OIDC Discovery documents).",
+   "cite": "sec L56-60"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Have redirect URIs registered with the authorization server.",
+   "cite": "sec L72"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Use and verify `state` in the authorization code flow; discard results lacking or mismatching the original state.",
+   "cite": "sec L76-77"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP proxy servers using static client IDs obtain user consent for each dynamically registered client before forwarding to third-party AS.",
+   "cite": "sec L113-115"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate access tokens before processing and ensure no data is returned to unauthorized parties.",
+   "cite": "sec L121"
+  }
+ ],
+ "wire_details": [
+  "Header (client->server, every request): `Authorization: Bearer <access-token>` (index L264-271). Never in query string (index L273).",
+  "Header (server->client) on 401: `WWW-Authenticate: Bearer resource_metadata=\"<uri>\", scope=\"<space-separated>\"` (index L120-124; disc L43). Parameter names: `resource_metadata`, `scope`.",
+  "Header (server->client) on 403: `WWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"<space-separated>\", resource_metadata=\"<uri>\", error_description=\"<text>\"` (index L373-379). Constant: `error=\"insufficient_scope\"`.",
+  "HTTP status codes: 401 Unauthorized (authorization required / token invalid or expired), 403 Forbidden (invalid scopes / insufficient permissions), 400 Bad Request (malformed authorization request) (index L319-325).",
+  "Well-known URIs (PRM): `/.well-known/oauth-protected-resource` (root) and `/.well-known/oauth-protected-resource<mcp-endpoint-path>` e.g. https://example.com/.well-known/oauth-protected-resource/public/mcp (disc L45-47).",
+  "Well-known URIs (AS): `/.well-known/oauth-authorization-server[/<issuer-path>]`, `/.well-known/openid-configuration[/<issuer-path>]`, `<issuer-path>/.well-known/openid-configuration` (disc L81-95).",
+  "PRM JSON fields used: `authorization_servers` (required, >=1), `scopes_supported` (optional), `resource` (disc L16-17; index L131, L228-230).",
+  "AS metadata JSON fields used: `issuer` (must match), `code_challenge_methods_supported` (must be present), `authorization_response_iss_parameter_supported` (boolean), `scopes_supported`; client-registration page adds `client_id_metadata_document_supported` (disc L96; sec L58-60; index L196, L310).",
+  "OAuth parameters: `resource` (RFC 8707; form-encoded, e.g. `&resource=https%3A%2F%2Fmcp.example.com`, index L248-252), `code_challenge`/`code_verifier` (PKCE), method constant `S256` (sec L54), `scope`, `state`, `iss` (RFC 9207), `offline_access` scope value (index L310), `refresh_token` grant type value in `grant_types` client metadata (index L309), `client_credentials` grant reference (index L385).",
+  "Authorization response encoding: `application/x-www-form-urlencoded` (index L213). `iss` comparison: simple string comparison RFC 3986 §6.2.1, no normalization (index L202-204, L213).",
+  "Canonical resource URI rules: absolute URI with scheme, lowercase scheme/host canonical (accept uppercase), no fragment, prefer no trailing slash; may include port and path (index L226-246).",
+  "Communication security: AS endpoints HTTPS only; redirect URIs `localhost` or HTTPS (sec L43-44).",
+  "No JSON-RPC error codes, `_meta` keys or MIME types are defined by the authorization page; authorization failures are pure HTTP-level."
+ ],
+ "sdk_implications": [
+  "Client transport (Streamable HTTP): pluggable auth provider hook that injects `Authorization: Bearer` on every request (POST and any long-lived stream request), refuses to place tokens in query strings, and intercepts 401/403 responses before surfacing them as transport errors (index L264-273, L319-325).",
+  "Client: a WWW-Authenticate parser (RFC 6750 / RFC 9110 auth-param syntax, quoted strings, multiple challenges) extracting scheme `Bearer`, `resource_metadata`, `scope`, `error`, `error_description` (disc L51; index L336-344).",
+  "Client: PRM discovery with the exact fallback order (header URL -> path-suffixed well-known -> root well-known), JSON validation requiring non-empty `authorization_servers`, AS selection hook when several are listed, and per-issuer keyed storage of client credentials and tokens (disc L15-49).",
+  "Client: AS metadata discovery trying RFC 8414 and OIDC endpoints in the mandated order, with `issuer` equality check (reject on mismatch) and hard refusal when `code_challenge_methods_supported` is absent (disc L66-96; sec L56-60).",
+  "Client: PKCE generation (code_verifier, S256 challenge) and a per-authorization-request record holding code_verifier, state and the recorded issuer; RFC 9207 iss validation implementing the four-row table with strict string comparison before token exchange, and suppression of error/error_description/error_uri on mismatch (index L194-215; sec L51-54).",
+  "Client: RFC 8707 `resource` parameter builder producing the canonical server URI (scheme+host lowercase, optional port/path, no fragment, no trailing slash) and always sent in both authorization and token requests, even if the AS ignores it (index L219-254).",
+  "Client: scope strategy engine: initial scope = challenge scope else PRM scopes_supported else omit; step-up computes union(previously requested, challenged) and re-authorizes; bounded retries and per (resource, operation) attempt tracking; optional `offline_access` only when AS scopes_supported lists it (index L99-136, L381-404, L310).",
+  "Client: client registration abstraction with three strategies (CIMD hosted HTTPS URL client_id, static pre-registered credentials, deprecated DCR with `grant_types` including `refresh_token` and `application_type`), following the client-registration page's priority (index L66-72, L94-97, L309; changelog L44-50, L95-101).",
+  "Client: secure token store abstraction (refresh tokens confidential at rest; e.g. SecretManagement/DPAPI on Windows, keychain elsewhere) and a redirect-URI listener restricted to `localhost` or HTTPS with `state` verification (index L308; sec L31-32, L44, L72-77).",
+  "Server: bearer-token middleware for the HTTP transport that validates tokens per OAuth 2.1 §5.2 including audience binding to the server's canonical resource URI, returns 401 for missing/invalid/expired tokens with `WWW-Authenticate: Bearer resource_metadata=..., scope=...`, 403 with `error=\"insufficient_scope\"` plus full required-scope list in one challenge, 400 for malformed requests, and never forwards the inbound token upstream (index L285-299, L319-379; sec L121-127).",
+  "Server: PRM endpoint helper serving `/.well-known/oauth-protected-resource[/path]` JSON with `authorization_servers`, `resource`, optional `scopes_supported` (excluding `offline_access`), plus configuration of which discovery mechanism(s) to expose (disc L41-47; index L313-315).",
+  "Server: scope-check helper supporting scope hierarchies (broader implies narrower) and a stable, consistent challenge-scope computation per operation (index L354-366, L406-407).",
+  "Both: STDIO transport must NOT engage this flow; credentials come from the environment (index L22-23). Authorization must be opt-in/optional (index L19).",
+  "Conformance: the client suite `auth` (scenarios `auth/basic-dcr`, `auth/basic-metadata-var1`, extension `auth/client-credentials-jwt`, `auth/dpop`) drives the client via `MCP_CONFORMANCE_SCENARIO` and `MCP_CONFORMANCE_CONTEXT` env vars with the server URL as last CLI argument; the PowerShell client entrypoint must read these (conformance_README.md L318-326, L455-470; conformance_SDK_INTEGRATION.md L32-41, L79)."
+ ],
+ "legacy_delta": [
+  "NEW in 2026-07-28: RFC 9207 'Authorization Response Validation' section (record issuer, iss validation table, no-normalization rule, error suppression on mismatch); AS SHOULD emit `iss` and MUST advertise `authorization_response_iss_parameter_supported` (index L192-215; changelog L40-43, SEP-2468). Absent in 2025-11-25 and 2025-06-18 (verified: 2025-11-25 page has no 'iss'/'9207' lines). RFC 9207 added to the Standards Compliance list.",
+  "NEW in 2026-07-28: Dynamic Client Registration is Deprecated (changelog L95-101, PR #2858); Overview item 3 now says 'MAY ... deprecated and retained for backwards compatibility'. 2025-11-25: CIMD SHOULD + DCR MAY (not deprecated). 2025-06-18: DCR SHOULD, no CIMD at all (2025-06-18 L60).",
+  "NEW in 2026-07-28: 'Refresh Tokens' section (confidential storage MUST, `refresh_token` in grant_types SHOULD, `offline_access` MAY only if in AS scopes_supported, MUST NOT assume issuance; servers SHOULD NOT advertise `offline_access`) (index L301-315). Not present in 2025-11-25 or 2025-06-18.",
+  "NEW in 2026-07-28: 'Servers MUST account for scope hierarchies' (index L406-407) and 'servers SHOULD include all scopes required for the current operation in a single challenge' (index L354-361). 2025-11-25 instead listed Minimum/Recommended/Extended server scope-inclusion approaches (2025-11-25 L523-527), now removed; 2025-11-25 said scope includes previously granted scopes to avoid loss, 2026-07-28 says servers 'are not required to include the client's previously granted scopes' and moves accumulation to the client (index L346-352, L368-369).",
+  "CHANGED in 2026-07-28: step-up flow step 2 now mandates union(previously requested scopes, challenge scopes); 2025-11-25 step 2 merely said 'Determine required scopes as outlined in Scope Selection Strategy' (2025-11-25 L554). Clients also now 'MUST treat challenge scopes as authoritative for the current operation' and 'SHOULD include these scopes alongside previously granted scopes when re-authorizing' (index L110-114); 2025-11-25 wording was 'authoritative for satisfying the current request' with no re-authorization clause.",
+  "CHANGED in 2026-07-28: Page split into sub-pages (authorization-server-discovery, client-registration, security-considerations); in 2025-11-25 and 2025-06-18 all of this was a single page. Security best practices moved from /specification/<rev>/basic/security_best_practices to /docs/2026-07-28/tutorials/security/security_best_practices.",
+  "CHANGED in 2026-07-28 (client-registration page, per changelog L44-50): clients MUST specify `application_type` in DCR (SEP-837) and MUST key persisted credentials by issuer, MUST NOT reuse across AS, MUST re-register when the AS changes (SEP-2352); discovery page now states per-AS separate registration state (disc L29-37). Not in 2025-11-25.",
+  "UNCHANGED across 2025-06-18 / 2025-11-25 / 2026-07-28: RFC 8707 `resource` MUST in both requests with canonical URI; Bearer header on every request, never in query; server MUST validate audience and return 401 on invalid/expired; MUST NOT pass through tokens; PKCE MUST; HTTPS/localhost redirect rules; 401/403/400 table.",
+  "2025-06-18 vs later: 2025-06-18 required WWW-Authenticate with resource_metadata on 401 as the ONLY PRM discovery mechanism (2025-06-18 L89) and only RFC 8414 AS metadata (L66-68, L96); 2025-11-25 added the well-known-URI alternative, OIDC discovery, the three-endpoint priority order, the Scope Selection Strategy, the 403 insufficient_scope / step-up sections, CIMD, and the explicit 'MUST verify PKCE support / code_challenge_methods_supported' rule (2025-06-18 L329 had PKCE MUST only). A dual-era client must therefore tolerate 2025-06-18 servers that never serve well-known PRM and 2025-06-18 AS that only publish RFC 8414 metadata, and 2025-11-25/2026-07-28 servers that omit resource_metadata from 401.",
+  "Wire-version interplay: authorization is independent of the JSON-RPC handshake change (stateless `_meta` in 2026-07-28 vs `initialize` in earlier revisions, changelog L14-18), but conformance runs auth scenarios once per revision on that revision's wire (conformance_README.md L132-145), so the auth layer must sit below the version-specific session layer."
+ ],
+ "open_questions": [
+  "The index page does not enumerate the RFC 8414 endpoint fields (authorization_endpoint, token_endpoint, registration_endpoint) nor token-response fields; the SDK must rely on the underlying RFCs. Confirm whether the client-registration page (assigned to another extraction) names `client_id_metadata_document_supported`, `application_type`, and DCR field requirements.",
+  "Whether 401 responses may carry RFC 6750 `error=\"invalid_token\"` / `error_description`: the page only shows `resource_metadata` and `scope` on 401 and references RFC 6750 §3; the server helper should emit them per RFC 6750 but this is not spelled out by MCP.",
+  "The scope-union rule in the step-up flow is described as a numbered step inside a SHOULD flow and referred to as 'the scope-union requirement' (index L369); its exact RFC 2119 level is ambiguous (treated here as SHOULD).",
+  "How a client should behave when PRM `scopes_supported` is undefined AND the 403 challenge omits `scope`: the page's fallback only covers the initial 401 case.",
+  "Canonical-URI computation for servers behind path-based routing / reverse proxies (which path component 'is necessary to identify the individual MCP server', index L239) is left to implementer judgment; the SDK needs a configurable resource URI.",
+  "The conformance requirement files (`requirements/<revision>.yaml`) listing which auth scenarios are required for 2026-07-28 are not in the local material; only scenario names `auth/basic-dcr`, `auth/basic-metadata-var1`, `auth/client-credentials-jwt`, `auth/dpop` (extension) are visible.",
+  "AS-side requirements (OAuth 2.1, refresh-token rotation for public clients, CIMD SSRF/localhost warnings) are cited for completeness but the spec and conformance suite place AS implementation out of scope; decide whether the PowerShell SDK ships any AS/test-AS helper."
+ ]
+}

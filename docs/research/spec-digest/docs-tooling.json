@@ -1,0 +1,483 @@
+{
+ "legacy_delta": [
+  "Legacy: logging is session-scoped via `logging/setLevel` (sent once); server emits `notifications/message` at/above that level for the rest of the session. Modern (2026-07-28): `logging/setLevel` is REMOVED; client opts in per-request via `_meta[\"io.modelcontextprotocol/logLevel\"]`; logs for a request ride that request's SSE response stream; omitting the meta key means no logs (by design).",
+  "Legacy: resource subscriptions via `resources/subscribe`; updates via `notifications/resources/updated`. Modern: subscriptions via `subscriptions/listen` (filter: `resourceSubscriptions` + `resourcesListChanged` opt-in), confirmed via `notifications/subscriptions/acknowledged`; long-lived stream with reconnect by re-sending `subscriptions/listen`.",
+  "Legacy: Tasks gated on `capabilities.tasks`; `tasks/list` + `tasks/get` (poll) + blocking `tasks/result` to fetch payload; `tasks/cancel` to cancel. Modern: Tasks are an extension `io.modelcontextprotocol/tasks` (SEP-2663), gated on negotiated extension not capabilities; `tools/call` returns `CreateTaskResult` (`resultType: \"task\"`); no `tasks/list`; only `tasks/get` polling; completed task inlines result (`resultType: \"complete\"\", no blocking `tasks/result`); `input_required` state surfaces embedded elicitation, answered via `tasks/update` with `inputResponses`.",
+  "Modern-only: Multi-round tool results (MRTR) — a `tools/call` can return `input_required` embedding elicitation/sampling/roots-list; client answers and retries `tools/call` under a fresh JSON-RPC id until `complete`.",
+  "Legacy pattern `collect_elicitation` (server-to-client request via `server.elicitInput`) errors on a 2026-07-28 (modern) connection because server-to-client requests aren't allowed there; MRTR is the modern replacement.",
+  "Modern-only headers/errors: SEP-2243 `x-mcp-header` tool annotation causes Streamable HTTP client to mirror an argument into `Mcp-Param-*` request header; invalid header name (not RFC 9110 token) => tool MUST be dropped from `tools/list` by a conforming client. New JSON-RPC error codes for the modern era: `-32020` HeaderMismatch, `-32021` MissingRequiredClientCapability, `-32022` UnsupportedProtocolVersion (data.supported / data field lists server's supported versions), `-32601` Method not found (also present pre-2026 generically). `-32602` Invalid params also used, generic across eras but Inspector differentiates \"Unknown Tool\" vs \"Invalid Parameters\" presentation only in modern era UI (wire code identical both eras).",
+  "Legacy HTTP: server-assigned session id `Mcp-Session-Id` header; client tears down with HTTP `DELETE`. Modern: sessionless, per-request; no session id, so disconnect is purely local with no `DELETE`.",
+  "Deprecation: `notifications/message` (the whole legacy protocol-level logging mechanism) is deprecated as of protocol version 2026-07-28, remains available during a deprecation window; servers now expected to use per-request `_meta` opt-in logging or OpenTelemetry/stderr instead.",
+  "`server/discover` method and its response fields (`capabilities` incl. `extensions`, `instructions`, `supportedVersions`) and result `_meta` key `io.modelcontextprotocol/serverInfo` are new/modern-era additions used for protocol compatibility checks, replacing implicit legacy `initialize`-only negotiation."
+ ],
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "None documented in these pages beyond being a probe call (no args shown).",
+   "result": "capabilities (including extensions), instructions, supportedVersions; serverInfo (name/version) delivered in result _meta under key io.modelcontextprotocol/serverInfo.",
+   "capability_gate": "None required to call; used by clients before/instead of initialize to check protocol compatibility.",
+   "notes": "Debugging doc: 'Verify protocol compatibility: call server/discover to see which protocol versions the server supports.' Inspector protocol-eras doc: probed only when protocolEra is 'auto' (probe then fallback to initialize on non-modern outcome) or 'modern' (pinned to 2026-07-28, no fallback). Default era is 'legacy' which does plain initialize with no probing at all -- a debugging tool per the Note 'must not auto-probe'."
+  },
+  {
+   "name": "initialize",
+   "direction": "client->server",
+   "params": "Not detailed beyond generic JSON-RPC initialize; CLI --method initialize takes no companions.",
+   "result": "CLI table: {serverInfo, protocolVersion, capabilities, instructions} for a connect-only probe.",
+   "capability_gate": "None.",
+   "notes": "Used in legacy era as the sole connect-time negotiation (no discover probe)."
+  },
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "params": "None.",
+   "result": "list of tools; per SEP-2243, a tool with an invalid x-mcp-header annotation (not a valid RFC 9110 token) MUST be dropped from the list by a conforming client.",
+   "capability_gate": "None beyond tools capability presumably.",
+   "notes": "Inspector CLI --method tools/list; also --app-info variant emits NDJSON per tool reporting hasApp/resourceUri/csp/permissions without invoking tools."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "params": "tool name + arguments; CLI requires --tool-name plus --tool-arg (coerced via JSON parse) or --tool-args-json (verbatim, no coercion); mutually exclusive.",
+   "result": "Normal result, or in modern era a CreateTaskResult (resultType: 'task') when run as a background task, or an input_required MRTR result embedding elicitation/sampling/roots-list request.",
+   "capability_gate": "Task execution gated by capabilities.tasks (legacy) or negotiated extension io.modelcontextprotocol/tasks (modern, SEP-2663).",
+   "notes": "isError:true in result still causes CLI exit code 5. -32602 Invalid params returned for unknown tool name or invalid params (era-independent wire behavior; Inspector UI in modern era distinguishes Unknown Tool vs Invalid Parameters presentation)."
+  },
+  {
+   "name": "resources/list",
+   "direction": "client->server",
+   "params": "None.",
+   "result": "Not detailed beyond listing.",
+   "capability_gate": "resources capability.",
+   "notes": "CLI method, no companions required."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "--uri required in CLI.",
+   "result": "Not detailed.",
+   "capability_gate": "resources capability.",
+   "notes": ""
+  },
+  {
+   "name": "resources/templates/list",
+   "direction": "client->server",
+   "params": "None.",
+   "result": "Not detailed.",
+   "capability_gate": "resources capability.",
+   "notes": ""
+  },
+  {
+   "name": "resources/subscribe",
+   "direction": "client->server",
+   "params": "resource URI (legacy era).",
+   "result": "subscription established; later notifications/resources/updated pushed.",
+   "capability_gate": "Legacy-era only mechanism per protocol-eras page.",
+   "notes": "Superseded by subscriptions/listen in modern era."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server",
+   "params": "a filter object carrying resourceSubscriptions plus a resourcesListChanged opt-in flag.",
+   "result": "long-lived stream; confirmed via notifications/subscriptions/acknowledged notification.",
+   "capability_gate": "Modern era (2026-07-28) replacement for resources/subscribe.",
+   "notes": "Client reconnects by re-sending subscriptions/listen if stream drops."
+  },
+  {
+   "name": "prompts/list",
+   "direction": "client->server",
+   "params": "None.",
+   "result": "Not detailed.",
+   "capability_gate": "prompts capability.",
+   "notes": ""
+  },
+  {
+   "name": "prompts/get",
+   "direction": "client->server",
+   "params": "--prompt-name, --prompt-args in CLI.",
+   "result": "Not detailed.",
+   "capability_gate": "prompts capability.",
+   "notes": ""
+  },
+  {
+   "name": "logging/setLevel",
+   "direction": "client->server",
+   "params": "log level (--log-level in CLI).",
+   "result": "ack; sets session-scoped active level.",
+   "capability_gate": "Legacy era only; 'modern servers opt in per request instead' -- method is gone/unused in modern era.",
+   "notes": "CLI table explicitly: 'Legacy era only; modern servers opt in per request instead.'"
+  },
+  {
+   "name": "logging/tail",
+   "direction": "client->server",
+   "params": "Not detailed (stream-only).",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "CLI: 'Stream- or session-only methods (logging/tail, for example) are rejected [by the CLI], since a process that exits can't hold a stream open.'"
+  },
+  {
+   "name": "tasks/list",
+   "direction": "client->server",
+   "params": "None documented.",
+   "result": "list of task handles.",
+   "capability_gate": "Legacy era only (capabilities.tasks); no equivalent in modern era.",
+   "notes": "Modern era: 'there is no tasks/list, so Refresh re-polls the handles the client already knows about.'"
+  },
+  {
+   "name": "tasks/get",
+   "direction": "client->server",
+   "params": "task handle/id.",
+   "result": "task status/object; modern era full object shows resultType: 'complete' when done, inlined result.",
+   "capability_gate": "Legacy: capabilities.tasks. Modern: negotiated extension io.modelcontextprotocol/tasks (SEP-2663).",
+   "notes": "Used for polling in both eras; modern era is the only fetch mechanism (no tasks/result)."
+  },
+  {
+   "name": "tasks/result",
+   "direction": "client->server",
+   "params": "task handle/id.",
+   "result": "completed payload (blocking call).",
+   "capability_gate": "Legacy era only.",
+   "notes": "Modern era has no blocking tasks/result call; result is inlined in tasks/get."
+  },
+  {
+   "name": "tasks/cancel",
+   "direction": "client->server",
+   "params": "task handle/id.",
+   "result": "cancellation ack.",
+   "capability_gate": "Legacy era ('Cancel sends tasks/cancel').",
+   "notes": "Not explicitly restated for modern era in these pages."
+  },
+  {
+   "name": "tasks/update",
+   "direction": "client->server",
+   "params": "inputResponses (answers to an embedded elicitation) for a task in input_required state.",
+   "result": "next tasks/get poll completes.",
+   "capability_gate": "Modern era task extension (SEP-2663).",
+   "notes": ""
+  },
+  {
+   "name": "roots/list",
+   "direction": "server->client (embedded) / client-initiated in some contexts",
+   "params": "None documented beyond being invoked by server.filesystem example.",
+   "result": "list of client roots.",
+   "capability_gate": "roots client capability.",
+   "notes": "CLI note: '--method roots/set applies only to that one short-lived connection'; roots are otherwise only durably configurable via config file's roots field, advertised at connect. server-filesystem calls roots/list to learn allowed directories."
+  },
+  {
+   "name": "roots/set",
+   "direction": "client->server or CLI-local",
+   "params": "Not detailed.",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "CLI-only ephemeral method; 'there is no roots flag' and this applies only to that one short-lived connection -- config file is the only durable way to set roots."
+  },
+  {
+   "name": "servers/list",
+   "direction": "CLI-local (catalog read)",
+   "params": "None.",
+   "result": "list of servers in catalog, read without connecting.",
+   "capability_gate": "None (reads local catalog file only).",
+   "notes": "CLI-only convenience method, not a wire MCP method to a server."
+  },
+  {
+   "name": "servers/show",
+   "direction": "CLI-local (catalog read)",
+   "params": "--server <name>.",
+   "result": "server detail, with secret-bearing fields (env values, sensitive headers, OAuth client secrets) redacted; does NOT scrub credentials embedded in URL userinfo/query tokens or stdio args.",
+   "capability_gate": "None.",
+   "notes": "Warning: treat raw url and detail fields as sensitive before pasting into an issue/bug report."
+  },
+  {
+   "name": "notifications/message",
+   "direction": "notification s->c",
+   "params": "level, data, logger name presumably (per generic logging notification).",
+   "result": "N/A (notification, no response).",
+   "capability_gate": "Legacy: sent for any request once client opted in session-wide via logging/setLevel. Modern: sent only for requests that stamped _meta[\"io.modelcontextprotocol/logLevel\"]; server MUST NOT send it otherwise.",
+   "notes": "Deprecated as of 2026-07-28, remains available during deprecation window. Debugging doc: 'Servers must not send notifications/message for requests that omit this field' (the per-request _meta field)."
+  },
+  {
+   "name": "notifications/resources/updated",
+   "direction": "notification s->c",
+   "params": "resource URI presumably.",
+   "result": "N/A",
+   "capability_gate": "Legacy era resource subscription mechanism.",
+   "notes": "Triggers a 'last-updated' timestamp on the subscribed tile in Inspector UI."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "params": "Not detailed.",
+   "result": "N/A",
+   "capability_gate": "Modern era subscriptions/listen confirmation.",
+   "notes": ""
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Local MCP servers (stdio transport) must not log messages to stdout, as this will interfere with protocol operation.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Implementing logging > Server-side logging' (Warning block)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "All messages logged to stderr on stdio transport are captured by the host application automatically; this is the sanctioned logging channel for stdio servers.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Implementing logging > Server-side logging'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers must not send notifications/message for requests that omit the io.modelcontextprotocol/logLevel field in the request's _meta.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Implementing logging' (per-request log level paragraph)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "A server MUST NOT emit notifications/message for a request that did not opt in (modern era, per-request _meta stamping).",
+   "cite": "docs__2026-07-28__tools__inspector__protocol-eras.md, 'Logging > Modern' tab"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients should also include io.modelcontextprotocol/clientInfo in per-request _meta (in addition to the two required fields).",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Connection problems' step 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every request must carry io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities in _meta.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Connection problems' step 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A request missing either required _meta field (protocolVersion or clientCapabilities) is rejected with error -32602 (Invalid params).",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Connection problems' step 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If the server needs a client capability the request's clientCapabilities did not declare (e.g. elicitation), it returns MissingRequiredClientCapabilityError (-32021) naming the missing capabilities.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Connection problems' step 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "An UnsupportedProtocolVersionError (-32022) must list the server's supported protocol versions in its data field.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Connection problems' step 4"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A conforming client MUST drop a tool with an invalid x-mcp-header annotation (SEP-2243) from tools/list.",
+   "cite": "docs__2026-07-28__tools__inspector__protocol-eras.md, 'Tools: mirrored headers and excluded tools'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Server-to-client requests (e.g. legacy collect_elicitation pattern using server.elicitInput) are not allowed on a 2026-07-28 (modern) connection; such calls error.",
+   "cite": "docs__2026-07-28__tools__inspector__protocol-eras.md, 'Multi-round tool results (MRTR)' Note"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "On stdio, the working directory for servers launched via a client's config may be undefined (e.g. '/' on macOS); configurations must always use absolute paths in config and .env files for reliable operation.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Common issues > Working directory'"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "MCP servers launched over stdio inherit only a limited subset of environment variables automatically (platform-dependent); an explicit env key in client config is required to override/provide variables.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Common issues > Environment variables'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "For Streamable HTTP transport, servers should use their own server-side log aggregation or OpenTelemetry for logs, since stderr is not captured by the client; standard HTTP tooling should be used to inspect requests/SSE streams.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Implementing logging > Server-side logging' (Streamable HTTP paragraph)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Claude Desktop (example client) requires a full quit-and-reopen (not just closing the window) to pick up server code changes.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Debugging workflow > Testing changes'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Inspector launcher: passing more than one of --web/--cli/--tui fails with the exact message 'Specify at most one of --web, --cli, or --tui.'",
+   "cite": "docs__2026-07-28__tools__inspector.md, 'Launcher flags vs. client flags' and configuration.md launcher table"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Launcher mode flags (--web/--cli/--tui) must appear first on the command line; the first token not recognized as one of these ends launcher parsing and everything after is forwarded to the client unchanged.",
+   "cite": "docs__2026-07-28__tools__inspector.md, 'Launcher flags vs. client flags' Note"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Inspector CLI: --tool-arg and --tool-args-json are mutually exclusive.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Passing arguments'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Inspector CLI: on any non-zero exit, the CLI writes a single JSON line to stderr of shape {\"error\":{\"code\",\"message\",\"status\",\"url\"}}.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Exit codes and error envelopes'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Inspector CLI exit codes are fixed: 0 success, 1 usage/unexpected (catch-all), 2 no MCP App found (--app-info probe), 3 auth required (401/403, WWW-Authenticate, OAuth), 4 server unreachable (DNS/refused/timeout/fetch failed), 5 tool error (isError:true or tool not found).",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Exit codes and error envelopes' table"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A tools/call that returns isError:true still prints its payload but exits with code 5.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Exit codes and error envelopes'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "--app-info exit codes: tool with app exits 0, tool with no app exits 2, missing tool exits 5.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Probing MCP Apps'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "tools/list --app-info always emits NDJSON (one line per tool) regardless of --format; --format json only reshapes the single-tool tools/call --app-info output.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Probing MCP Apps' Note"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Without --use-stored-auth or --stored-auth-only, and with no TTY on stdin or stderr, the CLI fails fast with auth_required rather than hanging on an OAuth callback.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Authorization in scripts'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "--stored-auth-only should be used in CI: never starts interactive OAuth or step-up, never auto-opens a browser; uses stored tokens or fails immediately with auth_required.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Authorization in scripts'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "servers/show does not scrub credentials embedded in a server url (userinfo or query tokens) or in stdio args -- treat raw url/detail fields as sensitive.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Inspect a catalog without connecting' Warning"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Connections to remote HTTP/SSE servers honor HTTPS_PROXY/HTTP_PROXY (and lowercase forms) and NO_PROXY; no Inspector-specific flag needed; proxy agent loaded lazily.",
+   "cite": "docs__2026-07-28__tools__inspector__cli.md, 'Proxies'"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Web Inspector backend: never combine DANGEROUSLY_OMIT_AUTH and DANGEROUSLY_BIND_ALL_INTERFACES -- the backend spawns processes and holds OAuth tokens, so anyone reaching it can drive it.",
+   "cite": "docs__2026-07-28__tools__inspector__configuration.md, 'Web backend environment variables' Warning"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Binding a wildcard host (0.0.0.0, ::, or equivalent) requires the explicit opt-in DANGEROUSLY_BIND_ALL_INTERFACES.",
+   "cite": "docs__2026-07-28__tools__inspector__configuration.md, 'Web backend environment variables' table"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "OAuth callback URL for CLI/TUI must be a loopback host (127.0.0.1 or localhost); the local callback listener receives the auth code over plaintext http, so any other host is rejected and there is no flag to override this.",
+   "cite": "docs__2026-07-28__tools__inspector__configuration.md, 'CLI and TUI: OAuth client flags' table (--callback-url row)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "--catalog and --config are mutually exclusive and neither combines with an ad-hoc target; passing both is rejected identically by all three clients.",
+   "cite": "docs__2026-07-28__tools__inspector__configuration.md, 'Choosing servers > --catalog vs. --config'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A --config file is read-only: served as-is, never written, seeded, or migrated; a missing --config file errors (vs. --catalog which is created and seeded).",
+   "cite": "docs__2026-07-28__tools__inspector__configuration.md, table under '--catalog vs. --config'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Default Inspector protocolEra should be 'legacy' (plain initialize, no probing) because a debugging tool must not auto-probe; 'auto' or 'modern' are deliberate opt-ins.",
+   "cite": "docs__2026-07-28__tools__inspector__protocol-eras.md, 'The Protocol Era setting' Note"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP defines eight RFC 5424 severity levels (debug through emergency) for logging.",
+   "cite": "docs__2026-07-28__tools__debugging.md, 'Implementing logging' paragraph"
+  }
+ ],
+ "wire_details": [
+  "_meta key (request, client->server): io.modelcontextprotocol/logLevel -- per-request log level opt-in (modern era). Value presumably one of the 8 RFC 5424 levels.",
+  "_meta key (request, client->server, required): io.modelcontextprotocol/protocolVersion",
+  "_meta key (request, client->server, required): io.modelcontextprotocol/clientCapabilities",
+  "_meta key (request, client->server, should-include): io.modelcontextprotocol/clientInfo",
+  "_meta key (result, server->client): io.modelcontextprotocol/serverInfo -- name/version, delivered on server/discover response result _meta.",
+  "JSON-RPC error code -32602: Invalid params -- returned for a request missing required _meta fields, for unknown tool name ('Unknown Tool' panel in modern-era Inspector UI), and for other malformed inputs ('Invalid Parameters' panel).",
+  "JSON-RPC error code -32021: MissingRequiredClientCapabilityError -- returned when server needs a client capability absent from clientCapabilities; names missing capabilities. HTTP 400 in modern-era example (trigger_missing_capability tool).",
+  "JSON-RPC error code -32022: UnsupportedProtocolVersionError -- data field / data.supported lists server's supported protocol versions. HTTP 400 in modern-era example (trigger_unsupported_version tool).",
+  "JSON-RPC error code -32020: HeaderMismatch -- a required mirrored Mcp-Param-* header was missing or wrong (SEP-2243). HTTP 400 in modern-era example (trigger_header_mismatch tool). Note: Mcp-Param-* mirroring is skipped in browser/SDK environments (web Inspector client), so calling a mirrored tool from the web client omits the header and can trigger this against a strict server; CLI/TUI (Node) mirror correctly.",
+  "JSON-RPC error code -32601: Method not found -- HTTP 404 in modern-era example (trigger_method_not_found tool).",
+  "HTTP header: Mcp-Session-Id -- legacy Streamable HTTP server-assigned session id; client tears down session via HTTP DELETE. Not present/used in modern (sessionless, per-request) connections.",
+  "HTTP header family: Mcp-* -- standardized by the modern era per SEP-2243/SEP-2575; includes Mcp-Param-* (mirrored tool argument headers, e.g. city -> Mcp-Param-City) and Mcp-Session-Id.",
+  "HTTP status 401/403 with WWW-Authenticate header, or OAuth flow needed -- maps to Inspector CLI exit code 3 (auth_required).",
+  "CLI stderr JSON error envelope fields: error.code (string, e.g. \"auth_required\"), error.message, error.status (HTTP status, e.g. 401), error.url.",
+  "resultType enum values (Tasks / MRTR): \"task\" (CreateTaskResult from tools/call when run as background task), \"complete\" (final inlined task result), \"input_required\" (task or MRTR round awaiting more info, e.g. via tasks/update or a retried tools/call).",
+  "Extension identifier: io.modelcontextprotocol/tasks (SEP-2663) -- modern-era Tasks extension name, gates the Tasks feature via negotiated extensions rather than capabilities.tasks (legacy).",
+  "Tool annotation: x-mcp-header (SEP-2243) on a tool argument -- instructs Streamable HTTP client to mirror the argument value into a header named Mcp-Param-<Capitalized-Arg-Name>. Invalid header name (not a valid RFC 9110 token, e.g. containing a space) causes the tool to be excluded from tools/list.",
+  "Config/catalog JSON field: protocolEra, enum \"legacy\" | \"auto\" | \"modern\"; default \"legacy\".",
+  "Config/catalog JSON field: modernLogLevel, string level (e.g. \"debug\", \"info\", \"off\"); default \"debug\" per-server (Inspector opts into most verbose level by default since it's a debugging tool); \"off\" omits the logLevel _meta key entirely.",
+  "Config/catalog JSON server fields observed: type (\"stdio\"|\"http\"), command, args, env, url, headers, roots (array of {uri, name}), protocolEra, modernLogLevel.",
+  "Catalog default path: ~/.mcp-inspector/mcp.json (or MCP_CATALOG_PATH). CLI/TUI seed empty {\"mcpServers\": {}}; web backend seeds two sample stdio servers (filesystem-server-default via npx @modelcontextprotocol/server-filesystem /tmp; everything-server-default via npx @modelcontextprotocol/server-everything).",
+  "OAuth state file path: <MCP_STORAGE_DIR>/oauth.json; override via MCP_INSPECTOR_OAUTH_STATE_PATH (takes precedence over MCP_STORAGE_DIR).",
+  "Default OAuth callback URL: http://127.0.0.1:6276/oauth/callback (env override MCP_OAUTH_CALLBACK_URL / flag --callback-url), must remain loopback host.",
+  "Web backend default bind/ports: HOST default \"localhost\"; CLIENT_PORT default 6274; MCP_SANDBOX_PORT pins MCP Apps sandbox port (dynamic by default).",
+  "Web backend token env vars: MCP_INSPECTOR_API_TOKEN (pin session token), DANGEROUSLY_OMIT_AUTH (disable /api/* token check), ALLOWED_ORIGINS (comma-separated, replaces not merges default origin allow-list).",
+  "MCP_DEBUG / DEBUG env vars (launcher-level): append error stack to top-level failure; meaningful-value rule -- \"0\", \"false\", and empty string are treated as OFF.",
+  "MCP_AUTO_OPEN_ENABLED env var: \"true\" forces browser auto-open and allows OAuth prompts without a TTY; \"false\" never opens; unset opens only on a TTY.",
+  "Claude Desktop log file locations: macOS ~/Library/Logs/Claude/mcp*.log; Windows %APPDATA%\\Claude\\logs\\mcp*.log.",
+  "Claude Desktop DevTools opt-in file: developer_settings.json with {\"allowDevTools\": true}, at ~/Library/Application Support/Claude/developer_settings.json (macOS) or %AppData%\\Claude\\developer_settings.json (Windows).",
+  "Inspector package name: @modelcontextprotocol/inspector, binary name mcp-inspector; requires Node >= 22.19.0.",
+  "Inspector CLI recognized --method values: initialize, tools/list, tools/call, resources/list, resources/read, resources/templates/list, prompts/list, prompts/get, logging/setLevel, servers/list, servers/show.",
+  "Inspector --format values: \"text\" (default, human pretty-print) | \"json\" (single JSON object on stdout, no banners)."
+ ],
+ "sdk_implications": [
+  "A PowerShell MCP server SDK MUST provide a stdio transport implementation that writes ALL log/diagnostic output exclusively to stderr (or an OTel exporter), and MUST make it structurally hard/impossible to accidentally write to stdout (e.g. redirect/guard the stdout stream, or force all cmdlet output/Write-Host equivalents away from stdout in stdio mode) since stdout is reserved for JSON-RPC framing.",
+  "Implement per-request logging opt-in for the modern era: read _meta[\"io.modelcontextprotocol/logLevel\"] on each incoming request; only emit notifications/message (deprecated, transitional) when that key is present, and never otherwise. Provide a code path that instead ties emitted log entries to the current request's SSE/response stream when using Streamable HTTP.",
+  "Implement (or deprecate-but-support) logging/setLevel as a legacy-era-only handler; when operating in modern/2026-07-28 mode the SDK should not require or advertise this method as the log-level mechanism.",
+  "SDK must validate/require the two mandatory per-request _meta keys (io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientCapabilities) on the server side and return -32602 Invalid params when missing; should also propagate/accept io.modelcontextprotocol/clientInfo.",
+  "SDK must implement server/discover (server-side handler and client-side caller) returning capabilities (incl. extensions), instructions, supportedVersions, and stamp serverInfo into the result's _meta under io.modelcontextprotocol/serverInfo.",
+  "SDK must implement typed errors: MissingRequiredClientCapabilityError (-32021) with a data field naming missing capabilities, and UnsupportedProtocolVersionError (-32022) with data.supported listing supported versions -- as distinct PowerShell exception/error types, not generic JSON-RPC failures, so callers can branch on $_.Exception type or error code.",
+  "SDK must implement HeaderMismatch (-32020) for SEP-2243 Mcp-Param-* header mirroring failures on Streamable HTTP transport; must validate x-mcp-header tool annotations as RFC 9110 tokens and exclude non-conforming tools from tools/list rather than erroring at registration time.",
+  "SDK must implement Tasks per era: legacy path exposing tasks/list, tasks/get, tasks/result (blocking), tasks/cancel gated by capabilities.tasks; modern path exposing tasks/get only (no tasks/list), tasks/update (for input_required responses with inputResponses), gated by negotiated extension io.modelcontextprotocol/tasks (SEP-2663), and tools/call must be able to return a CreateTaskResult (resultType: 'task').",
+  "SDK client must implement MRTR retry loop: when tools/call returns resultType input_required, resolve the embedded elicitation/sampling/roots-list request and retry tools/call with a fresh JSON-RPC id, with a configurable max-rounds guard (mirroring MRTR_MAX_ROUNDS) to avoid infinite loops.",
+  "SDK must implement modern subscriptions/listen (filter: resourceSubscriptions, resourcesListChanged) with server confirmation via notifications/subscriptions/acknowledged, and legacy resources/subscribe + notifications/resources/updated, selectable per protocol era; must support stream reconnect by re-issuing subscriptions/listen.",
+  "SDK's Streamable HTTP client must handle both legacy session semantics (Mcp-Session-Id header + HTTP DELETE teardown) and modern sessionless per-request semantics (no session id, no DELETE), selectable/auto-detected via protocol era negotiation, since a stateless modern handler cannot persist state between calls (important for any PowerShell in-memory server state design).",
+  "For a PowerShell Inspector-equivalent or test harness, mirror the exit-code/error-envelope contract if building a CLI test tool: exit codes 0/1/2/3/4/5 with the defined meanings and a single-line JSON error object on stderr, to be CI-scriptable in the same spirit as @modelcontextprotocol/inspector --cli.",
+  "SDK configuration loader (equivalent of catalog/config files) should support a protocolEra field (legacy|auto|modern, default legacy) and a modernLogLevel field (default debug, off = omit logLevel meta), and should default to NOT auto-probing (legacy behavior) to avoid disrupting silent legacy stdio test servers -- an explicit setting should be required to enable server/discover probing.",
+  "Any bundled interactive testing tool (PowerShell equivalent of TUI/CLI Inspector) should support --catalog (writable, seeded on first use) vs --config (read-only, errors if missing) semantics distinctly, and support a -- separator to pass through arguments to a spawned stdio server process.",
+  "OAuth/loopback callback implementation in any PowerShell client-side auth flow must restrict the callback host to loopback addresses (127.0.0.1/localhost) since the code is received over plaintext http.",
+  "Documentation/samples for the PowerShell SDK should instruct developers to always use absolute paths for stdio server command/args/env and .env files, given undefined working directory when launched by a host client, and to note that stdio servers inherit only a limited, platform-dependent environment variable subset unless explicitly configured."
+ ],
+ "open_questions": [
+  "The exact request/notification schemas for server/discover, subscriptions/listen, tasks/get, tasks/update, and notifications/subscriptions/acknowledged (full parameter/result field lists) are not given in these five pages -- must be cross-checked against schema.ts/2026-07-28_schema.json for exact TypeScript/JSON Schema shapes before generating PowerShell classes.",
+  "The full list of RFC 5424 log levels (debug..emergency) is referenced but not enumerated in these pages verbatim -- confirm exact 8 level names and ordering from the logging spec page, not assumed here.",
+  "Whether -32602's distinct 'Unknown Tool' vs 'Invalid Parameters' presentation in the modern era corresponds to any wire-level distinguishing field (e.g. a data field) or is purely an Inspector UI heuristic based on message text is unclear from this page alone.",
+  "Exact shape of the CreateTaskResult object and the input_required task/MRTR result object (field names beyond resultType) is not given here; needs the tasks extension spec (SEP-2663) and schema files.",
+  "Not all of these pages define new_error code -32602 formally (it's described as generic/pre-existing); confirm against the full error taxonomy in the spec's basic/index or errors page for completeness.",
+  "The debugging.md page's Python/TypeScript logging examples use non-normative example package names (mcp.server.MCPServer, server.sendLoggingMessage) -- unclear if these map to canonical SDK APIs the PowerShell SDK should mirror one-to-one, or are illustrative only."
+ ],
+ "source": "docs/2026-07-28/tools/debugging.md; docs/2026-07-28/tools/inspector.md; docs/2026-07-28/tools/inspector/cli.md; docs/2026-07-28/tools/inspector/protocol-eras.md; docs/2026-07-28/tools/inspector/configuration.md",
+ "summary": "These five pages cover MCP debugging practice and the reference Inspector tool for 2026-07-28. Debugging: stdio servers must log only to stderr (never stdout, which breaks framing); Streamable HTTP servers need external log aggregation/OTel since stderr isn't captured. notifications/message-based logging is deprecated as of 2026-07-28 in favor of per-request _meta[\"io.modelcontextprotocol/logLevel\"] opt-in; servers MUST NOT send it otherwise. Connection troubleshooting requires server/discover (returns capabilities/instructions/supportedVersions, serverInfo in result _meta), and every request MUST carry _meta protocolVersion + clientCapabilities (else -32602), with -32021 for missing capabilities and -32022 (with supported versions in data) for version mismatch. Inspector: single package, three clients (web/CLI/TUI) sharing transports, config, OAuth state, and protocol-era negotiation. Protocol era (legacy/auto/modern) reshapes logging (setLevel vs per-request), subscriptions (resources/subscribe vs subscriptions/listen), Tasks (capabilities-gated tasks/list+tasks/result vs extension-gated tasks/get-only with inlined results), MRTR (modern-only elicitation/sampling retry loop), SEP-2243 header mirroring (Mcp-Param-*, -32020 HeaderMismatch), and session model (Mcp-Session-Id+DELETE vs sessionless). CLI client: --method-driven single-shot execution, strict exit codes 0-5 mapped to failure classes, single-line stderr JSON error envelope, --app-info NDJSON probing, CI-oriented --stored-auth-only. Configuration: launcher owns only --web/--cli/--tui and --help; --catalog (writable, seeded) vs --config (read-only, errors if missing) are mutually exclusive; extensive per-client flag/env-var tables including OAuth loopback-only callback constraint and dangerous web-backend flags that must never be combined.</summary>\n"
+}

@@ -1,0 +1,332 @@
+{
+ "source": "pages/specification__2026-07-28__basic__patterns__subscriptions.md (primary); cross-referenced: schema.ts (NotificationMetaObject L120-134, CancelledNotification L611-651, ServerCapabilities L793-883, ResourceListChangedNotification L1248-1259, SubscriptionFilter/Listen types L1261-1431, Prompt/Tool ListChanged L1746/L1888), 2026-07-28_schema.json ($defs required arrays), pages basic__patterns__cancellation.md, basic__transports__streamable-http.md, basic__transports__stdio.md, basic__patterns__index.md, basic__index.md (_meta, error codes), server__resources.md, server__tools.md, server__prompts.md, server__utilities__logging.md, server__utilities__caching.md, changelog.md, deprecated.md, docs__learn__architecture.md, docs__tools__inspector__protocol-eras.md, conformance_README.md; legacy: 2025-11-25_schema.ts, 2025-06-18_schema.ts",
+ "summary": "2026-07-28 replaces resources/subscribe, resources/unsubscribe and the Streamable HTTP GET stream with one client request, `subscriptions/listen` (SEP-2575). Params: standard RequestMetaObject `_meta` plus a required `notifications: SubscriptionFilter` with four optional opt-in fields (`toolsListChanged`, `promptsListChanged`, `resourcesListChanged`: boolean; `resourceSubscriptions`: string[] of resource URIs). Server MUST NOT send unrequested types. The stream is the long-lived response to that request: on HTTP an SSE (`text/event-stream`) response to the POST; on stdio the shared stdout channel. The server MUST first emit `notifications/subscriptions/acknowledged` (params.notifications = honored subset; unsupported types omitted) and MUST NOT send any other notification for that subscription before it; per-subscription ordering only on stdio. Every notification on the stream MUST carry `_meta[\"io.modelcontextprotocol/subscriptionId\"]` = the listen request's JSON-RPC id (string|number); clients MUST use it to demultiplex on stdio; multiple concurrent subscriptions are allowed. Deliverable types: `notifications/tools/list_changed`, `notifications/prompts/list_changed`, `notifications/resources/list_changed` (params optional), `notifications/resources/updated` (params.uri required, may be a sub-resource). Request-scoped `notifications/progress` and `notifications/message` MUST NOT ride the listen stream. Termination: client closes SSE stream (HTTP) or sends `notifications/cancelled` with requestId = listen id (stdio); server SHOULD send a `SubscriptionsListenResult` (`resultType:\"complete\"`, `_meta.io.modelcontextprotocol/subscriptionId` required) for graceful closure, otherwise transport drop = unexpected disconnect, client MAY reconnect and on stdio MUST re-send listen; server holds no subscription state across reconnects. Server capability gates: `tools.listChanged`, `prompts.listChanged`, `resources.listChanged`, `resources.subscribe`. No listen-specific error codes defined. A textual conflict exists between the cancellation page (server MUST send `notifications/cancelled` on teardown) and the subscriptions page/schema (server SHOULD respond with the listen result).",
+ "methods": [
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server",
+   "params": "SubscriptionsListenRequestParams (JSON schema required: [\"_meta\",\"notifications\"]). `_meta`: RequestMetaObject — `io.modelcontextprotocol/protocolVersion` string (required), `io.modelcontextprotocol/clientCapabilities` ClientCapabilities (required, `{}` allowed), `io.modelcontextprotocol/clientInfo` Implementation (optional, SHOULD), `progressToken` (optional), `io.modelcontextprotocol/logLevel` (optional, deprecated SEP-2577; irrelevant here since notifications/message never rides the listen stream). `notifications`: SubscriptionFilter (required object, all members optional): `toolsListChanged?: boolean`, `promptsListChanged?: boolean`, `resourcesListChanged?: boolean`, `resourceSubscriptions?: string[]` (resource URIs). Omitted field == not subscribed (subscriptions.md 'Notification Filter'). No other fields exist in the material (no `unsubscribe`, no per-URI options).",
+   "result": "Long-lived: no result is sent while the stream is alive. On graceful server-initiated teardown the server SHOULD send SubscriptionsListenResult: `resultType: \"complete\"` (required, Result base), `_meta: SubscriptionsListenResultMetaObject` (REQUIRED, unlike other results) with `io.modelcontextprotocol/subscriptionId: RequestId` (required; equals the response `id`) and optional `io.modelcontextprotocol/serverInfo: Implementation`. No other body fields ('otherwise empty', schema.ts L1337-1351). Not Paginated, not CacheableResult. JSON-RPC `id` of the response = listen request id. Abrupt transport close carries no response. Error responses to listen are not specified beyond generic rules (e.g. -32602 for malformed params, -32022 unsupported version, -32021 missing capability, HTTP 400).",
+   "capability_gate": "Client: none. Server: no dedicated capability; each filter member is gated by a ServerCapabilities flag advertised via server/discover: `tools.listChanged` -> toolsListChanged; `prompts.listChanged` -> promptsListChanged; `resources.listChanged` -> resourcesListChanged; `resources.subscribe` -> resourceSubscriptions (schema.ts L825-870; resources.md L56-64; tools.md L238-241; prompts.md L171-174). Unsupported requested types are silently dropped from the acknowledgement rather than erroring (schema.ts L1372-1378).",
+   "notes": "Method name const `subscriptions/listen`. HTTP: POST with `Accept: application/json, text/event-stream`, `MCP-Protocol-Version`, `Mcp-Method: subscriptions/listen`; `Mcp-Name` is NOT required for this method (only tools/call, resources/read, prompts/get). Response is an SSE stream (`Content-Type: text/event-stream`) that stays open (streamable-http.md L124-131). stdio: response messages share stdout; correlate by subscriptionId. Multiple concurrent listen requests allowed, each identified by its own JSON-RPC id (subscriptions.md 'Multiple Concurrent Subscriptions'). State is scoped to the request, not the connection: after channel loss the client re-issues (patterns/index.md L62-69, basic/index.md L213-216)."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "params": "SubscriptionsAcknowledgedNotificationParams (required: [\"notifications\"]): `notifications: SubscriptionFilter` = subset of requested types the server agreed to honor (unsupported types omitted; e.g. `promptsListChanged` omitted when server has no prompts). `_meta?: NotificationMetaObject` — in practice MUST contain `io.modelcontextprotocol/subscriptionId: RequestId` (subscriptions.md 'Acknowledgment' MUST; JSON schema leaves `_meta` optional).",
+   "result": "n/a (notification, no id, no response).",
+   "capability_gate": "None; the server MUST send it for every accepted listen request (subscriptions.md L56-59).",
+   "notes": "MUST be the first message carrying that subscriptionId; server MUST NOT send any notification on the subscription before it. On stdio the ordering guarantee is per subscription ID, not per channel (messages of other subscriptions MAY interleave). Client SHOULD compare acknowledged filter with requested filter and handle unsupported types gracefully."
+  },
+  {
+   "name": "notifications/resources/updated",
+   "direction": "notification s->c",
+   "params": "ResourceUpdatedNotificationParams (required: [\"uri\"]): `uri: string` (@format uri) — the updated resource; MAY be a sub-resource of the subscribed URI. `_meta?: NotificationMetaObject` with `io.modelcontextprotocol/subscriptionId: RequestId` (MUST be present when delivered on a listen stream, which is the only delivery path).",
+   "result": "n/a",
+   "capability_gate": "Server MUST have advertised `resources.subscribe: true` and client MUST have listed the URI in `notifications.resourceSubscriptions` of an active listen request (schema.ts L1421; resources.md L60-62, L248-252).",
+   "notes": "Semantics: 'resource has changed and may need to be read again' — client typically follows with resources/read (resources.md message flow L291-298). No content/payload is carried; no `title` or other fields exist in 2026-07-28 params. Only sent on the listen stream(s) whose filter contains the URI; the 2025-11-25 field set is identical (`uri` only)."
+  },
+  {
+   "name": "notifications/tools/list_changed",
+   "direction": "notification s->c",
+   "params": "`params?: NotificationParams` (optional object; `_meta?: NotificationMetaObject` — when delivered on a listen stream the server MUST include `io.modelcontextprotocol/subscriptionId`, so params is effectively required there).",
+   "result": "n/a",
+   "capability_gate": "Server `tools.listChanged: true`; client `toolsListChanged: true` in listen filter.",
+   "notes": "Only delivered on a listen stream that requested it (schema.ts L1888). Servers that declared listChanged SHOULD send it to clients with such a stream open (tools.md L238-241). Acts as cache invalidation signal complementary to ttlMs (caching.md L114-120)."
+  },
+  {
+   "name": "notifications/prompts/list_changed",
+   "direction": "notification s->c",
+   "params": "`params?: NotificationParams` (same as tools/list_changed; subscriptionId MUST be present on stream).",
+   "result": "n/a",
+   "capability_gate": "Server `prompts.listChanged: true`; client `promptsListChanged: true`.",
+   "notes": "Only delivered on a listen stream that requested it (schema.ts L1746; prompts.md L171-174, SHOULD)."
+  },
+  {
+   "name": "notifications/resources/list_changed",
+   "direction": "notification s->c",
+   "params": "`params?: NotificationParams` (subscriptionId MUST be present on stream).",
+   "result": "n/a",
+   "capability_gate": "Server `resources.listChanged: true`; client `resourcesListChanged: true`.",
+   "notes": "Only delivered on a listen stream that requested it (schema.ts L1249; resources.md L236-237, SHOULD)."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (stdio only) and, per schema/cancellation page, s->c on stdio to terminate a listen stream",
+   "params": "CancelledNotificationParams (required: [\"requestId\"]): `requestId: RequestId` (the subscriptions/listen request id when used for subscriptions), `reason?: string`, `_meta?: NotificationMetaObject`.",
+   "result": "n/a",
+   "capability_gate": "None.",
+   "notes": "Client use: on stdio the client MUST cancel a listen (and any request) by sending this; on Streamable HTTP closing the SSE response stream is the cancellation signal and no notifications/cancelled is expected (cancellation.md L41-45; streamable-http.md L92-102). Server use: schema.ts L637 and cancellation.md L13-16/L73-74 say the server sends it ONLY to terminate a listen stream and MUST NOT use it for any other request — see open_questions for the conflict with the graceful-closure result."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send notification types on a listen stream that the client has not explicitly requested in `notifications` (opt-in only).",
+   "cite": "subscriptions.md 'Opening a Stream'; schema.ts SubscriptionFilter L1265-1266, SubscriptionsListenRequestParams L1297-1300"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send `notifications/subscriptions/acknowledged` as the first message carrying the subscription's ID in `_meta.io.modelcontextprotocol/subscriptionId`.",
+   "cite": "subscriptions.md 'Acknowledgment'; schema.ts L1386-1388"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send any notification on a subscription before its acknowledgment.",
+   "cite": "subscriptions.md 'Acknowledgment'; schema.ts L1387-1388"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "On stdio, interleave messages belonging to other subscriptions before a given subscription's acknowledgment (ordering is per subscription ID, not per channel).",
+   "cite": "subscriptions.md 'Acknowledgment'; schema.ts L1389-1391"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Omit from the acknowledgment's `notifications` any requested type the server does not support; the field reflects only the honored subset.",
+   "cite": "subscriptions.md 'Acknowledgment'; schema.ts L1372-1378 (descriptive 'is omitted')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Compare the acknowledged filter against the requested filter and handle unsupported types gracefully.",
+   "cite": "subscriptions.md 'Acknowledgment' L82-83"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include `io.modelcontextprotocol/subscriptionId` in `_meta` on every notification delivered via a listen stream; value = JSON-RPC id of the originating subscriptions/listen request.",
+   "cite": "basic/index.md L414-416; schema.ts NotificationMetaObject L122-131; subscriptions.md 'Receiving Notifications'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, use `io.modelcontextprotocol/subscriptionId` to correlate notifications with their originating subscription.",
+   "cite": "subscriptions.md 'Receiving Notifications' L92-94; stdio.md L51-55"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Hold multiple active subscriptions concurrently, each identified by its listen request id.",
+   "cite": "subscriptions.md 'Multiple Concurrent Subscriptions'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use a JSON-RPC request id for each listen request that is unique among in-flight requests so that subscriptionId demultiplexing is unambiguous (implied by id-based correlation).",
+   "cite": "subscriptions.md 'Multiple Concurrent Subscriptions' (derived; no explicit sentence)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, cancel a subscription by sending `notifications/cancelled` referencing the subscriptions/listen request ID; on Streamable HTTP, cancel by closing the SSE response stream.",
+   "cite": "subscriptions.md 'Cancellation'; cancellation.md 'Transport-Specific Cancellation' L41-45; stdio.md L83-85"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On Streamable HTTP, treat client closure of the SSE response stream as cancellation of that request (including listen), stop work as soon as practical (SHOULD) and MUST NOT send any further messages for it.",
+   "cite": "streamable-http.md 'Cancellation' L235-239; cancellation.md L42-43"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When ending a subscription on its own initiative (e.g. shutdown), respond to the original subscriptions/listen request with a completion result (`resultType:\"complete\"`, `_meta.io.modelcontextprotocol/subscriptionId`) before closing the stream.",
+   "cite": "subscriptions.md 'Cancellation' and 'Graceful Closure'; schema.ts L1338-1351"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include `_meta.io.modelcontextprotocol/subscriptionId` (equal to the response id) in a SubscriptionsListenResult; `_meta` is a required property of this result.",
+   "cite": "schema.ts L1326-1351; 2026-07-28_schema.json SubscriptionsListenResult required [\"_meta\",\"resultType\"], SubscriptionsListenResultMetaObject required [\"io.modelcontextprotocol/subscriptionId\"]"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include `resultType` on the listen result (all results in this protocol version).",
+   "cite": "schema.ts Result L229-234"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send `notifications/cancelled` referencing a subscriptions/listen request ID when it tears down that subscription stream, and MUST NOT send notifications/cancelled for any other purpose.",
+   "cite": "cancellation.md L13-16 and 'Behavior Requirements' item 2; schema.ts CancelledNotification L637 ('On stdio ... solely to terminate a subscriptions/listen stream')"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Treat a transport close without a listen response as an unexpected disconnect and a trigger to reconnect.",
+   "cite": "subscriptions.md 'Graceful Closure' L158-160"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, after the connection is terminated and re-established, re-send subscriptions/listen to re-establish subscriptions; the server holds no subscription state across reconnections.",
+   "cite": "subscriptions.md 'Graceful Closure' L162-164; stdio.md 'Unexpected Termination' L116-120"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Persist or rely on subscription state across reconnections (stateless: stream state is scoped to the request, not the connection).",
+   "cite": "subscriptions.md L162-164; basic/index.md L213-216; patterns/index.md L68-69"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Deliver request-scoped notifications (`notifications/progress`, `notifications/message`) on a listen stream; they flow only on the response stream of the request they relate to.",
+   "cite": "streamable-http.md L124-131; logging.md L70-74; changelog.md item 4"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On Streamable HTTP, answer a subscriptions/listen POST with an SSE response (`Content-Type: text/event-stream`) that stays open and delivers only the opted-in notification types.",
+   "cite": "streamable-http.md L124-128, L215-231 (descriptive; 'The server's response is itself an SSE stream')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include `X-Accel-Buffering: no` on SSE responses (including the listen stream).",
+   "cite": "streamable-http.md L133-139"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Periodically emit an SSE comment line (e.g. `:\\r\\n`) as keep-alive on long-lived listen streams ('encouraged').",
+   "cite": "streamable-http.md Note L141-150"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Ignore SSE comment lines (lines beginning with ':') and not treat them as malformed input.",
+   "cite": "streamable-http.md Note L147-149"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On Streamable HTTP, send the listen request as its own POST with `Accept: application/json, text/event-stream`, `MCP-Protocol-Version`, and `Mcp-Method: subscriptions/listen` headers; `Mcp-Name` is not required for this method.",
+   "cite": "streamable-http.md 'Sending Messages' L74-77, 'Standard Request Headers' L289-294"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Re-issue a listen request with a new request ID after a broken response stream; streams are not resumable (no `Last-Event-ID`).",
+   "cite": "changelog.md major item 9; streamable-http.md L152"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send resources/updated for URIs not listed in `resourceSubscriptions` of an active listen request.",
+   "cite": "schema.ts ResourceUpdatedNotification L1421; resources.md L248-252"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When the tool/prompt/resource list changes, servers that declared the corresponding `listChanged` capability send the list_changed notification to clients that opened a listen stream with the matching filter flag.",
+   "cite": "tools.md L238-241; prompts.md L171-174; resources.md L236-237"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Advertise `resources.subscribe: true` (via server/discover) to support `resourceSubscriptions`; `tools.listChanged`/`prompts.listChanged`/`resources.listChanged` for the respective flags.",
+   "cite": "resources.md L56-64; schema.ts ServerCapabilities L825-870; docs learn/architecture.md L508"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Reject a listen request missing required `_meta` fields (`io.modelcontextprotocol/protocolVersion`, `io.modelcontextprotocol/clientCapabilities`) as malformed (HTTP 400).",
+   "cite": "basic/index.md L382-384; schema.ts RequestMetaObject L69-98"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Write JSON-RPC requests to stdout / send independent JSON-RPC requests on the listen stream; server-to-client interactions use MRTR InputRequiredResult.",
+   "cite": "stdio.md L57-60; streamable-http.md L114-121"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Establish timeouts for requests; for listen streams this must not be a fixed response timeout (the stream is long-lived by design) — SDKs SHOULD make timeouts per-request configurable.",
+   "cite": "cancellation.md 'Timeouts' L49-60 (general rule; the listen exemption is derived)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ignore invalid cancellation notifications (unknown ids, already completed, malformed).",
+   "cite": "cancellation.md 'Error Handling' L115-119"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Respond `405 Method Not Allowed` to HTTP GET or DELETE on the MCP endpoint (legacy GET stream no longer exists) when only 2026-07-28 is supported.",
+   "cite": "streamable-http.md 'Earlier Streamable HTTP Revisions' L675-682"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Emit legacy codes -32002 / -32042; resource-not-found is -32602.",
+   "cite": "basic/index.md L139-146; resources.md L405-410"
+  }
+ ],
+ "wire_details": [
+  "Method const: `subscriptions/listen` (client->server request).",
+  "Notification consts: `notifications/subscriptions/acknowledged`, `notifications/resources/updated`, `notifications/tools/list_changed`, `notifications/prompts/list_changed`, `notifications/resources/list_changed`, `notifications/cancelled`.",
+  "Filter field names (SubscriptionFilter): `toolsListChanged` (boolean), `promptsListChanged` (boolean), `resourcesListChanged` (boolean), `resourceSubscriptions` (string[] of URIs). Listen params key: `notifications`. Ack params key: `notifications`.",
+  "_meta key: `io.modelcontextprotocol/subscriptionId` — type RequestId (string | number); value = JSON-RPC `id` of the listen request; present on ack, every stream notification, and the closing SubscriptionsListenResult (where it equals the response `id`). Listed in reserved-keys table of basic/index.md L359.",
+  "Other _meta keys on the listen request: `io.modelcontextprotocol/protocolVersion` (required, e.g. \"2026-07-28\"), `io.modelcontextprotocol/clientCapabilities` (required, may be `{}`), `io.modelcontextprotocol/clientInfo` (optional), `progressToken` (optional), `io.modelcontextprotocol/logLevel` (optional, deprecated). Result _meta: `io.modelcontextprotocol/serverInfo` (optional), `io.modelcontextprotocol/subscriptionId` (required).",
+  "SubscriptionsListenResult: `{\"resultType\":\"complete\",\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":<id>}}`; JSON schema required [\"_meta\",\"resultType\"].",
+  "ResourceUpdatedNotificationParams: `uri` (string, format uri, required); `_meta` optional in schema but MUST carry subscriptionId on stream.",
+  "list_changed notifications: `params` optional in JSON schema (required only jsonrpc+method), but on a listen stream params._meta.subscriptionId MUST be present.",
+  "ServerCapabilities gates: `tools.listChanged: boolean`, `prompts.listChanged: boolean`, `resources.listChanged: boolean`, `resources.subscribe: boolean` (all optional).",
+  "HTTP request headers for listen POST: `Accept: application/json, text/event-stream` (MUST list both), `MCP-Protocol-Version: 2026-07-28` (MUST match body _meta; mismatch -> 400 + -32020 HeaderMismatch), `Mcp-Method: subscriptions/listen` (REQUIRED), `Content-Type: application/json`. `Mcp-Name` not required for listen.",
+  "HTTP response for listen: `200`, `Content-Type: text/event-stream`, SSE events each carrying one JSON-RPC message; SHOULD add `X-Accel-Buffering: no`; keep-alive via SSE comment lines starting with `:`; no SSE ids / no `Last-Event-ID`; no `Mcp-Session-Id`.",
+  "HTTP notification POST (e.g. notifications/cancelled, stdio-only in core but mechanics defined): server returns `202 Accepted` with no body, or an HTTP error (e.g. 400).",
+  "HTTP legacy traffic: GET/DELETE to MCP endpoint -> `405 Method Not Allowed`; unknown method -> `404` + JSON-RPC -32601.",
+  "Error codes relevant: -32602 Invalid Params (malformed listen params / resource not found), -32603 Internal, -32601 Method not found, -32020 HeaderMismatch, -32021 MissingRequiredClientCapability, -32022 UnsupportedProtocolVersion (all with HTTP 400 except -32601 -> 404). No listen-specific error code exists in the material.",
+  "stdio framing: one newline-delimited JSON-RPC message per line, no embedded newlines; all subscriptions share stdout; correlation solely via subscriptionId.",
+  "Cancellation on stdio: `{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":<listen id>,\"reason\":\"...\"}}`; on HTTP: close the SSE stream, no message."
+ ],
+ "sdk_implications": [
+  "Client API: `Start-McpSubscription`/`Listen` returning a handle keyed by the listen request id; expose the acknowledged SubscriptionFilter; surface an event/observable per notification with the subscriptionId; support N concurrent subscriptions with a demux table id -> handler (mandatory on stdio, also correct on HTTP).",
+  "Client: listen requests must be exempt from the normal request timeout (long-lived) while still allowing a configurable ack timeout and optional max lifetime; the pending-request table must keep the id reserved until the stream closes.",
+  "Client HTTP transport: POST with Accept both types, MCP-Protocol-Version + Mcp-Method headers; parse SSE incrementally; ignore comment lines; treat stream EOF without a JSON-RPC response as unexpected disconnect and expose a reconnect policy (re-send listen with a NEW id, rebuild demux table); cancel = abort the HTTP request/stream, do not send notifications/cancelled.",
+  "Client stdio transport: cancel = send notifications/cancelled{requestId=listen id}; on process restart re-send all active listens; ignore server-sent notifications/cancelled semantics only as stream termination for the referenced listen id.",
+  "Client: on receiving SubscriptionsListenResult (resultType complete + subscriptionId) mark subscription closed-gracefully; tolerate missing resultType only from legacy servers.",
+  "Client: validate ack ordering (ack must precede other notifications for the same id); optionally warn when a requested type is absent from the ack.",
+  "Server API: a subscription registry keyed by listen request id storing the honored filter (intersection of requested filter and declared capabilities) and the transport sink (SSE response writer on HTTP; stdout writer plus id on stdio); emit ack first; stamp `_meta.io.modelcontextprotocol/subscriptionId` on every outgoing notification routed to that subscription; never emit unrequested types; filter resources/updated by URI membership (decide sub-resource matching policy).",
+  "Server API: `Send-McpToolsListChanged`/`Publish-ResourceUpdated -Uri` helpers that fan out only to subscriptions with the matching flag/URI and only if the corresponding capability (`tools.listChanged`, `prompts.listChanged`, `resources.listChanged`, `resources.subscribe`) is declared in server/discover.",
+  "Server HTTP: keep the POST response open as SSE for listen; set X-Accel-Buffering: no; optional keep-alive comment timer; detect client disconnect and tear down the registry entry without sending further messages; return 405 for GET/DELETE; ignore Mcp-Session-Id/Last-Event-ID.",
+  "Server stdio: handle inbound notifications/cancelled by removing the referenced listen registry entry (SHOULD not respond); on shutdown send SubscriptionsListenResult per active subscription (and, per cancellation page, notifications/cancelled — see open questions) before closing stdout.",
+  "Server: keep request-scoped notifications (progress, message) strictly on the originating request's stream — never on the listen stream.",
+  "Server: hold no subscription state beyond the live request; no persistence across process restarts.",
+  "Types: SubscriptionFilter, SubscriptionsListenRequest(Params), SubscriptionsListenResult(+MetaObject, +Response), SubscriptionsAcknowledgedNotification(Params), ResourceUpdatedNotification(Params), NotificationMetaObject with optional subscriptionId; ServerCapabilities.resources.subscribe/listChanged, tools.listChanged, prompts.listChanged.",
+  "Dual-era support: legacy client mode must implement resources/subscribe, resources/unsubscribe, HTTP GET SSE stream, Mcp-Session-Id, Last-Event-ID, and unsolicited list_changed notifications (no subscriptionId, no ack); legacy server mode must accept resources/subscribe/unsubscribe and serve GET streams. Era-specific code paths must be selected per server (client) or per how the client opens (server).",
+  "Conformance: expect scenario names like `resources-subscribe` in baseline files; run `--requirements 2026-07-28` (and 2025-11-25 if dual-era) via @modelcontextprotocol/conformance."
+ ],
+ "legacy_delta": [
+  "2025-11-25 / 2025-06-18: `resources/subscribe` (params: `uri`) and `resources/unsubscribe` (params: `uri`) requests exist and return EmptyResult; removed in 2026-07-28 (changelog major item 4). `resources/updated` was 'only sent if the client previously sent resources/subscribe'; now only for URIs in `resourceSubscriptions` of a listen request.",
+  "Legacy: list_changed notifications (`tools`, `prompts`, `resources`) were sent unsolicited, session-scoped, on the standalone HTTP GET SSE stream or stdout, gated only by the server `listChanged` capability. Modern: opt-in per listen filter, tagged with subscriptionId, preceded by ack.",
+  "Legacy Streamable HTTP: client opened HTTP GET to receive server-initiated messages; `Mcp-Session-Id` sessions terminated with DELETE; SSE resumability via `Last-Event-ID`/event ids; servers could send JSON-RPC requests on SSE streams. All removed in 2026-07-28; GET/DELETE -> 405 from modern-only servers.",
+  "Legacy `notifications/roots/list_changed` (client->server) removed; `ClientCapabilities.roots.listChanged` no longer exists (roots capability itself deprecated SEP-2577).",
+  "Legacy `notifications/cancelled` was client->server only (and MUST NOT target `initialize`); 2026-07-28 adds a server->client use solely to terminate a listen stream on stdio.",
+  "`_meta.io.modelcontextprotocol/subscriptionId`, `notifications/subscriptions/acknowledged`, `SubscriptionFilter`, `SubscriptionsListenResult` are new in 2026-07-28; `resultType` is new and required on all results (clients MUST treat absence as \"complete\" from legacy servers).",
+  "`ResourceUpdatedNotificationParams` shape (`uri` only, may be sub-resource) is unchanged across 2025-06-18, 2025-11-25, 2026-07-28.",
+  "`ServerCapabilities.resources.subscribe` / `.listChanged`, `tools.listChanged`, `prompts.listChanged` flags exist in all three revisions with the same names; their meaning shifts from 'will emit unsolicited' to 'can honor the corresponding listen filter'.",
+  "Conformance/inspector note: modern stateless per-request server handlers cannot hold subscription state across calls; a listen-capable server needs a long-lived process or shared registry (protocol-eras.md L234-236)."
+ ],
+ "open_questions": [
+  "Conflict: cancellation.md L13-16 and 'Behavior Requirements' item 2 say the server MUST send `notifications/cancelled` referencing the listen id when tearing down the stream; subscriptions.md 'Cancellation'/'Graceful Closure' and schema.ts L1338-1342 say the server SHOULD respond with a successful SubscriptionsListenResult and never mention notifications/cancelled; schema.ts L637 scopes the server-sent cancelled to stdio only. Whether a server must send both, either, or only one per transport is unresolved. Safe SDK behavior: on stdio send the listen result and (optionally) notifications/cancelled; on HTTP send the result then close.",
+  "Whether a Streamable HTTP server may answer subscriptions/listen with `application/json` (a single immediate SubscriptionsListenResult, e.g. when it honors no requested types) is not stated; the spec only describes the SSE form.",
+  "Whether an empty/unsupported filter (all types dropped) should be acknowledged with `notifications: {}` and kept open, acknowledged and immediately closed, or rejected with -32602 is not specified.",
+  "Semantics of `resourceSubscriptions` matching (exact URI vs. prefix/sub-resource) are left to the server; the notification `uri` 'might be a sub-resource'. No template-URI subscription is defined.",
+  "No mechanism to modify a subscription in place (add/remove URIs) — presumably open a new listen and cancel the old one; unstated.",
+  "Whether the server must reject or tolerate duplicate subscriptionId values (two in-flight listens with the same JSON-RPC id from the same client) is unstated.",
+  "The subscriptions page does not define whether `io.modelcontextprotocol/subscriptionId` must be present on the acknowledgment when the JSON schema marks `_meta` optional — prose says MUST; SDK should treat it as required.",
+  "Request timeout guidance (cancellation.md) applies to 'all sent requests' but does not carve out long-lived listen requests; SDK must decide on an ack timeout vs. no overall timeout.",
+  "Whether a listen request must include `Mcp-Name` (it has no `name`/`uri`) is implied 'no' by the header table, but the listen method is not explicitly listed.",
+  "Client behavior after receiving a graceful SubscriptionsListenResult (auto-resubscribe or not) is not prescribed."
+ ]
+}

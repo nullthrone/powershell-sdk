@@ -1,0 +1,425 @@
+{
+ "source": "pages/specification__2026-07-28__basic__transports__index.md; pages/specification__2026-07-28__basic__transports__stdio.md; cross-checked against schema.ts (2026-07-28), pages basic__versioning.md, basic__patterns__cancellation.md, basic__patterns__subscriptions.md, server__discover.md, changelog.md, conformance_README.md, 2025-11-25_schema.ts, 2025-06-18_schema.ts, and the fetched legacy 2025-11-25 transports/lifecycle pages.",
+ "summary": "A transport is a binding: it defines framing/delivery, how request metadata is carried, and how cancellation/termination are signalled; protocol semantics are identical on every binding (transports/index.md \"Overview\"). Only two message directions exist: client-sent requests+notifications to server, server-sent responses+notifications to client; servers never send JSON-RPC requests, clients never send responses (index \"Messages\"). All metadata lives in the body under `_meta.io.modelcontextprotocol/*`; a binding MAY mirror fields into an envelope (HTTP does; stdio has no header layer). stdio: client launches server as subprocess; server reads stdin/writes stdout; one JSON-RPC request/notification/response per line, newline-delimited, no embedded newlines, UTF-8; stdout MUST contain only valid MCP messages; stdin MUST receive only valid MCP messages; stderr is free-form UTF-8 logging and MUST NOT be assumed to mean error. All server output shares one channel: responses (by `id`), request-scoped notifications (`notifications/progress`, `notifications/message`), and subscription notifications correlated via `_meta[\"io.modelcontextprotocol/subscriptionId\"]`. Server-to-client interaction uses `InputRequiredResult` (MRTR), never requests. Cancellation on stdio = `notifications/cancelled` with `requestId`; server also uses it only to tear down a `subscriptions/listen` stream. Shutdown: client closes stdin, waits, then escalates (SIGTERM→SIGKILL / TerminateProcess / Job Objects); server SHOULD exit on stdin EOF; server MAY close stdout and exit. Unexpected exit: client SHOULD restart, retry lost in-flight requests, re-issue `subscriptions/listen`. Backward compatibility: dual-era client SHOULD probe with `server/discover`; `DiscoverResult` → modern; recognized modern error (e.g. -32022 `UnsupportedProtocolVersionError`) → modern, pick from `supported`; any other error or timeout → legacy `initialize` fallback (never keyed to a single code). stdio framing SHOULD be reused for socket/TCP custom transports.",
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "capability_gate": "None. Servers MUST implement it unconditionally (schema.ts DiscoverRequest; versioning.md 'Protocol Version Negotiation'; server__discover.md). Clients MAY call it; on stdio dual-era clients SHOULD call it first as the era probe (stdio.md 'Backward Compatibility').",
+   "params": "params: RequestParams = { _meta: RequestMetaObject } only; no method-specific fields (server__discover.md 'Request'). RequestMetaObject: \"io.modelcontextprotocol/protocolVersion\": string (required); \"io.modelcontextprotocol/clientCapabilities\": ClientCapabilities (required; {} = no optional capabilities); \"io.modelcontextprotocol/clientInfo\"?: Implementation {name: string, version: string, title?, description?, websiteUrl?, icons?}; \"io.modelcontextprotocol/logLevel\"?: LoggingLevel (deprecated SEP-2577); progressToken?: string|number (schema.ts lines 63-111).",
+   "result": "DiscoverResult extends CacheableResult: resultType: ResultType (required; \"complete\"); supportedVersions: string[] (required); capabilities: ServerCapabilities (required; fields experimental?, logging? (deprecated), completions?, prompts?{listChanged?}, resources?{subscribe?, listChanged?}, tools?{listChanged?}, extensions?: {[id]: JSONObject}); instructions?: string; ttlMs: number (required, >=0, ms; 0 = immediately stale); cacheScope: \"public\"|\"private\" (required); _meta?: { \"io.modelcontextprotocol/serverInfo\"?: Implementation } (servers SHOULD include) (schema.ts 678-697, 1081-1110; server__discover.md 'Data Types'). Error: UnsupportedProtocolVersionError code -32022 with data {supported: string[], requested: string} when the requested version is unsupported.",
+   "notes": "Probe outcome table (stdio.md 'Backward Compatibility'): DiscoverResult → modern, select from supportedVersions; recognized modern JSON-RPC error (e.g. -32022) → modern, use data.supported, do NOT fall back to initialize; any other error (commonly -32601 or -32602) or no response within a reasonable timeout → legacy, fall back to initialize. Era result SHOULD be cached for the lifetime of the server process (versioning.md). Conformance check id: server-stateless:sep-2575-server-implements-discover (conformance_README.md)."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server",
+   "capability_gate": "No capability gate on the method itself; individual filter types only honored if the server supports them (e.g. resources.subscribe / *.listChanged); the acknowledgment reports the honored subset (schema.ts SubscriptionsAcknowledgedNotificationParams).",
+   "params": "SubscriptionsListenRequestParams extends RequestParams: _meta (as above, required); notifications: SubscriptionFilter (required) = { toolsListChanged?: boolean; promptsListChanged?: boolean; resourcesListChanged?: boolean; resourceSubscriptions?: string[] (URIs) } (schema.ts 1270-1317).",
+   "result": "Long-lived: no result while the stream is open. On graceful server-side teardown: SubscriptionsListenResult { resultType: \"complete\"; _meta: { \"io.modelcontextprotocol/subscriptionId\": RequestId (required, equals the response id) , \"io.modelcontextprotocol/serverInfo\"? } }, no other fields (schema.ts 1326-1364; subscriptions.md 'Graceful Closure'). Abrupt transport close carries no response.",
+   "notes": "On stdio all subscriptions share the single stdout channel; clients MUST demultiplex by _meta[\"io.modelcontextprotocol/subscriptionId\"] = JSON-RPC id of the listen request (stdio.md 'Receiving Messages'; subscriptions.md). Client ends it with notifications/cancelled referencing the listen request id. After process restart the client MUST re-send subscriptions/listen (subscriptions.md; stdio.md 'Unexpected Termination'). Multiple concurrent subscriptions MAY exist."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "capability_gate": "Sent for every established subscriptions/listen.",
+   "params": "SubscriptionsAcknowledgedNotificationParams: _meta: { \"io.modelcontextprotocol/subscriptionId\": RequestId } (MUST be present); notifications: SubscriptionFilter (the honored subset; unsupported types omitted) (schema.ts 1371-1401).",
+   "result": "n/a (notification)",
+   "notes": "MUST be the first message carrying that subscriptionId; server MUST NOT send any notification on the subscription before it. On stdio ordering is per subscription id, not per channel: other subscriptions' messages MAY be interleaved before it (schema.ts 1386-1391; subscriptions.md 'Acknowledgment')."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (and, on stdio only, notification s->c solely to terminate a subscriptions/listen stream)",
+   "capability_gate": "None.",
+   "params": "CancelledNotificationParams: requestId: RequestId (required; MUST be the id of a request the client previously issued — or, when server-sent on stdio, the id of the subscriptions/listen request); reason?: string; _meta?: NotificationMetaObject (schema.ts 620-651).",
+   "result": "n/a (notification)",
+   "notes": "stdio is the ONLY binding where the client cancels via this notification (on HTTP it closes the stream) (transports/index.md 'Cancellation'; stdio.md 'Cancellation'; cancellation.md 'Transport-Specific Cancellation'). Servers SHOULD stop work as soon as practical and MUST NOT send any further messages for the cancelled request (stdio.md). Servers MUST NOT use it to cancel any other request than a listen stream (schema.ts 637; cancellation.md). Invalid/unknown/late cancellations SHOULD be ignored (cancellation.md 'Error Handling')."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification s->c",
+   "capability_gate": "Only when the originating request carried _meta.progressToken; receiver not obligated to send (schema.ts 65).",
+   "params": "ProgressNotificationParams: progressToken: string|number (required); progress: number (required, monotonically increasing); total?: number; message?: string; _meta? (no subscriptionId — it is request-scoped) (schema.ts 1009-1043).",
+   "result": "n/a",
+   "notes": "On stdio it interleaves on stdout with responses and subscription notifications; correlate by progressToken (stdio.md 'Receiving Messages' item 2). Implementations MAY reset request timeout on progress but SHOULD enforce a maximum timeout (cancellation.md 'Timeouts')."
+  },
+  {
+   "name": "notifications/message",
+   "direction": "notification s->c",
+   "capability_gate": "Server MUST NOT send it for a request that did not set _meta[\"io.modelcontextprotocol/logLevel\"] (schema.ts 102-104; changelog major #5). Server capability logging? is deprecated (SEP-2577).",
+   "params": "LoggingMessageNotificationParams: level: LoggingLevel (required; RFC 5424 severities); logger?: string; data: unknown (required); _meta? (schema.ts 2031-2061). Deprecated as of 2026-07-28.",
+   "result": "n/a",
+   "notes": "Request-scoped notification interleaved on stdout (stdio.md 'Receiving Messages' item 2). Recommended migration for stdio servers: log to stderr instead (changelog 'Deprecated' #1)."
+  },
+  {
+   "name": "notifications/tools/list_changed | notifications/prompts/list_changed | notifications/resources/list_changed | notifications/resources/updated",
+   "direction": "notification s->c",
+   "capability_gate": "Only delivered on a subscriptions/listen stream whose filter opted in (toolsListChanged / promptsListChanged / resourcesListChanged / resourceSubscriptions); server MUST NOT send un-requested types (schema.ts 1249, 1265-1266, 1421, 1746, 1888).",
+   "params": "list_changed: params?: NotificationParams with _meta[\"io.modelcontextprotocol/subscriptionId\"] (MUST be present on stream-delivered notifications). resources/updated: { uri: string (required), _meta: { subscriptionId } }.",
+   "result": "n/a",
+   "notes": "Item 3 of stdio.md 'Receiving Messages': clients MUST correlate via subscriptionId."
+  },
+  {
+   "name": "initialize (LEGACY, 2025-11-25 and earlier)",
+   "direction": "client->server",
+   "capability_gate": "Only sent by a dual-era client after the server/discover probe classified the server as legacy (stdio.md 'Backward Compatibility'); a modern-only server rejects it with an implementation-defined JSON-RPC error and SHOULD name its supported versions in that error (versioning.md).",
+   "params": "InitializeRequestParams: protocolVersion: string; capabilities: ClientCapabilities; clientInfo: Implementation; _meta? (2025-11-25_schema.ts 255-272).",
+   "result": "InitializeResult: protocolVersion: string; capabilities: ServerCapabilities; serverInfo: Implementation; instructions?: string; followed by client notification notifications/initialized (2025-11-25_schema.ts 279-303).",
+   "notes": "Legacy sessions are scoped to the stdio process; a dual-era server selects legacy semantics for the process when it receives initialize (versioning.md 'Compatibility Matrix'). A legacy client MUST NOT cancel its initialize request (2025-11-25_schema.ts 238)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "JSON-RPC messages MUST be UTF-8 encoded.",
+   "cite": "transports/index.md 'Messages'"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "A binding MUST deliver client-sent requests and notifications to the server, and server-sent responses and notifications to the client; no other message direction exists.",
+   "cite": "transports/index.md 'Messages'"
+  },
+  {
+   "level": "MAY",
+   "actor": "transport",
+   "text": "A binding MAY mirror selected body fields into envelope metadata; the body remains the source of truth and mirroring bindings define how mismatches are rejected. stdio does not mirror anything (no header layer).",
+   "cite": "transports/index.md 'Request Metadata'; stdio.md 'Request Metadata'"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Clients and servers MAY implement additional custom transports.",
+   "cite": "transports/index.md 'Custom Transports'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Custom transports MUST preserve the JSON-RPC message format, the message patterns, and the per-request metadata model.",
+   "cite": "transports/index.md 'Custom Transports'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Custom transports SHOULD document their connection establishment, message framing, and cancellation patterns.",
+   "cite": "transports/index.md 'Custom Transports'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Custom transports over a reliable bidirectional byte stream (Unix domain sockets, TCP) SHOULD reuse the stdio framing and message rules; only launch, stderr, shutdown-by-closing-stream and process restart need channel-specific equivalents.",
+   "cite": "transports/index.md 'Custom Transports'; stdio.md intro"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Messages are delimited by newlines and MUST NOT contain embedded newlines (one JSON-RPC request, notification, or response per line).",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "The server MAY write UTF-8 strings to stderr for any logging purpose (informational, debug, error).",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "The client MAY capture, forward, or ignore the server's stderr output.",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "The client SHOULD NOT assume stderr output indicates error conditions.",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The server MUST NOT write anything to its stdout that is not a valid MCP message.",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "The client MUST NOT write anything to the server's stdin that is not a valid MCP message.",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "The client sends only JSON-RPC requests and notifications to stdin, one per line; it MUST NOT write JSON-RPC responses.",
+   "cite": "stdio.md 'Sending Messages'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The server MUST NOT write JSON-RPC requests to stdout; server-to-client interactions are carried in InputRequiredResult replies (MRTR).",
+   "cite": "stdio.md 'Receiving Messages'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST correlate notifications delivered for an active subscriptions/listen request using the io.modelcontextprotocol/subscriptionId field in _meta (all messages share one stdout channel; no per-request streams).",
+   "cite": "stdio.md 'Receiving Messages' item 3; subscriptions.md 'Receiving Notifications'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST include io.modelcontextprotocol/subscriptionId in _meta on every notification delivered via a subscriptions/listen stream; the value is the JSON-RPC id of the listen request.",
+   "cite": "schema.ts NotificationMetaObject lines 121-133"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST send notifications/subscriptions/acknowledged as the first message carrying a subscription's id and MUST NOT send any notification on that subscription before it; on stdio this ordering is per subscription id, other subscriptions' messages MAY interleave before it.",
+   "cite": "schema.ts 1386-1391; subscriptions.md 'Acknowledgment'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The server MUST NOT send notification types the client did not explicitly request in the subscriptions/listen filter.",
+   "cite": "schema.ts SubscriptionFilter 1265-1266; subscriptions.md 'Opening a Stream'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "To cancel an in-flight request on stdio the client MUST send notifications/cancelled referencing the request's id (there is no per-request stream to close).",
+   "cite": "stdio.md 'Cancellation'; cancellation.md 'Transport-Specific Cancellation'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD stop work on a cancelled request as soon as practical (stop processing, free resources, not send a response).",
+   "cite": "stdio.md 'Cancellation'; cancellation.md 'Behavior Requirements' #3"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send any further messages for a cancelled request.",
+   "cite": "stdio.md 'Cancellation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A server MUST send notifications/cancelled referencing a subscriptions/listen request id when it tears down that subscription stream, and MUST NOT send notifications/cancelled for any other purpose.",
+   "cite": "cancellation.md intro and 'Behavior Requirements' #2; schema.ts 637"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When the server ends a subscription on its own initiative it SHOULD respond to the original subscriptions/listen request with a completion result (resultType complete, _meta.subscriptionId) before closing the stream.",
+   "cite": "subscriptions.md 'Cancellation' and 'Graceful Closure'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Cancellation notifications MUST only reference requests previously issued by the client and believed still in progress.",
+   "cite": "cancellation.md 'Behavior Requirements' #1"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY ignore cancellation notifications for unknown, already completed, or non-cancellable requests.",
+   "cite": "cancellation.md 'Behavior Requirements' #4"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "The client SHOULD ignore any response to a cancelled request that arrives afterward.",
+   "cite": "cancellation.md 'Behavior Requirements' #5"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Both parties MUST handle the race where a cancellation arrives after processing/response completed.",
+   "cite": "cancellation.md 'Timing Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Invalid cancellation notifications (unknown ids, completed requests, malformed) SHOULD be ignored; cancellation reasons SHOULD be logged.",
+   "cite": "cancellation.md 'Error Handling', 'Implementation Notes'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementations SHOULD establish timeouts for all sent requests; on timeout the sender SHOULD cancel (stdio: send notifications/cancelled) and stop waiting; SDKs SHOULD allow per-request timeout configuration; MAY reset the clock on progress but SHOULD enforce a maximum timeout.",
+   "cite": "cancellation.md 'Timeouts'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "The client SHOULD initiate shutdown by (1) closing the server's stdin, (2) waiting for the server to exit, (3) forcibly terminating if it does not exit within a reasonable time (POSIX: SIGTERM then SIGKILL; Windows: TerminateProcess or Job Objects).",
+   "cite": "stdio.md 'Shutdown'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD exit promptly when stdin is closed or reads return EOF (the primary and only portable graceful-shutdown signal).",
+   "cite": "stdio.md 'Shutdown'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "The server MAY initiate shutdown by closing its stdout to the client and exiting.",
+   "cite": "stdio.md 'Shutdown'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If the server process exits unexpectedly, the client SHOULD restart it; in-flight requests are lost and can be retried against the fresh process.",
+   "cite": "stdio.md 'Unexpected Termination'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "After a stdio connection is terminated and re-established, the client MUST re-send subscriptions/listen; the server holds no subscription state across reconnections.",
+   "cite": "subscriptions.md 'Graceful Closure'; stdio.md 'Unexpected Termination' ('must also be re-established')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "A client supporting both modern and legacy versions SHOULD probe with server/discover before sending any other request, setting its preferred modern version in _meta.",
+   "cite": "stdio.md 'Backward Compatibility'; server__discover.md 'When to Call'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "The legacy fallback MUST NOT be keyed to one specific error code; legacy servers answer unknown pre-initialize requests with implementation-defined errors (commonly -32601 or -32602) or not at all. A recognized modern error (e.g. UnsupportedProtocolVersionError) means modern: use data.supported and do not fall back to initialize.",
+   "cite": "stdio.md 'Backward Compatibility'; versioning.md 'Backward Compatibility with Initialization-Based Versions'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Probing with server/discover is RECOMMENDED even for modern-only clients, because some legacy servers process era-ambiguous methods (e.g. tools/call) under legacy semantics without validating that initialize came first.",
+   "cite": "stdio.md 'Backward Compatibility'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD cache the era determination for the lifetime of the server process (stdio) and MAY persist it across restarts of the same configuration, re-probing if the assumption later fails.",
+   "cite": "versioning.md 'Backward Compatibility with Initialization-Based Versions'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST implement server/discover.",
+   "cite": "versioning.md 'Protocol Version Negotiation'; schema.ts 656-657; server__discover.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If the server does not implement the requested protocol version it MUST respond with UnsupportedProtocolVersionError (-32022) listing supported versions.",
+   "cite": "versioning.md 'Protocol Version Negotiation'; schema.ts 69-74, 483-501"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "On UnsupportedProtocolVersionError the client SHOULD select a mutually supported version from data.supported and retry, or surface an error if none exists.",
+   "cite": "versioning.md 'Protocol Version Negotiation'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "A modern-only server SHOULD name the protocol versions it supports in any error it returns to an initialize request.",
+   "cite": "versioning.md 'Backward Compatibility with Initialization-Based Versions'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A server MAY implement both legacy (initialize) and modern behaviors; a dual-era server selects legacy semantics scoped to the stdio process on receiving initialize and MAY serve both eras concurrently in the same process.",
+   "cite": "versioning.md 'Compatibility Matrix'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every result MUST include resultType (\"complete\" | \"input_required\"); clients MUST treat an absent resultType from an earlier-protocol server as \"complete\".",
+   "cite": "schema.ts Result 229-234; changelog major #8"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT infer client capabilities from prior requests; capabilities are declared per request in _meta.io.modelcontextprotocol/clientCapabilities.",
+   "cite": "schema.ts 92-98"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "If _meta.io.modelcontextprotocol/logLevel is absent, the server MUST NOT send notifications/message for that request.",
+   "cite": "schema.ts 100-104; changelog major #5"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD include io.modelcontextprotocol/clientInfo on every request unless configured not to.",
+   "cite": "schema.ts 78-80"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD include io.modelcontextprotocol/serverInfo in every result's _meta unless configured not to; clients SHOULD NOT use it to change behavior or for security decisions.",
+   "cite": "schema.ts 145-156; server__discover.md 'Data Types'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Implementations MUST NOT make assumptions about values at reserved _meta keys; prefixes whose second label is modelcontextprotocol or mcp are reserved.",
+   "cite": "schema.ts MetaObject 35-45"
+  }
+ ],
+ "wire_details": [
+  "Framing: one complete JSON-RPC 2.0 object per line, terminated by newline; no embedded newlines inside a serialized message; UTF-8 (stdio.md intro; transports/index.md 'Messages'). No batch arrays in 2026-07-28: JSONRPCMessage union in 2025-11-25/2025-06-18 schemas is request|notification|response (no JSONRPCBatch), so arrays are not valid frames in any dual-era version.",
+  "jsonrpc: \"2.0\" (JSONRPC_VERSION); RequestId = string | number; JSONRPCErrorResponse.id is optional (id?: RequestId) (schema.ts 261-302).",
+  "LATEST_PROTOCOL_VERSION = \"2026-07-28\"; legacy constants \"2025-11-25\", \"2025-06-18\" (schema files).",
+  "Method names: server/discover; subscriptions/listen; notifications/cancelled; notifications/progress; notifications/message; notifications/subscriptions/acknowledged; notifications/tools/list_changed; notifications/prompts/list_changed; notifications/resources/list_changed; notifications/resources/updated; legacy: initialize, notifications/initialized. Removed in 2026-07-28: ping, logging/setLevel, notifications/roots/list_changed, resources/subscribe, resources/unsubscribe, notifications/elicitation/complete (changelog).",
+  "_meta request keys: io.modelcontextprotocol/protocolVersion (string, required); io.modelcontextprotocol/clientCapabilities (object, required); io.modelcontextprotocol/clientInfo (Implementation, optional); io.modelcontextprotocol/logLevel (LoggingLevel, optional, deprecated); progressToken (string|number, optional). _meta result key: io.modelcontextprotocol/serverInfo. _meta notification/result key: io.modelcontextprotocol/subscriptionId (RequestId). Documented OTel keys: traceparent, tracestate, baggage (changelog minor #2).",
+  "resultType values: \"complete\" | \"input_required\" (open string set). cacheScope values: \"public\" | \"private\". ttlMs: integer >= 0 milliseconds.",
+  "Error codes: PARSE_ERROR -32700; INVALID_REQUEST -32600; METHOD_NOT_FOUND -32601 (also for methods gated behind un-advertised server capabilities); INVALID_PARAMS -32602 (also unknown tool/prompt, bad cursor, resource not found); INTERNAL_ERROR -32603; HEADER_MISMATCH -32020 (HTTP only); MISSING_REQUIRED_CLIENT_CAPABILITY -32021 (data.requiredCapabilities: ClientCapabilities); UNSUPPORTED_PROTOCOL_VERSION -32022 (data.supported: string[], data.requested: string). Range -32000..-32019 implementation-defined (never spec-assigned); -32020..-32099 spec-reserved; -32002 and -32042 retired, never reused (schema.ts 311-450).",
+  "Legacy probe signals: legacy servers reply to server/discover with implementation-defined errors (commonly -32601 or -32602) or nothing; classification is 'DiscoverResult → modern; recognized modern error → modern; anything else/timeout → legacy' (stdio.md 'Backward Compatibility').",
+  "No HTTP headers, status codes, or MIME types apply on stdio (stdio.md 'Request Metadata': 'There is no header layer'). MCP-Protocol-Version / Mcp-Method / Mcp-Name are HTTP-only mirrors (transports/index.md 'Request Metadata'; changelog minor #4).",
+  "Process signals: POSIX SIGTERM then SIGKILL; Windows TerminateProcess or Job Objects (stdio.md 'Shutdown'). Shutdown trigger for servers: stdin closed / read returns EOF.",
+  "stderr: free-form UTF-8 text, not framed, not MCP messages (stdio.md intro). Conformance harness captures client stdout.txt/stderr.txt (conformance_README.md 'Test Results')."
+ ],
+ "sdk_implications": [
+  "Define a transport abstraction with exactly: Send(message), an inbound message event/reader, Close(), plus binding-specific cancellation hook; enforce direction rules centrally (client transport rejects sending responses; server transport rejects sending requests) — transports/index.md 'Messages', stdio.md 'Sending/Receiving Messages'.",
+  "Stdio framing layer: serialize each JSON-RPC message with a JSON writer configured for no indentation/newlines (in PowerShell: ConvertTo-Json -Compress, and verify no literal U+000A/U+000D inside — JSON string escapes \\n are fine); write as UTF-8 WITHOUT BOM followed by \"\\n\"; flush after every message. Reader: byte-level UTF-8 line reader on stdin/stdout that tolerates trailing \\r and skips empty lines; parse each line as one JSON object; a non-object/array line is a framing violation (no batches).",
+  "Server-side stdout hygiene is critical in PowerShell: redirect/disable all host output (Write-Host, Write-Output, progress, verbose, warning streams, $InformationPreference) from user tool code so nothing but MCP messages reaches stdout; route logging to stderr ([Console]::Error) — stdio.md MUST NOT rule and changelog deprecation guidance ('log to stderr').",
+  "Server must exit promptly on stdin EOF: the read loop terminates the process (allow in-flight handlers a bounded drain) — stdio.md 'Shutdown'.",
+  "Client process launcher: start child with redirected stdin/stdout/stderr (System.Diagnostics.Process with UseShellExecute=false, UTF-8 encodings), async stderr capture with a configurable sink (capture/forward/ignore) that never treats stderr as an error; shutdown sequence = close stdin → wait with timeout → SIGTERM/SIGKILL on POSIX or Process.Kill()/Job Object on Windows.",
+  "Client supervisor: detect unexpected child exit, fail all pending requests, optionally auto-restart, retry lost requests, and automatically re-issue every active subscriptions/listen — stdio.md 'Unexpected Termination'; subscriptions.md.",
+  "Single-channel demultiplexer on the client: route by (a) id → pending request (responses, including the final SubscriptionsListenResult), (b) method notifications/progress → by progressToken, (c) presence of _meta['io.modelcontextprotocol/subscriptionId'] → subscription handler, (d) notifications/cancelled from server → close the referenced listen subscription, (e) notifications/message → log sink. Enforce acknowledged-first per subscription id; ignore un-requested notification types.",
+  "Server-side subscription registry keyed by listen request id: emit acknowledged notification first (with honored subset), tag every stream notification with subscriptionId, on client notifications/cancelled drop the subscription silently, on server shutdown send SubscriptionsListenResult (resultType complete + subscriptionId) and/or notifications/cancelled per spec, and never send notifications/cancelled for anything else.",
+  "Cancellation: client SDK exposes CancellationToken → sends notifications/cancelled {requestId, reason} on stdio and ignores late responses; server SDK maps incoming cancelled notifications to a per-request CancellationToken, suppresses the response after cancellation, and ignores unknown/completed ids. Per-request timeouts configurable, default plus hard maximum, optional reset on progress — cancellation.md.",
+  "Era probe in client: before first request send server/discover with preferred version; classify result per three-outcome table; keep era per process; on modern error -32022 renegotiate from data.supported; on other error/timeout fall back to legacy initialize handshake (needs legacy InitializeRequest/Result types and notifications/initialized) if dual-era support is in scope; never key fallback to a single code.",
+  "Server implements server/discover unconditionally returning supportedVersions, capabilities, instructions?, ttlMs, cacheScope, resultType and _meta.serverInfo; validates _meta.protocolVersion on every request and returns -32022 with {supported, requested} when unsupported; reads clientCapabilities per request (no session cache); sends notifications/message only when logLevel present.",
+  "Every request/notification/response type must carry the required _meta keys: client SDK auto-injects protocolVersion, clientCapabilities (default {}), clientInfo; server SDK auto-injects resultType and serverInfo into every result.",
+  "Provide a reusable NDJSON stream transport (same framing) for TCP/Unix-socket/named-pipe custom transports, parameterizing only launch/shutdown/restart — transports/index.md 'Custom Transports'.",
+  "Error mapping table in a shared module with the exact constants (-32700, -32600, -32601, -32602, -32603, -32020, -32021, -32022) and typed data payloads; treat -32000..-32019 as opaque implementation codes.",
+  "Conformance: plan to run the official conformance runner against the stdio server (check id server-stateless:sep-2575-server-implements-discover among >20 checks in server-stateless) — conformance_README.md."
+ ],
+ "legacy_delta": [
+  "Framing and stream rules are unchanged since 2025-11-25 (same bullets: newline-delimited, no embedded newlines, UTF-8, stdout/stdin purity, stderr free-form) — legacy 2025-11-25 transports page vs stdio.md. JSON-RPC batching is absent in both 2025-06-18 and 2025-11-25 schemas, so a dual-era reader never needs array frames.",
+  "2025-11-25 stated 'Clients SHOULD support stdio whenever possible'; this sentence is not present in the 2026-07-28 transports index.",
+  "Legacy: connection-scoped session established via initialize / notifications/initialized with protocolVersion negotiation in the handshake (client MUST send a version; server MUST reply with same or another; client SHOULD disconnect if unsupported). Modern: no handshake; version, capabilities, clientInfo in every request's _meta; mismatch → -32022 UnsupportedProtocolVersionError (transports/index.md 'Backward Compatibility'; versioning.md; changelog major #2).",
+  "Legacy: servers MAY initiate JSON-RPC requests over stdout (roots/list, sampling/createMessage, elicitation/create, ping) and clients send responses to stdin; notifications/cancelled could be sent by either side for any request. Modern: server MUST NOT write requests; client MUST NOT write responses; server-initiated interaction only via InputRequiredResult (MRTR); server-sent notifications/cancelled restricted to listen-stream teardown (stdio.md; schema.ts 637; changelog major #7).",
+  "Legacy stdio server-to-client notifications (list_changed, resources/updated after resources/subscribe, notifications/message after logging/setLevel) were unsolicited on the shared channel. Modern: only via subscriptions/listen with explicit filter, acknowledged notification, subscriptionId tagging; logging is per-request opt-in via _meta.logLevel; ping, logging/setLevel, resources/subscribe/unsubscribe, notifications/roots/list_changed removed (changelog major #4, #5).",
+  "Shutdown sequence is materially the same (close stdin → wait → SIGTERM → SIGKILL) but 2026-07-28 generalizes forced termination to OS-appropriate mechanisms (Windows TerminateProcess/Job Objects) and adds explicit guidance that servers SHOULD exit on stdin EOF and that clients SHOULD restart unexpectedly exited servers and re-establish subscriptions (stdio.md 'Shutdown', 'Unexpected Termination' vs legacy lifecycle 'Shutdown').",
+  "Timeout guidance (SHOULD set timeouts, cancel on expiry, per-request configurability, progress-reset with max) is unchanged between the legacy lifecycle page and 2026-07-28 cancellation.md.",
+  "Results: 2026-07-28 requires resultType on every result; legacy servers omit it and clients MUST treat absence as \"complete\" (schema.ts 229-234). DiscoverResult replaces InitializeResult for capabilities/serverInfo/instructions, adds supportedVersions, ttlMs, cacheScope; serverInfo moves to _meta.",
+  "Error codes renumbered relative to the draft (HeaderMismatch -32001→-32020, MissingRequiredClientCapability -32003→-32021, UnsupportedProtocolVersion -32004→-32022); resource-not-found -32002 → -32602; -32042 retired (changelog minor #12, #6).",
+  "A dual-era server must key behavior on how the client opens: modern _meta request → stateless per-request handling; initialize → legacy session scoped to the process; both MAY coexist in one process (versioning.md 'Compatibility Matrix')."
+ ],
+ "open_questions": [
+  "'Reasonable time' for shutdown wait and 'reasonable timeout' for the server/discover legacy probe are not quantified anywhere in the material; the SDK must choose defaults (TypeScript SDK v2 values not available locally).",
+  "Whether a server should accept lines terminated by CRLF or containing a UTF-8 BOM is not specified; the pages only say newline-delimited UTF-8. A lenient reader (strip trailing \\r, ignore BOM) seems safe but is not normative.",
+  "What a server should do on receiving an unparseable line on stdin (respond with -32700 ParseError with id null, or ignore) is not stated on the stdio page; JSON-RPC 2.0 semantics imply a -32700 error response with no id (schema.ts ParseError, JSONRPCErrorResponse.id optional).",
+  "The stdio page says server-side subscription teardown uses notifications/cancelled (schema.ts 637; cancellation.md MUST) while subscriptions.md says the server SHOULD send a successful subscriptions/listen response for graceful closure; whether both messages are expected on stdio, and in which order, is not spelled out.",
+  "Whether a modern-only client that skips the probe must still handle a legacy server processing tools/call under legacy semantics is only addressed by a RECOMMENDED probe; no hard requirement.",
+  "The exact list of 'recognized modern JSON-RPC errors' that classify a server as modern beyond UnsupportedProtocolVersionError (e.g. -32021) is given only by example ('such as'); the SDK must decide whether -32020/-32021 also count.",
+  "No guidance on maximum line length or backpressure for very large messages on stdio; PowerShell's default stream buffers may need explicit sizing.",
+  "Whether client identity (io.modelcontextprotocol/clientInfo) is expected on the server/discover probe when the client's preferred version is later renegotiated is unspecified (only 'preferred modern version in _meta').",
+  "How the legacy fallback path should carry stderr/progress/logging differences (e.g. legacy servers sending unsolicited notifications/message) is out of scope of the 2026-07-28 pages; a dual-era client needs the 2025-11-25 utilities pages, which are not in the local page set."
+ ]
+}

@@ -1,0 +1,332 @@
+{
+ "source": "Primary: /tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/pages/specification__2026-07-28__basic__versioning.md (Versioning and Compatibility) and .../pages/specification__2026-07-28__server__discover.md (Discovery). Supporting (for types/constants/cross-referenced rules): .../spec/schema.ts (2026-07-28: MetaObject, RequestMetaObject, ResultMetaObject, Result, ResultType, Error, JSONRPCErrorResponse, error-code constants, HeaderMismatchError, UnsupportedProtocolVersionError, MissingRequiredClientCapabilityError, DiscoverRequest, DiscoverResult, DiscoverResultResponse, ClientCapabilities, ServerCapabilities, Icon, Icons, BaseMetadata, Implementation, CacheableResult, JSONObject), .../pages/specification__2026-07-28__basic__index.md (Error Codes, Statelessness, _meta), .../pages/specification__2026-07-28__basic__transports__stdio.md (Backward Compatibility), .../pages/specification__2026-07-28__basic__transports__streamable-http.md (Protocol Version Header, Server Validation, Backward Compatibility, Earlier Streamable HTTP Revisions, HTTP+SSE), .../pages/specification__2026-07-28__server__utilities__caching.md, .../pages/specification__2026-07-28__changelog.md, .../pages/docs__2026-07-28__learn__versioning.md, .../pages/docs__2026-07-28__tools__inspector__protocol-eras.md, .../spec/conformance_README.md, .../spec/2025-11-25_schema.ts and .../spec/2025-06-18_schema.ts (legacy deltas).",
+ "summary": "Revision 2026-07-28 has no negotiation handshake: every request carries `_meta[\"io.modelcontextprotocol/protocolVersion\"]` (required) and `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` (required), optionally `clientInfo` and `logLevel`; on HTTP the version is mirrored in the `MCP-Protocol-Version` header, which MUST match the body. A server that does not implement the requested version MUST answer with `UnsupportedProtocolVersionError` (code -32022, `data.supported: string[]`, `data.requested: string`; HTTP 400). Clients SHOULD pick a mutually supported version from `supported` and retry, else surface an error. Servers MUST implement `server/discover` (params: only `_meta`; result: `resultType`, `supportedVersions`, `capabilities`, optional `instructions`, `ttlMs`, `cacheScope`, `_meta[\"io.modelcontextprotocol/serverInfo\"]` SHOULD). Calling it is optional for clients; it is the stdio era-probe. Extensions are negotiated via the `extensions` map in ClientCapabilities/ServerCapabilities keyed by `_meta`-style identifiers with mandatory prefix; if only one side supports an extension the supporter MUST fall back to core behaviour or reject with an error. Dual-era rules: a recognized modern JSON-RPC error (-32020/-32021/-32022, or 404+-32601 on HTTP) identifies a modern server, anything else (or timeout on stdio, or 4xx without modern body on HTTP) identifies a legacy server and triggers fallback to `initialize`; fallback MUST NOT be keyed to one error code; era is cached per server process/origin. A dual-era server selects era from how the client opens (`_meta` present vs `initialize`), MAY serve both concurrently, and a modern-only server SHOULD name its supported versions in the error it returns to `initialize`. Error-code policy: -32020..-32099 are spec-reserved; -32002 and -32042 MUST NOT be emitted. Every result MUST carry `resultType`; absent means `\"complete\"` from legacy servers.",
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "capability_gate": "None. Servers MUST implement it unconditionally (discover.md 'Discovery' intro; versioning.md 'Protocol Version Negotiation'; schema.ts DiscoverRequest doc). Clients MAY call it (not required).",
+   "params": "`params: RequestParams` = `{ _meta: RequestMetaObject }` and nothing else ('The request carries no body parameters beyond the standard _meta', discover.md 'Request'). RequestMetaObject (schema.ts L63-111): `\"io.modelcontextprotocol/protocolVersion\": string` (REQUIRED), `\"io.modelcontextprotocol/clientCapabilities\": ClientCapabilities` (REQUIRED; `{}` = no optional capabilities), `\"io.modelcontextprotocol/clientInfo\"?: Implementation` (optional, SHOULD be sent), `\"io.modelcontextprotocol/logLevel\"?: LoggingLevel` (optional, deprecated SEP-2577), `progressToken?: string|number` (optional), plus any other `_meta` keys following the naming rules (`traceparent`/`tracestate`/`baggage` allowed without prefix). JSON-RPC envelope: `jsonrpc:\"2.0\"`, `id: string|number`, `method:\"server/discover\"`. Example id in spec: \"discover-1\".",
+   "result": "`DiscoverResult extends CacheableResult extends Result` (schema.ts L678-697, L1081-1110, L223-236): `resultType: \"complete\" | \"input_required\" | string` (REQUIRED on servers of this version; for `server/discover` in practice `\"complete\"`); `supportedVersions: string[]` (REQUIRED; 'The client should choose a version from this list for use in subsequent requests'); `capabilities: ServerCapabilities` (REQUIRED); `instructions?: string` (optional; natural-language guidance for LLMs, should not duplicate tool descriptions); `ttlMs: number` (REQUIRED via CacheableResult, integer >= 0 ms, HTTP max-age semantics; caching.md L15-18 lists server/discover among operations that MUST carry caching hints); `cacheScope: \"public\" | \"private\"` (REQUIRED via CacheableResult); `_meta?: ResultMetaObject` where `\"io.modelcontextprotocol/serverInfo\"?: Implementation` SHOULD be included (discover.md 'DiscoverResult'; basic/index.md 'Per-response protocol fields'); `[key: string]: unknown` index signature (extra fields allowed). Wrapped as `DiscoverResultResponse { jsonrpc, id, result: DiscoverResult }`. Not paginated. NOTE: there is NO top-level `serverInfo` or `protocolVersion` field in DiscoverResult (unlike legacy InitializeResult); identity lives only in `_meta`.",
+   "notes": "Errors: if the requested version is unsupported -> UnsupportedProtocolVersionError -32022 (HTTP 400); if required `_meta` fields missing -> -32602 Invalid params (HTTP 400); HTTP header/body mismatch -> -32020 HeaderMismatch (HTTP 400). On HTTP, request also needs `MCP-Protocol-Version`, `Mcp-Method: server/discover` headers (streamable-http.md 'Standard Request Headers'; `Mcp-Name` not required for this method). Serves two documented purposes: presenting server info (capabilities/identity/versions in one request instead of tools/list+prompts/list+resources/list) and stdio backward-compat probe (discover.md 'When to Call'). `serverInfo` is self-reported: clients SHOULD NOT change behaviour on it nor rely on it for security."
+  },
+  {
+   "name": "(implicit) any request — per-request version declaration",
+   "direction": "client->server",
+   "capability_gate": "None; applies to every request in the modern era.",
+   "params": "Every request's `params._meta` MUST carry `io.modelcontextprotocol/protocolVersion` (string) and `io.modelcontextprotocol/clientCapabilities` (ClientCapabilities); SHOULD carry `io.modelcontextprotocol/clientInfo` (Implementation) (basic/index.md 'Per-request protocol fields'; versioning.md 'Protocol Version Negotiation').",
+   "result": "Any Result MUST carry `resultType` (schema.ts Result L229) and SHOULD carry `_meta[\"io.modelcontextprotocol/serverInfo\"]`. On unsupported version the response is `UnsupportedProtocolVersionError` (below) instead of a result.",
+   "notes": "The server accepts or rejects each request independently; no state from prior requests may be used (basic/index.md 'Statelessness': servers MUST NOT rely on prior requests for capabilities/version/identity; schema.ts L96 'Servers MUST NOT infer capabilities from prior requests')."
+  },
+  {
+   "name": "UnsupportedProtocolVersionError (error response shape, not a method)",
+   "direction": "server->client",
+   "capability_gate": "None; returned by any modern server for any request whose declared version it does not implement.",
+   "params": "n/a",
+   "result": "JSON-RPC error response: `{ jsonrpc:\"2.0\", id: RequestId (optional in JSONRPCErrorResponse type, but echoes request id in examples), error: { code: -32022, message: string (example 'Unsupported protocol version'), data: { supported: string[] (REQUIRED, versions the server supports), requested: string (REQUIRED, the version the client asked for) } } }` (schema.ts L483-501; versioning.md example L56-69). HTTP status MUST be 400 Bad Request (schema.ts L475-476; streamable-http.md 'Protocol Version Header').",
+   "notes": "Returned whether the version is unknown or a known version the server chose not to support (versioning.md L50-54; schema.ts L473-475). A recognized modern error: on receipt a dual-era client MUST NOT fall back to `initialize` (stdio.md L138-141)."
+  },
+  {
+   "name": "HeaderMismatchError (error response shape)",
+   "direction": "server->client",
+   "capability_gate": "HTTP transport only.",
+   "params": "n/a",
+   "result": "`{ error: { code: -32020, message: string } }`; `data` not defined for this error in the schema (schema.ts L463-470). HTTP status MUST be 400 (streamable-http.md 'Server Validation').",
+   "notes": "Returned when `MCP-Protocol-Version` header != `_meta.io.modelcontextprotocol/protocolVersion` (schema.ts L71-72; streamable-http.md L257-261), or when a required standard header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing/malformed. Counts as a recognized modern error for era detection (streamable-http.md 'Backward Compatibility' L651-657)."
+  },
+  {
+   "name": "MissingRequiredClientCapabilityError (error response shape)",
+   "direction": "server->client",
+   "capability_gate": "Emitted when a request needs a client capability not declared in `_meta.io.modelcontextprotocol/clientCapabilities`.",
+   "params": "n/a",
+   "result": "`{ error: { code: -32021, message: string, data: { requiredCapabilities: ClientCapabilities } } }` (schema.ts L513-526; basic/index.md L389-394). HTTP status MUST be 400.",
+   "notes": "Counts as a recognized modern error for era detection (streamable-http.md L651-657). Distinct from -32601 which is used for server-side capability gating (schema.ts L346-348)."
+  },
+  {
+   "name": "initialize (LEGACY, 2025-11-25 and earlier; only relevant for dual-era support)",
+   "direction": "client->server",
+   "capability_gate": "None in legacy; not part of 2026-07-28. A modern-only server treats it as an unknown method.",
+   "params": "Legacy (2025-11-25_schema.ts L255-272): `params: { protocolVersion: string, capabilities: ClientCapabilities, clientInfo: Implementation, _meta? }`.",
+   "result": "Legacy `InitializeResult`: `{ protocolVersion: string, capabilities: ServerCapabilities, serverInfo: Implementation, instructions?: string, _meta? }`; no `resultType`. Followed by client notification `notifications/initialized` (no response).",
+   "notes": "On a modern-only server: stdio -> a JSON-RPC error with implementation-defined code (unknown method + missing required `_meta`); the server SHOULD name its supported protocol versions in that error (versioning.md L156-159, matrix row Legacy/Modern). HTTP -> 400 per server validation (missing required headers). A dual-era server answers `initialize` and serves that client under the negotiated legacy revision, scoped to the stdio process or the HTTP session (versioning.md L176-182)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If the server does not implement the requested protocol version (unknown, or known but not supported), it MUST respond with an UnsupportedProtocolVersionError (code -32022) listing the versions it does support in `data.supported` and echoing `data.requested`.",
+   "cite": "versioning.md 'Protocol Version Negotiation' L50-69; schema.ts UnsupportedProtocolVersionError L472-501"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On HTTP, the UnsupportedProtocolVersionError response status MUST be 400 Bad Request.",
+   "cite": "schema.ts L475-476; streamable-http.md 'Protocol Version Header' L263-267"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "On UnsupportedProtocolVersionError the client SHOULD select a mutually supported version from `data.supported` and retry the request, or surface an error to the user if no compatible version exists.",
+   "cite": "versioning.md L71-73"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST implement `server/discover`.",
+   "cite": "versioning.md L75-76; discover.md L9-11; schema.ts DiscoverRequest doc L655-658; changelog.md Major change 3"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients MAY call `server/discover` before sending other requests to learn supported versions up front; they are not required to and may invoke any RPC inline and handle UnsupportedProtocolVersionError.",
+   "cite": "versioning.md L76-80; discover.md 'When to Call' L66-69"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every request MUST include `_meta[\"io.modelcontextprotocol/protocolVersion\"]` (string) and `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` (ClientCapabilities).",
+   "cite": "basic/index.md 'Per-request protocol fields' L369-379; schema.ts RequestMetaObject L69-98; versioning.md L45-46"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A request missing any required `_meta` field is malformed; the server MUST reject it with JSON-RPC -32602 (Invalid params); on HTTP the status MUST be 400 Bad Request.",
+   "cite": "basic/index.md L382-384"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD include `_meta[\"io.modelcontextprotocol/clientInfo\"]` (Implementation with required `name` and `version`) on every request unless specifically configured not to.",
+   "cite": "basic/index.md L386-387; schema.ts L78-80; discover.md request example"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD include `_meta[\"io.modelcontextprotocol/serverInfo\"]` (Implementation) in every result, including DiscoverResult, unless configured not to.",
+   "cite": "discover.md 'DiscoverResult' L100-101; basic/index.md L398-404; schema.ts ResultMetaObject L145-147"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "clientInfo and serverInfo are self-reported and unverified; implementations SHOULD NOT use them to change behaviour and SHOULD NOT rely on them for security decisions.",
+   "cite": "discover.md Note L105-110; basic/index.md L406-412; schema.ts L85-88, L152-155"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST include `resultType` on every result; DiscoverResult additionally MUST carry `supportedVersions`, `capabilities`, `ttlMs` (>= 0) and `cacheScope` (\"public\"|\"private\").",
+   "cite": "schema.ts Result L229, DiscoverResult L678-697, CacheableResult L1081-1110; caching.md L15-18, L62"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When a result from a server implementing an earlier protocol version omits `resultType`, the client MUST treat it as \"complete\".",
+   "cite": "schema.ts Result L230-232; changelog.md Major change 8"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT rely on prior requests over the same connection/process to establish context (capabilities, protocol version, client identity); MUST NOT infer capabilities from prior requests.",
+   "cite": "basic/index.md 'Statelessness' L193-195; schema.ts L96"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "A server MUST NOT rely on capabilities the client has not declared; if a request needs an undeclared client capability it MUST return MissingRequiredClientCapabilityError (-32021) with `data.requiredCapabilities`; HTTP status MUST be 400.",
+   "cite": "basic/index.md L389-394; schema.ts L513-526"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extension identifiers used as keys in `capabilities.extensions` MUST follow the `_meta` key naming rules and MUST have a prefix (prefix is mandatory for extension ids, optional for general _meta keys).",
+   "cite": "versioning.md 'Extension Negotiation' L84-89; schema.ts L779-780, L876-877"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "If one party supports an extension but the other does not, the supporting party MUST either revert to core protocol behaviour or reject the request with an appropriate error.",
+   "cite": "versioning.md L123-125"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Extensions SHOULD document their expected fallback behaviour.",
+   "cite": "versioning.md L125-126"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "`_meta` key format: optional prefix = dot-separated labels + '/', labels start with a letter and end with letter/digit (interior letters/digits/hyphens); name (unless empty) MUST start and end with [a-z0-9A-Z], interior may include '-', '_', '.'; any prefix whose second label is `modelcontextprotocol` or `mcp` is reserved for MCP. Implementations SHOULD use reverse-DNS prefixes. Implementations MUST NOT make assumptions about values at reserved keys.",
+   "cite": "basic/index.md '_meta' L326-346; schema.ts MetaObject L34-54"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A server MAY implement both legacy (`initialize` handshake) and modern (per-request `_meta`) behaviours (dual-era).",
+   "cite": "versioning.md L130-132"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A dual-era server MAY serve both eras concurrently on the same endpoint or process; it selects era per how the client opens: modern `_meta` request -> stateless modern handling; `initialize` -> legacy semantics scoped to the stdio process or HTTP session.",
+   "cite": "versioning.md L176-185"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "A modern-only server SHOULD name the protocol versions it supports in any error it returns to an `initialize` request, on any transport (legacy clients have no fall-forward).",
+   "cite": "versioning.md L156-159"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "stdio: a dual-era client SHOULD probe with `server/discover` before any other request, with its preferred modern version in `_meta`. Outcomes: DiscoverResult -> modern (pick from `supportedVersions`); recognized modern error (e.g. -32022) -> modern, use `supported`, do NOT fall back; any other error or no response within a reasonable timeout -> legacy, fall back to `initialize`.",
+   "cite": "stdio.md 'Backward Compatibility' L130-144; versioning.md L138-140; discover.md L78-83"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "The stdio fallback MUST NOT be keyed to one specific error code; legacy servers answer unknown pre-initialize requests with implementation-defined errors (commonly -32601 or -32602) or not at all.",
+   "cite": "stdio.md L146-148"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "A modern-only client on stdio does not need to probe but probing is RECOMMENDED because some legacy servers process era-ambiguous methods (e.g. tools/call) under legacy semantics; probe yields deterministic failure. Matrix Modern/Legacy: on stdio clients SHOULD send server/discover first.",
+   "cite": "stdio.md L150-154; versioning.md matrix row 'Modern | Legacy' L169"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "HTTP: a dual-era client MAY detect era by attempting a modern request first; on 400 Bad Request it SHOULD inspect the body: recognized modern JSON-RPC error -> modern, retry with advertised versions or correct the request; empty body or unrecognized error -> fall back to `initialize` and continue legacy.",
+   "cite": "streamable-http.md 'Backward Compatibility' L647-660; versioning.md L141-143"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Era determination is a property of the server; clients SHOULD cache it for the lifetime of the server process (stdio) or origin (HTTP), and MAY persist it across restarts of the same server configuration, re-probing if the cached assumption later fails.",
+   "cite": "versioning.md L150-154"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "HTTP: every POST to the MCP endpoint MUST include the `MCP-Protocol-Version` header and its value MUST match `_meta[\"io.modelcontextprotocol/protocolVersion\"]`.",
+   "cite": "streamable-http.md L252-259; schema.ts L71-72"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "HTTP: on header/body mismatch or missing/malformed required header the server MUST reject with 400 Bad Request and a JSON-RPC error with code -32020 (HeaderMismatch).",
+   "cite": "streamable-http.md L257-261, L596-602, L621-629"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "HTTP: if the server does not implement the requested RPC method it MUST respond 404 Not Found with JSON-RPC error -32601 (distinguishes it from a legacy HTTP+SSE 404).",
+   "cite": "streamable-http.md L271-275"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "HTTP: a server supporting clients earlier than 2025-06-18 MAY treat a request without `MCP-Protocol-Version` as version 2025-03-26; a server not supporting such clients MUST reject requests lacking the header per server validation.",
+   "cite": "streamable-http.md L277-281"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "HTTP modern-only server receiving legacy traffic SHOULD: respond 405 Method Not Allowed to GET/DELETE on the MCP endpoint; ignore `Mcp-Session-Id` (never mint/echo); ignore `Last-Event-ID`.",
+   "cite": "streamable-http.md 'Earlier Streamable HTTP Revisions' L675-682"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Implementations MUST NOT emit codes from -32020..-32099 not defined by the spec and MUST use defined codes only with their specified meanings; MUST NOT allocate new codes in -32000..-32019 (SHOULD NOT use that range at all); MUST NOT emit -32002 or -32042 (clients SHOULD still accept -32002 from older servers). New application codes SHOULD be outside -32768..-32000.",
+   "cite": "basic/index.md 'Error Codes' L116-157"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST NOT serve a cached DiscoverResult (or other cacheable result) for a request whose method or parameters differ; results carrying `inputResponses`/`requestState` MUST NOT be cached; caches with cacheScope \"private\" MUST NOT be shared across authorization contexts.",
+   "cite": "caching.md L29-39, L103; schema.ts CacheableResult L1103-1106"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "ttlMs: 0 -> immediately stale (MAY re-fetch each time); positive -> consider fresh that many ms; absent -> assume 0; negative -> ignore, treat as 0.",
+   "cite": "caching.md L54-60; schema.ts L1087-1090"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Clients and servers MAY support multiple protocol versions simultaneously.",
+   "cite": "docs__2026-07-28__learn__versioning.md L51"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that render icons (Implementation.icons) MUST support image/png and image/jpeg (and image/jpg); SHOULD support image/svg+xml and image/webp; consumers SHOULD verify icon URLs are same-domain/trusted and take precautions with SVG.",
+   "cite": "schema.ts Icons L934-947, Icon L890-927"
+  }
+ ],
+ "wire_details": [
+  "Method name constant: \"server/discover\" (schema.ts L666).",
+  "Protocol version constant: LATEST_PROTOCOL_VERSION = \"2026-07-28\"; JSONRPC_VERSION = \"2.0\" (schema.ts L30-32). Legacy constants: 2025-11-25_schema.ts LATEST_PROTOCOL_VERSION = \"2025-11-25\"; 2025-06-18_schema.ts = \"2025-06-18\". Other versions named in the material: \"2025-03-26\" (header-less fallback value), \"2024-11-05\" (HTTP+SSE).",
+  "_meta keys (exact): \"io.modelcontextprotocol/protocolVersion\" (string, required on requests); \"io.modelcontextprotocol/clientCapabilities\" (ClientCapabilities, required on requests); \"io.modelcontextprotocol/clientInfo\" (Implementation, optional/SHOULD); \"io.modelcontextprotocol/logLevel\" (LoggingLevel, optional, deprecated); \"io.modelcontextprotocol/serverInfo\" (Implementation, optional/SHOULD on results); \"io.modelcontextprotocol/subscriptionId\" (RequestId, on subscription-stream notifications); \"progressToken\" (string|number); \"traceparent\", \"tracestate\", \"baggage\" (W3C formats, unprefixed exception).",
+  "Extension identifier examples (exact): \"io.modelcontextprotocol/ui\" (MCP Apps; settings example {\"mimeTypes\": [\"text/html;profile=mcp-app\"]}), \"io.modelcontextprotocol/tasks\" (settings {}), \"io.modelcontextprotocol/oauth-client-credentials\" (schema.ts L776). Keys of `capabilities.extensions` must have a mandatory prefix.",
+  "Error codes (exact): -32700 PARSE_ERROR; -32600 INVALID_REQUEST; -32601 METHOD_NOT_FOUND; -32602 INVALID_PARAMS (also used for missing required _meta fields, resource-not-found replacement); -32603 INTERNAL_ERROR; -32020 HEADER_MISMATCH; -32021 MISSING_REQUIRED_CLIENT_CAPABILITY; -32022 UNSUPPORTED_PROTOCOL_VERSION. Reserved never-reuse: -32002 (legacy resource not found), -32042 (2025-11-25 URL elicitation required). Draft-era renumbering (changelog Minor 12): HeaderMismatch -32001 -> -32020, MissingRequiredClientCapability -32003 -> -32021, UnsupportedProtocolVersion -32004 -> -32022. Ranges: -32000..-32019 implementation-defined/legacy; -32020..-32099 spec-reserved.",
+  "UnsupportedProtocolVersionError wire shape: {\"jsonrpc\":\"2.0\",\"id\":<request id>,\"error\":{\"code\":-32022,\"message\":\"Unsupported protocol version\",\"data\":{\"supported\":[\"2026-07-28\",\"2025-11-25\"],\"requested\":\"1900-01-01\"}}} (versioning.md L56-69).",
+  "MissingRequiredClientCapabilityError data: {\"requiredCapabilities\": ClientCapabilities}. HeaderMismatchError: no data field defined; example message 'Header mismatch: Mcp-Name header value 'foo' does not match body value 'bar''.",
+  "HTTP headers: `MCP-Protocol-Version: 2026-07-28` (required on every POST; must equal body _meta value); `Mcp-Method: <method>` (required all requests); `Mcp-Name` (required for tools/call, resources/read, prompts/get from params.name or params.uri); `Mcp-Param-{Name}` (custom, Base64 sentinel encoding permitted); legacy headers to ignore on modern-only server: `Mcp-Session-Id`, `Last-Event-ID`.",
+  "HTTP status codes: 400 Bad Request for -32020, -32021, -32022 and for missing required _meta (-32602); 404 Not Found + -32601 for unknown method; 405 Method Not Allowed for GET/DELETE on a modern-only MCP endpoint; legacy HTTP+SSE detection: 400/404/405 without recognized modern JSON-RPC body -> GET expecting SSE `endpoint` event.",
+  "ResultType enum: \"complete\" | \"input_required\" | string (open). cacheScope enum: \"public\" | \"private\". ttlMs: integer milliseconds >= 0 (example 3600000).",
+  "Icon.theme enum: \"light\" | \"dark\"; Icon.sizes strings \"WxH\" (e.g. \"48x48\") or \"any\"; icon MIME types: image/png, image/jpeg, image/jpg (MUST), image/svg+xml, image/webp (SHOULD).",
+  "DiscoverResult example (discover.md L40-62): {\"resultType\":\"complete\",\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{},\"resources\":{}},\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"ExampleServer\",\"version\":\"1.0.0\"}},\"instructions\":\"...\",\"ttlMs\":3600000,\"cacheScope\":\"public\"}.",
+  "ClientCapabilities (schema.ts L716-786) exact fields, all optional: experimental?: {[k]: JSONObject}; roots?: {} (deprecated; NO listChanged sub-field in 2026-07-28); sampling?: { context?: JSONObject, tools?: JSONObject } (deprecated); elicitation?: { form?: JSONObject, url?: JSONObject }; extensions?: {[extensionId]: JSONObject}. No `tasks` field (moved to extension).",
+  "ServerCapabilities (schema.ts L793-883) exact fields, all optional: experimental?: {[k]: JSONObject}; logging?: JSONObject (deprecated); completions?: JSONObject; prompts?: { listChanged?: boolean }; resources?: { subscribe?: boolean, listChanged?: boolean }; tools?: { listChanged?: boolean }; extensions?: {[extensionId]: JSONObject}. No `tasks` field.",
+  "Implementation (schema.ts L976-997) = BaseMetadata + Icons + own: name: string (REQUIRED); version: string (REQUIRED); title?: string; description?: string; websiteUrl?: string (uri); icons?: Icon[] where Icon = { src: string (uri, REQUIRED), mimeType?: string, sizes?: string[], theme?: \"light\"|\"dark\" }.",
+  "JSONObject = { [key: string]: JSONValue } with JSONValue = string|number|boolean|null|JSONObject|JSONArray (schema.ts L6-12). RequestId = string | number. JSONRPCErrorResponse.id is optional in the type.",
+  "Conformance: check id `server-stateless:sep-2575-server-implements-discover` (conformance_README.md L234); `--requirements 2026-07-28` runs the stateless wire, `2025-11-25` runs the initialize wire; a scenario in both sets must pass under both (L137-150). Tier 1 via `tier-check --requirements 2025-11-25,2026-07-28`.",
+  "Inspector era model (docs inspector protocol-eras.md): protocolEra = legacy | auto | modern; auto = probe server/discover then fall back to initialize on any non-modern outcome; legacy is the default because probing stalls against silent legacy stdio servers (timeout matters)."
+ ],
+ "sdk_implications": [
+  "Server core: register a built-in, always-on `server/discover` handler returning {resultType:'complete', supportedVersions, capabilities, instructions?, ttlMs, cacheScope, _meta.serverInfo}. Make `supportedVersions`, `ttlMs` (default 0 or configurable) and `cacheScope` (default 'public' unless server data is per-user) configurable; never omit them.",
+  "Server core: per-request middleware that (1) validates presence/type of `_meta['io.modelcontextprotocol/protocolVersion']` and `_meta['io.modelcontextprotocol/clientCapabilities']` -> -32602 (+HTTP 400) if missing; (2) checks the version against the configured supported list -> -32022 with data.supported/data.requested (+HTTP 400); (3) exposes the per-request ClientCapabilities/clientInfo/logLevel to handlers via a request-context object and never caches them across requests (statelessness).",
+  "Server core: helper to emit MissingRequiredClientCapabilityError (-32021, data.requiredCapabilities) from handlers that need e.g. elicitation; helper to gate unadvertised server methods with -32601 (HTTP 404).",
+  "Server core: attach `resultType` to every result (default 'complete') and `_meta['io.modelcontextprotocol/serverInfo']` unless disabled by config; provide a switch to suppress serverInfo.",
+  "Server HTTP transport: require and validate `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` (numeric comparisons numerically, Base64 sentinel decoding for Mcp-Name/Mcp-Param-*) -> 400 + -32020; unknown method -> 404 + -32601; GET/DELETE -> 405; ignore Mcp-Session-Id/Last-Event-ID; optional config to treat header-less requests as 2025-03-26 when legacy support is enabled.",
+  "Server dual-era option: if `initialize` is received, switch that stdio process / HTTP session to legacy 2025-11-25 semantics (InitializeResult with protocolVersion/capabilities/serverInfo/instructions, notifications/initialized, Mcp-Session-Id etc.); if disabled, answer `initialize` with an error whose message names the supported modern versions. Modern `_meta` requests must remain servable concurrently in the same process.",
+  "Client core: PowerShell client object holds `PreferredProtocolVersion`, `SupportedProtocolVersions`, `ClientInfo` (name/version required; title/description/websiteUrl/icons optional), `ClientCapabilities` (experimental/roots/sampling/elicitation/extensions) and `SendClientInfo` flag; every outgoing request is stamped with the three `_meta` keys; optional per-request logLevel/progressToken/trace keys; `_meta` key validation against the naming regex (labels, prefix, reserved second-label check).",
+  "Client core: automatic retry-on--32022: parse `error.data.supported`, intersect with own supported set (preserving own preference order), re-send once with the chosen version, remember it per server; raise a typed exception if the intersection is empty. Treat -32020/-32021/-32022 (and HTTP 404+-32601) as 'recognized modern errors'.",
+  "Client core: `Invoke-McpDiscover` / `Get-McpServerInfo` cmdlet returning a typed DiscoverResult (SupportedVersions, Capabilities incl. Extensions map, Instructions, ServerInfo from _meta, TtlMs, CacheScope) with an optional local cache keyed by method+params honoring ttlMs/cacheScope semantics (0/absent/negative => stale).",
+  "Client core: era detection state machine per server (stdio process / HTTP origin): Modern | Legacy | Unknown, with configurable probe timeout on stdio, fallback not keyed to any specific error code, optional persistence across restarts and automatic re-probe on failure; expose protocolEra setting = legacy|auto|modern like the Inspector. On HTTP: on 4xx inspect body for recognized modern error before falling back; then optionally fall back further to HTTP+SSE (GET, expect `endpoint` event).",
+  "Client core: when Legacy, run the 2025-11-25/2025-06-18 `initialize` + `notifications/initialized` flow, map legacy InitializeResult (top-level serverInfo/protocolVersion) into the same typed server-info object, and default absent `resultType` to 'complete'; support legacy `roots.listChanged`, `tasks` capability fields only in legacy mode.",
+  "Types: model ClientCapabilities/ServerCapabilities as open objects (index signature) with `extensions` as a hashtable of extensionId -> settings object; validate extension ids (mandatory prefix). Provide an extension registry so that a party supporting an extension the peer lacks can either fall back to core behaviour or reject with an error (per-extension policy hook).",
+  "Error taxonomy: strongly typed PowerShell exceptions/records for HeaderMismatch (-32020), MissingRequiredClientCapability (-32021), UnsupportedProtocolVersion (-32022, with Supported/Requested), plus standard JSON-RPC codes; never emit -32002/-32042 or undefined codes in -32020..-32099; accept -32002 from legacy servers; keep local errors (timeouts) distinguishable from peer errors.",
+  "Conformance: plan to pass `server-stateless` (incl. check `sep-2575-server-implements-discover`) under `--requirements 2026-07-28` and the initialize-based scenarios under `--requirements 2025-11-25` if dual-era is claimed; CI baseline file may list `<scenario>:<check-id>` entries."
+ ],
+ "legacy_delta": [
+  "Handshake removed: 2025-11-25/2025-06-18 required `initialize` (params protocolVersion, capabilities, clientInfo) + `notifications/initialized`; 2026-07-28 has no handshake, version/capabilities/identity travel per request in `_meta` (changelog Major 2; versioning.md 'Terminology'). Legacy InitializeResult had top-level `protocolVersion`, `capabilities`, `serverInfo`, `instructions`; modern DiscoverResult has `supportedVersions` (array, not a single negotiated version), `capabilities`, `instructions`, and serverInfo only inside `_meta`.",
+  "Legacy rule 'if the client cannot support the server-chosen protocolVersion it MUST disconnect' (2025-11-25_schema.ts L281) is replaced by per-request UnsupportedProtocolVersionError + client retry.",
+  "`server/discover` is new (does not exist in 2025-11-25 or earlier); on legacy servers it yields implementation-defined errors (commonly -32601/-32602) or silence, which is exactly the stdio detection signal.",
+  "Error codes: -32022/-32021/-32020 are new (draft numbers -32004/-32003/-32001 renumbered); -32002 resource-not-found (legacy) replaced by -32602; -32042 (2025-11-25 URL elicitation) removed. Clients SHOULD still accept -32002 from legacy servers.",
+  "`resultType` is new and required on all modern results; legacy results lack it and clients MUST default to 'complete'. `ttlMs`/`cacheScope` (CacheableResult) are new.",
+  "ClientCapabilities delta: 2025-06-18 had roots{listChanged?}, sampling: object, elicitation: object; 2025-11-25 added sampling{context?,tools?}, elicitation{form?,url?}, tasks{list?,cancel?,requests{sampling.createMessage?, elicitation.create?}}; 2026-07-28 removes `tasks` (now extension io.modelcontextprotocol/tasks), removes `roots.listChanged` (roots becomes `{}` and is deprecated), deprecates `sampling`, adds `extensions` map. `experimental` value type object -> JSONObject.",
+  "ServerCapabilities delta: 2025-11-25 had tasks{list?,cancel?,requests{tools.call?}}; 2026-07-28 removes `tasks`, deprecates `logging`, adds `extensions` map; prompts/resources/tools/completions/experimental unchanged in shape.",
+  "Implementation delta: 2025-06-18 = {name, version, title?}; 2025-11-25 added description?, websiteUrl?, icons?; 2026-07-28 identical to 2025-11-25 (name/version required; title/description/websiteUrl/icons optional).",
+  "HTTP transport delta relevant to versioning: `MCP-Protocol-Version` header existed since 2025-06-18 (absent before -> 2025-03-26 assumption MAY apply); 2026-07-28 additionally requires body/header match, `Mcp-Method`, `Mcp-Name`; removes Mcp-Session-Id, GET SSE stream, DELETE, Last-Event-ID and server-initiated requests. HTTP+SSE (2024-11-05) is Deprecated; clients MAY fall back to it after failing modern and legacy Streamable HTTP detection.",
+  "Removed methods affecting dual-era clients: `ping`, `logging/setLevel`, `notifications/roots/list_changed`, `resources/subscribe`/`unsubscribe`, `tasks/*` core methods, `notifications/elicitation/complete`; server-initiated requests replaced by MRTR (`resultType: 'input_required'`). A dual-era SDK must keep these only on the legacy code path.",
+  "Conformance runs the same scenarios under two wires: through 2025-11-25 stateful initialize; 2026-07-28 stateless per-request _meta; passing one says nothing about the other."
+ ],
+ "open_questions": [
+  "`message` text of UnsupportedProtocolVersionError is illustrative ('Unsupported protocol version'); the spec does not mandate the exact string. Decide on a canonical message in the SDK.",
+  "No normative 'reasonable timeout' value for the stdio probe is given; the Inspector notes that probing stalls against silent legacy stdio servers. SDK must pick a default (and make it configurable).",
+  "The spec does not define what a server should return for an `initialize` request on a modern-only stdio server beyond 'implementation-defined code' and SHOULD-name-versions; choose between -32601 and -32602 and include supported versions in `message` (and possibly `data`), as no data shape is specified.",
+  "`data.supported` ordering is unspecified; whether it reflects server preference is not stated. Client selection policy (client-preference vs server-list order) must be an SDK decision.",
+  "How `server/discover` on a dual-era server should populate `supportedVersions` (modern versions only, or also legacy 2025-11-25?) is not specified; versioning.md example lists both '2026-07-28' and '2025-11-25' in `supported`, which suggests legacy versions may be listed, but a modern client cannot use a legacy version via per-request `_meta`.",
+  "Per-extension settings schemas (e.g. `mimeTypes` for io.modelcontextprotocol/ui) are defined in extension docs, not in the pages read here; SDK needs the extension pages for validation.",
+  "The legacy lifecycle pages (2025-11-25 version negotiation rules, e.g. server responding with a different version than requested, initialize retry rules) are not in the local corpus; fetch https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle.md via curl if full legacy behaviour is to be implemented.",
+  "JSONRPCErrorResponse.id is optional in the schema; whether a server may omit `id` on an UnsupportedProtocolVersionError for a parsable request is not stated (examples always echo it). SDK should always echo the id.",
+  "Whether `cacheScope` for `server/discover` should default to 'public' is not mandated; example uses 'public'."
+ ]
+}

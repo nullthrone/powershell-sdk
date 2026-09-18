@@ -1,0 +1,341 @@
+{
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/pages/specification__2026-07-28__basic__patterns__mrtr.md (read in full); cross-checked against schema.ts (Result/ResultType L208-236, InputRequest/InputResponse/InputRequests/InputResponses/InputRequiredResult/InputResponseRequestParams L536-609, ReadResourceRequestParams L1205, GetPromptRequestParams L1602, CallToolRequestParams L1863, *ResultResponse unions L1244/L1650/L1848, ServerResult L3185-3197, ClientCapabilities L716-786, error constants L312-450, CreateMessageRequest L2185, ListRootsRequest L2718, ElicitRequest L2856), 2026-07-28_schema.json ($defs InputRequiredResult, InputResponseRequestParams, CallToolResultResponse, MissingRequiredClientCapabilityError), 2025-11-25_schema.ts (ServerRequest L2545) and 2025-06-18_schema.ts (ServerRequest L1589) for legacy delta, and MRTR passages in pages: basic__index.md (resultType L81-87, error codes L111-157, capability errors L382-394), basic__patterns__index.md L45-60, changelog.md items 7, 8, 11, transports__streamable-http.md L34-40, L114-121, L195-213, L667-673, transports__stdio.md L57-60, server__utilities__caching.md L25-39, server__tools.md L174-232, server__resources.md L179, server__prompts.md L167, client__elicitation.md L79-87, L374-381, L405-429, L589, client__sampling.md L115-117, L665-668, client__roots.md L59-70, L132-135, L158-161, docs__2026-07-28__tools__inspector__protocol-eras.md L140-162 (non-normative).",
+ "summary": "MRTR (SEP-2322) is the only sanctioned way in 2026-07-28 for a server to obtain client input (elicitation/create, sampling/createMessage, roots/list). Servers no longer send JSON-RPC requests to clients; that is a breaking change (mrtr.md Note L9-16; stdio.md L57; streamable-http.md L114). Instead, a server answers a supported client request (only tools/call, resources/read, prompts/get; mrtr.md \"Supported Requests\") with a JSON-RPC success response whose result is an InputRequiredResult: {resultType:\"input_required\", inputRequests?: map<key, ElicitRequest|CreateMessageRequest|ListRootsRequest>, requestState?: string}. At least one of inputRequests/requestState MUST be present (mrtr.md Server Req 6; schema.ts L575). The client fulfills every inputRequest, then re-issues the ORIGINAL request as a NEW JSON-RPC request (different id) whose params additionally carry inputResponses (same keys, values ElicitResult|CreateMessageResult|ListRootsResult) and, only if the server supplied it, the byte-exact requestState (Client Req 1-4). requestState is opaque to the client and attacker-controlled to the server: servers MUST integrity-protect it (HMAC/AEAD) when it affects authz/resource access/business logic and MUST reject failed verification; SHOULD bind principal, TTL and originating-request digest; single-use MUST be enforced server-side (Server Req 4-5, Security Considerations). Servers MUST NOT embed a request type the client did not declare in _meta clientCapabilities (Server Req 7) and MUST NOT assume the client retries (Server Req 8). Load shedding = requestState-only InputRequiredResult (schema.ts L579), which the client MAY retry immediately. Missing/partial inputResponses SHOULD yield another InputRequiredResult, not an error; unknown extra inputResponses SHOULD be ignored; malformed data SHOULD be a JSON-RPC error. Interim input_required results and MRTR retry results MUST NOT be cached (caching.md L25-39). No round or size limits are specified.",
+ "methods": [
+  {
+   "name": "tools/call (MRTR-capable; may return InputRequiredResult)",
+   "direction": "client->server",
+   "params": "CallToolRequestParams extends InputResponseRequestParams: _meta: RequestMetaObject (REQUIRED, must carry io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientCapabilities; SHOULD carry io.modelcontextprotocol/clientInfo), name: string (REQUIRED), arguments?: {[k:string]: unknown}, inputResponses?: InputResponses (map key -> ElicitResult | CreateMessageResult | ListRootsResult), requestState?: string (schema.ts L600-609, L1863-1872; schema.json required: [_meta, name]).",
+   "result": "CallToolResultResponse.result = CallToolResult | InputRequiredResult (schema.ts L1848-1850; schema.json anyOf). CallToolResult: resultType (REQUIRED, \"complete\"), content: ContentBlock[] (REQUIRED), structuredContent?: unknown, isError?: boolean, _meta?. InputRequiredResult: resultType \"input_required\" (REQUIRED), inputRequests?: InputRequests, requestState?: string, _meta?; at least one of inputRequests/requestState MUST be present. Not CacheableResult; no ttlMs/cacheScope.",
+   "capability_gate": "Server must advertise `tools` server capability for tools/call at all (server__tools.md). For the embedded requests the SERVER is gated by the CLIENT's declared capabilities in _meta io.modelcontextprotocol/clientCapabilities: elicitation (with form/url sub-modes), sampling (deprecated SEP-2577), roots (deprecated SEP-2577) (mrtr.md Server Req 7; schema.ts ClientCapabilities L716-786).",
+   "notes": "Retry is a brand-new JSON-RPC request with a new id, same method, same original params plus inputResponses/requestState (mrtr.md Client Req 3; basic__patterns__index.md L58 'original params + inputResponses'). On Streamable HTTP the retry is a separate POST with its own Mcp-Method/Mcp-Name headers (streamable-http.md L195-213). server__tools.md L174-232 shows a worked example with requestState 'eyJsb2NhdGlvbiI6Ik5ldyBZb3JrIn0...'."
+  },
+  {
+   "name": "resources/read (MRTR-capable; may return InputRequiredResult)",
+   "direction": "client->server",
+   "params": "ReadResourceRequestParams extends ResourceRequestParams, InputResponseRequestParams: _meta (REQUIRED), uri: string (REQUIRED, format uri), inputResponses?: InputResponses, requestState?: string (schema.ts L1205-1206; schema.json required: [_meta, uri]).",
+   "result": "ReadResourceResultResponse.result = ReadResourceResult | InputRequiredResult (schema.ts L1244-1246). ReadResourceResult extends CacheableResult: resultType, contents: (TextResourceContents|BlobResourceContents)[] (REQUIRED), ttlMs: number (REQUIRED, >=0), cacheScope (REQUIRED). InputRequiredResult as above and is explicitly NOT cacheable and carries no caching hints (caching.md L25-27).",
+   "capability_gate": "Server `resources` capability for the method; client capabilities gate embedded inputRequests (Server Req 7).",
+   "notes": "server__resources.md L179: Servers MAY respond with InputRequiredResult; clients include inputResponses and, if provided, requestState on retry. caching.md L36-39: results produced by a request carrying inputResponses or requestState MUST NOT be cached."
+  },
+  {
+   "name": "prompts/get (MRTR-capable; may return InputRequiredResult)",
+   "direction": "client->server",
+   "params": "GetPromptRequestParams extends InputResponseRequestParams: _meta (REQUIRED), name: string (REQUIRED), arguments?: {[k:string]: string}, inputResponses?: InputResponses, requestState?: string (schema.ts L1602-1611; schema.json required: [_meta, name]).",
+   "result": "GetPromptResultResponse.result = GetPromptResult | InputRequiredResult (schema.ts L1650-1652). GetPromptResult: resultType, description?: string, messages: PromptMessage[] (REQUIRED).",
+   "capability_gate": "Server `prompts` capability for the method; client capabilities gate embedded inputRequests.",
+   "notes": "server__prompts.md L167: Servers MAY also respond to prompts/get with an InputRequiredResult."
+  },
+  {
+   "name": "InputRequiredResult (result variant, resultType = \"input_required\")",
+   "direction": "server->client",
+   "params": "n/a (it is a Result). Fields: resultType: \"input_required\" (REQUIRED for 2026-07-28 servers), inputRequests?: InputRequests = {[key: string]: ElicitRequest | CreateMessageRequest | ListRootsRequest}, requestState?: string (opaque; e.g. base64 JSON, encrypted JWT, serialized binary), _meta?: ResultMetaObject (SHOULD contain io.modelcontextprotocol/serverInfo per basic index). Keys of inputRequests are server-assigned and MUST be unique within the request. schema.json only enforces required:[resultType]; the 'at least one of inputRequests/requestState' rule is prose (mrtr.md Server Req 6; schema.ts L575) and must be enforced in SDK code.",
+   "result": "n/a",
+   "capability_gate": "Servers MUST NOT send it on any client request other than prompts/get, resources/read, tools/call (mrtr.md 'Supported Requests'). Embedded request types gated by client capabilities.",
+   "notes": "Included in ServerResult union (schema.ts L3197). ResultType = \"complete\" | \"input_required\" | string; extensions MAY add values but only those advertised via capabilities; unrecognized values MUST be treated as invalid by the client; absent resultType from older servers MUST be treated as \"complete\" (basic__index.md L81-87; schema.ts L229-232)."
+  },
+  {
+   "name": "elicitation/create (embedded in InputRequiredResult.inputRequests)",
+   "direction": "server->client (embedded, not a JSON-RPC message)",
+   "params": "ElicitRequest = {method: \"elicitation/create\", params: ElicitRequestParams = ElicitRequestFormParams | ElicitRequestURLParams} (schema.ts L2856-2859, L2845). No jsonrpc, no id. Form mode: mode: \"form\" or omitted, message (REQUIRED), requestedSchema (REQUIRED). URL mode: mode: \"url\", message, url (REQUIRED, valid URL); NO elicitationId in this revision (changelog item 11).",
+   "result": "Client places ElicitResult under the same key in inputResponses: {action: \"accept\"|\"decline\"|\"cancel\" (REQUIRED), content?: {[k]: string|number|boolean|string[]} (only when action accept and mode form; omitted for URL mode)} (schema.ts L3134-3149).",
+   "capability_gate": "Client must declare `elicitation` capability (with `form` and/or `url`; at least one mode MUST be supported); servers MUST NOT send elicitation requests with modes the client does not support (elicitation.md L51, L79-81) and MUST NOT include elicitation/create at all if the client lacks the capability (mrtr.md Server Req 7).",
+   "notes": "URL mode under MRTR: accept means consent only; the out-of-band interaction completes later; on retry the server decides from echoed requestState (or its own stored state) whether it is complete and returns either the final result or another InputRequiredResult; clients SHOULD provide manual retry/cancel controls (elicitation.md L374-381, L405-429). Servers MUST handle decline/cancel/client failure (elicitation.md L589). Servers needing to correlate an elicitation across retries encode their own identifier in requestState (changelog item 11)."
+  },
+  {
+   "name": "sampling/createMessage (embedded in InputRequiredResult.inputRequests)",
+   "direction": "server->client (embedded)",
+   "params": "CreateMessageRequest = {method: \"sampling/createMessage\", params: CreateMessageRequestParams} (schema.ts L2185-2188, L2104). CreateMessageRequestParams does NOT extend RequestParams, so no _meta is required inside the embedded request. Fields include messages (REQUIRED), modelPreferences?, systemPrompt?, maxTokens, tools?, toolChoice?, includeContext? (see sampling extraction).",
+   "result": "Client places CreateMessageResult under the same key: extends SamplingMessage {role, content} plus model: string (REQUIRED), stopReason?: \"endTurn\"|\"stopSequence\"|\"maxTokens\"|\"toolUse\"|string (schema.ts L2210-2224).",
+   "capability_gate": "Client must declare `sampling` capability (deprecated as of 2026-07-28, SEP-2577, retained >= 12 months); sub-caps `tools`, `context` gate tool-use / includeContext usage (schema.ts L733-759).",
+   "notes": "Multi-turn agentic sampling is realised as successive InputRequiredResults, each retry carrying the previous CreateMessageResult (sampling.md L170-200, L284-287). If the user declines or an error occurs the client does not need to replay the original call with an error, since the server is not waiting (sampling.md L667-668)."
+  },
+  {
+   "name": "roots/list (embedded in InputRequiredResult.inputRequests)",
+   "direction": "server->client (embedded)",
+   "params": "ListRootsRequest = {method: \"roots/list\", params?: {_meta?: MetaObject}} (schema.ts L2718-2723).",
+   "result": "Client places ListRootsResult under the same key: {roots: Root[]} where Root.uri MUST be a file:// URI (roots.md L102; schema.ts L2742-2744).",
+   "capability_gate": "Client must declare `roots` capability (deprecated SEP-2577; new implementations SHOULD NOT adopt it, roots.md L15-16). Servers SHOULD check for roots capability before usage (roots.md L159).",
+   "notes": "notifications/roots/list_changed removed in 2026-07-28 (changelog item 5). roots.md L134-135: on error the client need not replay with an error message."
+  },
+  {
+   "name": "MissingRequiredClientCapabilityError (related error, not MRTR-specific)",
+   "direction": "server->client",
+   "params": "n/a",
+   "result": "JSON-RPC error code -32021, data.requiredCapabilities: ClientCapabilities (REQUIRED); HTTP status MUST be 400 Bad Request (schema.json; basic__index.md L390-394).",
+   "capability_gate": "n/a",
+   "notes": "This is the sanctioned response when a server would need an inputRequest type the client did not declare; MRTR itself forbids sending such inputRequests (Server Req 7). Example in schema is 'missing elicitation capability'."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send server-to-client requests (roots/list, sampling/createMessage, elicitation/create) using the MRTR pattern; the previous pattern of server-initiated JSON-RPC requests is no longer supported (breaking change).",
+   "cite": "mrtr.md Note L9-16; stdio.md L57-60; streamable-http.md L114-121"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Include the required _meta fields (io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities) on every request, including MRTR retries (examples on the page omit them for brevity only).",
+   "cite": "mrtr.md Note L18-25; basic/index#meta"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Inspect, parse, modify, or make any assumptions about the contents of requestState.",
+   "cite": "mrtr.md InputRequiredResult L132; Client Req 2 L261-262"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Respond with InputRequiredResult on prompts/get, resources/read, tools/call.",
+   "cite": "mrtr.md Supported Requests L186-192; Server Req 1 L228"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send InputRequiredResult on any client request other than prompts/get, resources/read, tools/call.",
+   "cite": "mrtr.md Supported Requests L194"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "inputRequests keys are server-assigned identifiers and MUST be unique within the scope of the request.",
+   "cite": "mrtr.md Server Req 2 L231"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "inputRequests values MUST be one of ElicitRequest, CreateMessageRequest, or ListRootsRequest.",
+   "cite": "mrtr.md Server Req 2 L232; schema.ts L537-538"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Include a requestState field; if specified it is an opaque string meaningful only to the server, encodable in any format (base64 JSON, encrypted JWT, serialized binary).",
+   "cite": "mrtr.md Server Req 3 L234"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat a requestState present in a client request as attacker-controlled input.",
+   "cite": "mrtr.md Server Req 4 L236"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If requestState influences authorization, resource access, or business logic, protect its integrity (e.g. HMAC or AEAD) and reject state that fails verification.",
+   "cite": "mrtr.md Server Req 4 L236-237; Security Considerations L278-279"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Omit integrity protection only when tampering can cause nothing worse than request failure.",
+   "cite": "mrtr.md Server Req 4 L237"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "To prevent replay, include inside the integrity-protected requestState and verify on receipt: the authenticated principal (reject other principals), a short expiry TTL (reject after lapse), and an identifier of the originating request (method name + digest of salient params; reject on mismatch).",
+   "cite": "mrtr.md Server Req 5 L239-242"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers for which a given requestState must be consumed at most once (e.g. one-time redemptions) MUST enforce that invariant server-side; the replay measures above do not guarantee single use.",
+   "cite": "mrtr.md Server Req 5 Warning L243-248"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include at least one of inputRequests or requestState in every InputRequiredResult.",
+   "cite": "mrtr.md Server Req 6 L250; schema.ts L575"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send an inputRequest the client has not declared support for in its capabilities (e.g. no elicitation/create if the client did not declare elicitation).",
+   "cite": "mrtr.md Server Req 7 L252; elicitation.md L81 (modes)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Assume that clients will fulfill the inputRequests or retry the original request.",
+   "cite": "mrtr.md Server Req 8 L254; elicitation.md L589"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Return an InputRequiredResult on multiple successive attempts of the same request to repeatedly prompt until it has what it needs.",
+   "cite": "mrtr.md Server Req 8 L254"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If an InputRequiredResult contains inputRequests, construct all requested inputs before retrying the original request.",
+   "cite": "mrtr.md Client Req 1 L258-259"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If an InputRequiredResult does not contain inputRequests (requestState-only / load shedding), retry the original request immediately.",
+   "cite": "mrtr.md Client Req 1 L259-260; schema.ts L579-580"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If an InputRequiredResult contains requestState, echo back the exact value of that field when retrying the original request.",
+   "cite": "mrtr.md Client Req 2 L261"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Include a requestState in the retry if the InputRequiredResult did not contain one.",
+   "cite": "mrtr.md Client Req 2 L262"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use a different JSON-RPC id for the retry than for the initial request; they are independent requests.",
+   "cite": "mrtr.md Client Req 3 L263"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Use inputRequests or requestState for any request other than the retry of the original request (never for parallel requests).",
+   "cite": "mrtr.md Client Req 4 L264"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For each key in the response's inputRequests, the same key must appear in inputResponses with the associated response.",
+   "cite": "schema.ts InputResponseRequestParams comment L601-604"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Validate that client-provided inputResponses is a valid InputResponses object and that the information inside can be correctly parsed.",
+   "cite": "mrtr.md Error Handling L268"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Return a JSON-RPC error response with an appropriate error code and message for protocol errors (malformed JSON, invalid schema, internal server errors).",
+   "cite": "mrtr.md Error Handling L269"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ignore additional, unexpected parameters in InputResponses that it does not recognize or need.",
+   "cite": "mrtr.md Error Handling L271"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "If the client fails to send all requested information and the missing information is necessary, respond with a new InputRequiredResult requesting the missing information again rather than returning an error.",
+   "cite": "mrtr.md Error Handling L273-274"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include resultType in every result (\"complete\" for ordinary results, \"input_required\" for MRTR interim results).",
+   "cite": "schema.ts L229-234; changelog item 8; basic__index.md L81-84"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat an absent resultType from an earlier-protocol server as \"complete\"; treat any unrecognized resultType value as invalid.",
+   "cite": "basic__index.md L86-87; schema.ts L230-232; changelog item 8"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Cache results produced by retrying through MRTR (requests carrying inputResponses or requestState); interim input_required results are not cacheable and carry no caching hints.",
+   "cite": "caching.md L25-27, L36-39"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Write JSON-RPC requests to stdout (stdio) or send independent JSON-RPC requests on any HTTP response stream; server-to-client interactions are embedded as inputRequests inside an InputRequiredResult.",
+   "cite": "stdio.md L57-60; streamable-http.md L114-121"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return MissingRequiredClientCapabilityError (-32021, data.requiredCapabilities, HTTP 400) when processing a request requires a capability the client did not include in io.modelcontextprotocol/clientCapabilities.",
+   "cite": "basic__index.md L389-394; schema.ts L442, L513-522"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "For URL-mode elicitation under MRTR, provide manual controls letting the user retry or cancel the original request, since the out-of-band outcome is learned only by retrying.",
+   "cite": "elicitation.md L374-381"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Handle cases where the user declines or cancels an elicitation, or where the client fails to process the request.",
+   "cite": "elicitation.md L589"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Check for the roots capability before embedding roots/list.",
+   "cite": "roots.md L159"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Skip replaying the original request with an error when a sampling or roots input request fails or is declined; the server is not waiting for a response.",
+   "cite": "sampling.md L667-668; roots.md L134-135"
+  }
+ ],
+ "wire_details": [
+  "resultType constant: \"input_required\" (InputRequiredResult) vs \"complete\" (ordinary results); ResultType TS type is \"complete\" | \"input_required\" | string (schema.ts L216).",
+  "JSON field names: result.inputRequests (object map), result.requestState (string), params.inputResponses (object map), params.requestState (string). No other MRTR fields exist in the material (e.g. no 'round', 'attempt', 'maxRounds', 'inputRequestId').",
+  "Embedded request object shape inside inputRequests: {\"method\": \"elicitation/create\" | \"sampling/createMessage\" | \"roots/list\", \"params\": {...}} with NO jsonrpc and NO id members (schema.ts InputRequest union L537-538; ElicitRequest L2856, CreateMessageRequest L2185, ListRootsRequest L2718 where params is optional and may contain only _meta).",
+  "Embedded response object shape inside inputResponses: bare result objects (ElicitResult {action, content?}; CreateMessageResult {role, content, model, stopReason?}; ListRootsResult {roots}) keyed by the same server-assigned string key; no jsonrpc/id wrapper.",
+  "An InputRequiredResult is delivered as a JSON-RPC SUCCESS response ({jsonrpc:\"2.0\", id, result:{resultType:\"input_required\", ...}}), never as a JSON-RPC error.",
+  "Retry = new JSON-RPC request: same method, new id (MUST differ), original params + inputResponses (+ requestState iff the server sent one). Required _meta keys on every request: io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientCapabilities; SHOULD io.modelcontextprotocol/clientInfo. Servers SHOULD put io.modelcontextprotocol/serverInfo in result._meta (changelog item 2).",
+  "Streamable HTTP: each MRTR round is its own POST with Mcp-Method and Mcp-Name headers (changelog minor 4; streamable-http.md L195-213); server MUST NOT push JSON-RPC requests on SSE response streams (L114). No Mcp-Session-Id, no GET SSE stream, no Last-Event-ID in this revision (L667-673).",
+  "Error codes relevant to MRTR handling: -32602 Invalid params (malformed request / missing required field, HTTP 400; basic__index.md L382-384), -32603 Internal error, -32021 MissingRequiredClientCapability (data.requiredCapabilities: ClientCapabilities, HTTP 400), -32022 UnsupportedProtocolVersion, -32020 HeaderMismatch. Removed/forbidden: -32042 URL elicitation required (2025-11-25 only) MUST NOT be emitted (basic__index.md L146). No dedicated error code for requestState verification failure is defined.",
+  "Example requestState values in spec: \"AEAD-protected blob\" (mrtr.md L179), \"eyJsb2NhdGlvbiI6Ik5ldyBZb3JrIn0...\" (server__tools.md L204/L229) — illustrative only; format is server-defined.",
+  "Caching: InputRequiredResult is not a CacheableResult (no ttlMs/cacheScope); retry results MUST NOT be cached (caching.md L25-39).",
+  "Tasks extension (io.modelcontextprotocol/tasks) reuses the same maps: tasks/get returns inputRequests when status is input_required; client answers via tasks/update carrying inputResponses (extensions__tasks__overview.md L61-63, L88-89, L238-239) — out of scope here but the map types are shared."
+ ],
+ "sdk_implications": [
+  "Types: model Result.resultType as REQUIRED on outgoing server results and tolerant on incoming (absent => \"complete\"; unknown => invalid/exception). Model InputRequiredResult {inputRequests?, requestState?} with a construction-time invariant that at least one is set (schema.json does not enforce it). Model InputRequests/InputResponses as ordered string-keyed dictionaries; keys unique; values as a discriminated union on `method` (elicitation/create | sampling/createMessage | roots/list) and on the result side by the key's request type.",
+  "Client request params for tools/call, resources/read, prompts/get MUST accept optional inputResponses and requestState (InputResponseRequestParams); all other client methods must NOT expose them.",
+  "Client SDK: a high-level Invoke-McpTool/Read-McpResource/Get-McpPrompt loop that (1) dispatches each inputRequest to registered handlers (elicitation form/url, sampling, roots) gated by the capabilities the client itself declared, (2) collects results under identical keys, (3) re-issues the original request with a NEW request id, original params, inputResponses, and requestState copied verbatim only if present, (4) never shares inputResponses/requestState with other in-flight requests, (5) offers a configurable max-round guard (spec defines none; Inspector uses a client-side MRTR_MAX_ROUNDS) and user-facing retry/cancel for URL-mode elicitation, (6) handles requestState-only results by immediate retry (optionally with backoff), (7) surfaces decline/cancel to the caller rather than fabricating an error round-trip.",
+  "Client SDK MUST reject InputRequiredResult received on methods other than tools/call, resources/read, prompts/get, and MUST treat unrecognized resultType values as invalid.",
+  "Client SDK MUST NOT cache results of retries (any request carrying inputResponses/requestState) and must never cache input_required results even for resources/read.",
+  "Server SDK: tool/resource/prompt handlers need an API to return 'input required' (e.g. a typed exception or result helper) that takes a keyed set of ElicitRequest/CreateMessageRequest/ListRootsRequest plus optional state; the framework serializes an InputRequiredResult with resultType \"input_required\" and validates: keys unique, non-empty inputRequests or requestState present, each embedded request type permitted by the caller's declared _meta clientCapabilities (including elicitation form/url mode), otherwise raise MissingRequiredClientCapabilityError (-32021, HTTP 400) or omit the request.",
+  "Server SDK: on incoming requests, parse params.inputResponses/params.requestState, expose them to the handler (e.g. context.InputResponses[key] typed as ElicitResult/CreateMessageResult/ListRootsResult), validate shape (return -32602 on malformed), ignore unknown keys, and encourage re-issuing an InputRequiredResult when required responses are missing.",
+  "Server SDK: ship a requestState codec with integrity protection (HMAC-SHA256 or AEAD such as AES-GCM via .NET System.Security.Cryptography available in PowerShell 7), embedding principal, TTL/expiry, and a method+params digest; verification failure must reject the request. Provide an opt-out only for state whose tampering merely fails the request. Single-use semantics must be application-provided (server-side store).",
+  "Server SDK must NOT expose any API that writes a JSON-RPC request to the client (no server.Elicit/Sample/ListRoots that awaits a response); legacy-era server-request support belongs only to a 2025-xx compatibility layer where the client negotiated an older protocolVersion.",
+  "Transport layers: stdio server must never emit requests on stdout; Streamable HTTP server must never emit requests on SSE streams; each retry is an ordinary new POST with Mcp-Method/Mcp-Name headers.",
+  "Multi-turn sampling (agentic loop) and multi-step elicitation must be expressible as successive InputRequiredResults threaded through requestState; provide helpers to serialize accumulated conversation state into requestState and to cap iterations server-side.",
+  "Interop with tasks extension: reuse the same InputRequests/InputResponses types for tasks/get and tasks/update if the extension is implemented."
+ ],
+ "legacy_delta": [
+  "2025-06-18 and 2025-11-25: servers sent real JSON-RPC requests to the client (ServerRequest union = PingRequest | CreateMessageRequest | ListRootsRequest | ElicitRequest, plus GetTask/GetTaskPayload/ListTasks/CancelTask in 2025-11-25; 2025-06-18_schema.ts L1589-1590, 2025-11-25_schema.ts L2545-2553) with their own ids, and clients replied with JSON-RPC responses (ClientResult included CreateMessageResult/ListRootsResult/ElicitResult). In 2026-07-28 the ServerRequest concept is gone: ClientResult = EmptyResult only and ServerResult gains InputRequiredResult (schema.ts L3169, L3185-3197). A dual-era SDK needs a legacy request-dispatch path (server->client requests over the bidirectional transport) selected by negotiated protocolVersion, and the MRTR path for 2026-07-28.",
+  "2025-11-25 and 2025-06-18 results have no resultType field; InputRequiredResult, InputRequests, InputResponses, InputResponseRequestParams, inputResponses and requestState do not exist in either legacy schema (grep of both files returns no matches). Clients talking to legacy servers MUST treat absent resultType as \"complete\".",
+  "Legacy embedded request types extended `Request` (so params could carry _meta/progressToken); 2026-07-28 CreateMessageRequest/ElicitRequest/ListRootsRequest are plain {method, params} objects without jsonrpc/id (schema.ts L2185, L2718, L2856); CreateMessageRequestParams does not extend RequestParams (no required _meta).",
+  "2025-11-25 introduced URL-mode elicitation with `elicitationId` and `notifications/elicitation/complete` and error -32042 (URL elicitation required); all three are removed in 2026-07-28 (changelog minor item 11; basic__index.md L146). Correlation across retries is now done via requestState.",
+  "2025-11-25 transports allowed server requests on SSE streams (Streamable HTTP GET stream, Last-Event-ID resumability, Mcp-Session-Id); all removed in 2026-07-28 (streamable-http.md L667-673). notifications/roots/list_changed removed (changelog item 5). roots and sampling client capabilities are deprecated in 2026-07-28 (SEP-2577, retained >= 12 months) but still usable inside inputRequests.",
+  "Streamable HTTP in 2025-03-26..2025-11-25 delivered server requests on SSE; 2026-07-28 embeds them in results per SEP-2322 (streamable-http.md L34-37, L114-121).",
+  "Tasks: 2025-11-25 core experimental tasks used tasks/result blocking and server-initiated task-augmented requests; 2026-07-28 moves tasks to extension io.modelcontextprotocol/tasks with tasks/get returning inputRequests and tasks/update carrying inputResponses (changelog item 6)."
+ ],
+ "open_questions": [
+  "No maximum number of MRTR rounds is specified anywhere in the spec; the Inspector docs mention a client-side MRTR_MAX_ROUNDS (non-normative). The PowerShell client should expose a configurable cap; default value is an SDK design decision.",
+  "No size limit for requestState or inputRequests is specified (no byte cap, no header limit). Transport-level limits (HTTP body) apply; SDK may add a configurable guard.",
+  "The spec does not define which JSON-RPC error code a server should use when requestState fails integrity/TTL/principal verification; -32602 Invalid params is the closest fit but is not mandated. Also unspecified: whether such failures should be HTTP 400 or 403.",
+  "The spec says the client 'retries the original request' but does not state whether the original params (name/arguments/uri) MUST be byte-identical; Server Req 5 recommends servers digest 'salient parameters' and reject mismatches, implying identical params. SDK should resend the exact original params.",
+  "Whether an embedded ElicitRequest/CreateMessageRequest params may carry _meta (e.g. progressToken) is not addressed; ListRootsRequest.params?._meta is allowed in the schema, CreateMessageRequestParams has no _meta member. SDK should not require _meta inside embedded requests.",
+  "Behaviour when the client cannot fulfil one of several inputRequests (e.g. user cancels one elicitation but answers another): the page only says missing necessary info SHOULD produce another InputRequiredResult; whether the client should still retry with partial inputResponses or abandon is a client policy choice.",
+  "Whether a requestState-only (load shedding) result implies any backoff/delay before immediate retry is unspecified (Client Req 1 says MAY retry immediately).",
+  "The schema examples referenced by @includeCode (e.g. examples/InputRequiredResult/input-required-result-with-request-state-only.json) are not present locally; contents inferred from names only.",
+  "Interaction of MRTR with notifications/progress and progressToken across rounds (each retry is a new request with a new id, so a new progressToken is presumably needed) is not addressed on this page."
+ ]
+}

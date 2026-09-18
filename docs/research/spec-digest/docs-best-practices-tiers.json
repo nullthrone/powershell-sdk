@@ -1,0 +1,377 @@
+{
+ "legacy_delta": [
+  "community__design-principles.md and community__sdk-tiers.md are revision-agnostic community/process pages, not versioned spec pages; no legacy-delta content applies from them.",
+  "docs__2026-07-28__develop__clients__client-best-practices.md is specific to 2026-07-28 and references the caching utility spec page at /specification/2026-07-28/server/utilities/caching (new in this revision) and tools#output-schema / tools#error-handling / tools#security-considerations at /specification/2026-07-28/server/tools — these anchors did not exist under 2025-06-18/2025-11-25 wording in the same form since caching TTL/cacheScope hints and outputSchema are 2026-07-28 additions per this page's own references.",
+  "SDK tiering key dates place conformance tests as available 2026-01-23 and tiering published 2026-02-23 — this is a NEW governance mechanism relative to earlier revisions; no prior-revision tiering system is described in the source material read."
+ ],
+ "methods": [
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "params": "(implied paginated list request; exact param/result field names not given in the four focus files — see schema.ts for authoritative shape, not read in this pass)",
+   "result": "List of tool definitions (name, description, inputSchema, optional outputSchema). Client Best Practices doc treats each tools/list result as carrying ttlMs and cacheScope hints per the caching utility (source: client-best-practices.md lines 145-149, citing /specification/2026-07-28/server/utilities/caching).",
+   "notes": "client-best-practices.md line 21: 'The host fetches tool definitions via tools/list as normal, but defers injecting them into the model's context' (progressive discovery pattern, a client-side recommendation, not a protocol requirement)."
+  },
+  {
+   "name": "notifications/tools/list_changed",
+   "direction": "notification s->c",
+   "params": "none documented in focus files",
+   "result": "none (notification)",
+   "notes": "client-best-practices.md line 140 and 148-149: hosts SHOULD 're-index the search catalog' on receipt, and MUST/SHOULD 'treat a cached list as stale once a list_changed notification arrives, even before its TTL expires' — this is a client-implementation recommendation tied to the caching utility, not stated as a protocol-level MUST in these pages."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "not detailed in focus files",
+   "result": "Per line 145-149, resources/read results also carry ttlMs and cacheScope caching hints per the caching utility spec page.",
+   "notes": "Referenced only for its caching-hint behavior; full param/result shape not in the four read files (would require reading schema.ts/resources spec pages, out of this pass's scope)."
+  },
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "none shown beyond illustrative sequence diagram",
+   "result": "'Supported versions + capabilities' (client-best-practices.md lines 118-119, mermaid diagram)",
+   "notes": "Shown in the Dynamic Server Management sequence diagram as the first call a host makes when connecting to a newly enabled server, before tools/list. This appears to be a 2026-07-28-era handshake method distinct from the older 'initialize' method; exact schema not given in focus files — flagged as an open question."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "params": "Referenced generically as {name, args} for a stable meta-tool wrapper pattern (client-best-practices.md line 158-159) and as the dispatch target for sandbox-intercepted function calls (line 257: 'dispatches them as tools/call requests to MCP servers').",
+   "result": "On tool-level failure: 'a successful response with isError: true rather than a transport failure' (client-best-practices.md lines 296-298, citing /specification/2026-07-28/server/tools#error-handling).",
+   "notes": "Client Best Practices does not restate the full tools/call schema; it only documents the isError:true convention and that generated language-SDK wrappers SHOULD convert isError:true into a thrown/raised exception so model-authored code can use try/catch (line 298-299)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Implement a context-window-percentage threshold (recommended 1%-5%) for total tool-definition size; once tool definitions loaded upfront would exceed it, switch from loading-all-tools to progressive discovery.",
+   "cite": "client-best-practices.md lines 27-32, 'Implementation Guidelines' intro"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "For a small number of tools whose definitions occupy a small fraction of the context window, load all tool definitions directly instead of implementing progressive discovery.",
+   "cite": "client-best-practices.md lines 27-28"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "When implementing progressive discovery via search, offer multiple response detail levels (name-only, name-and-description, full-schema) so the model can choose.",
+   "cite": "client-best-practices.md line 138, Implementation Guidelines table row 'Offer multiple detail levels'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Cache/memoize tool definitions host-side once fetched from a server so re-injecting them later does not require another tools/list round trip; this cache is distinct from what is currently in the model's context.",
+   "cite": "client-best-practices.md line 139"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Refresh (re-index) the search catalog when a server sends notifications/tools/list_changed.",
+   "cite": "client-best-practices.md line 140"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Present/group tools organized by their source server so the model can reason about related capabilities.",
+   "cite": "client-best-practices.md line 141"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Follow the ttlMs and cacheScope hints carried on each list result (e.g. tools/list), each server/discover result, and each resources/read result, per the specification's caching utility (/specification/2026-07-28/server/utilities/caching).",
+   "cite": "client-best-practices.md lines 145-147"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat a cached list as stale once a list_changed notification arrives, even before its TTL expires.",
+   "cite": "client-best-practices.md lines 148-149 ('In particular, treat...')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "To preserve provider prompt-caching of the tools array: append newly discovered tool definitions after the cache breakpoint rather than re-sorting the tools array, OR route every call through a single stable call_tool({name,args}) meta-tool so the array never changes.",
+   "cite": "client-best-practices.md lines 156-159"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Treat server disconnection as a conversation-boundary operation rather than a per-turn operation, to avoid invalidating provider prompt caches unnecessarily.",
+   "cite": "client-best-practices.md line 160"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "When output schema is absent for a tool used in programmatic/code-mode calling, either (a) accept a generic type (any/string) and handle unstructured output downstream, or (b) use a host-brokered extract(value, ExpectedType) helper routed through the same stub-interception path (never a direct sandbox network call) to a fast auxiliary model, validating the result against ExpectedType before use.",
+   "cite": "client-best-practices.md lines 207-210"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "In programmatic tool calling, apply the same human-in-the-loop confirmation / authorization policy to sandbox-originated tool calls as to direct calls; the host/broker remains the MCP host for spec purposes.",
+   "cite": "client-best-practices.md line 287, citing /specification/2026-07-28/server/tools#security-considerations"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "Grant categorical approval for a class of tool calls during a script run (e.g., 'allow ticketing_createIssue for this script run') instead of prompting per iteration, but the broker MUST still evaluate each call against that grant.",
+   "cite": "client-best-practices.md line 287"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Apply the same input-review/untrusted-input policy to brokered (sandbox-to-server) tool results flowing to another server as to directly-model-mediated calls; output truncation alone is not sufficient to prevent exfiltration.",
+   "cite": "client-best-practices.md line 288"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Give the sandbox direct network access; all external communication must flow through the host broker, which enforces authorization and access control.",
+   "cite": "client-best-practices.md line 289"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Expose API keys/tokens/credentials to generated sandbox code; the host holds credentials and adds authentication when forwarding calls to servers.",
+   "cite": "client-best-practices.md line 290"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Set timeouts and memory limits on sandbox execution to prevent runaway scripts.",
+   "cite": "client-best-practices.md line 291"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Validate and truncate sandbox console output before feeding it back to the model.",
+   "cite": "client-best-practices.md line 292"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Generated language-SDK wrappers around tools/call SHOULD convert an isError:true tool response into a thrown/raised exception so model-authored code can use try/catch.",
+   "cite": "client-best-practices.md lines 297-299"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "If an uncaught error terminates a programmatically-generated script, surface the error as the script's result so the model can self-correct.",
+   "cite": "client-best-practices.md lines 299-301 ('If an uncaught error terminates the script, surface it as the script's result')"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "MCP tool-level errors are represented as a successful protocol response carrying isError: true, not as a transport-level failure.",
+   "cite": "client-best-practices.md lines 296-298, citing /specification/2026-07-28/server/tools#error-handling"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "When a skill declares which MCP servers it needs (agent-skills integration), the host should connect those servers only when that skill is invoked, rather than eagerly at startup.",
+   "cite": "client-best-practices.md line 130"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "A Tier 1 SDK must implement all non-experimental protocol features and the optional capabilities sampling and elicitation ('complete protocol implementation').",
+   "cite": "community__sdk-tiers.md lines 26-27"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "A Tier 2 SDK is 'actively-maintained' and 'working toward full protocol specification support' (not yet complete).",
+   "cite": "community__sdk-tiers.md line 28"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Experimental features and protocol extensions (e.g., Tasks, MCP Apps) are not required for any tier (1, 2, or 3).",
+   "cite": "community__sdk-tiers.md lines 31-32"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1: 100% conformance-test pass rate (of applicable required tests).",
+   "cite": "community__sdk-tiers.md line 38, 68"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 2: at least 80% conformance-test pass rate.",
+   "cite": "community__sdk-tiers.md line 38, 69"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Tier 3: no minimum conformance pass rate.",
+   "cite": "community__sdk-tiers.md line 38, 70"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Conformance scores are computed only over 'applicable required tests': tests for the spec version the SDK targets, excluding tests marked pending/skipped, excluding experimental-feature tests, excluding legacy backward-compat tests (unless the SDK claims legacy support), and excluding tests labeled 'disputed' until resolved.",
+   "cite": "community__sdk-tiers.md lines 72-78"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1: support new protocol features before the next spec version release, on a timeline agreed per release based on feature complexity.",
+   "cite": "community__sdk-tiers.md line 39"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 2: support new protocol features within 6 months of spec release.",
+   "cite": "community__sdk-tiers.md line 39"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1: triage new issues (label + validity determination, not resolution) within 2 business days.",
+   "cite": "community__sdk-tiers.md lines 40, 47"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Tier 2: triage issues within one month.",
+   "cite": "community__sdk-tiers.md line 40"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1: resolve critical (P0) bugs within 7 days.",
+   "cite": "community__sdk-tiers.md line 41"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Tier 2: resolve critical (P0) bugs within two weeks.",
+   "cite": "community__sdk-tiers.md line 41"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1 requires a stable release with clear versioning (idiomatic versioning, documented breaking-change policy).",
+   "cite": "community__sdk-tiers.md lines 42, 52-56"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Tier 2 requires at least one stable release.",
+   "cite": "community__sdk-tiers.md line 42"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "A 'Stable Release' is a published version explicitly marked production-ready, e.g. 1.0.0 or higher, with no pre-release identifiers (-alpha, -beta, -rc).",
+   "cite": "community__sdk-tiers.md lines 52-53"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1 documentation must be comprehensive with examples for all features.",
+   "cite": "community__sdk-tiers.md line 43"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Tier 2 documentation must at minimum cover core features (basic documentation).",
+   "cite": "community__sdk-tiers.md line 43"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1 and Tier 2 both require a published dependency update policy; not required for Tier 3.",
+   "cite": "community__sdk-tiers.md line 44"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1 requires a published roadmap that outlines concrete steps/work items tracking implementation of required (non-experimental, plus optional capabilities) MCP spec components.",
+   "cite": "community__sdk-tiers.md lines 45, 58-60"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Tier 2 requires a published plan toward Tier 1, or an explicit explanation for remaining at Tier 2.",
+   "cite": "community__sdk-tiers.md line 45"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "SDK repositories must use consistent GitHub issue labels to enable automated triage-metric reporting: one Type label per issue (bug / enhancement / question, or native GitHub issue types as a substitute), one Status label (needs confirmation / needs repro / ready for work / good first issue / help wanted), and a Priority label when actionable (P0/P1/P2/P3), using these exact label names.",
+   "cite": "community__sdk-tiers.md lines 105-141"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "P0 (Critical) is defined as: security vulnerabilities with CVSS >= 7.0 (High/Critical), OR core-functionality failures that prevent basic MCP operations — connection establishment, message exchange, or use of core primitives (tools, resources, prompts).",
+   "cite": "community__sdk-tiers.md lines 143-147"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "An SDK may request tier advancement by self-assessing, opening a supporting-evidence issue in modelcontextprotocol/modelcontextprotocol, passing automated conformance testing, and receiving SDK Working Group maintainer approval (final assignment made by the Working Group).",
+   "cite": "community__sdk-tiers.md lines 86-93"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 1 -> Tier 2 relegation occurs if any conformance test on the latest stable release fails continuously for 4 weeks.",
+   "cite": "community__sdk-tiers.md lines 97-100"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Tier 2 -> Tier 3 relegation occurs if more than 20% of conformance tests fail continuously for 4 weeks.",
+   "cite": "community__sdk-tiers.md lines 97-101"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "An SDK may also be relegated if issues remain unaddressed for two months (independent of the conformance-failure relegation trigger).",
+   "cite": "community__sdk-tiers.md line 103"
+  }
+ ],
+ "wire_details": [
+  "_meta / caching keys: ttlMs and cacheScope are hint fields carried on tools/list, server/discover, and resources/read results per the caching utility (client-best-practices.md lines 145-147); exact field location (top-level vs _meta) and cacheScope enum values are NOT given in the four focus files — only named in prose, pointing to /specification/2026-07-28/server/utilities/caching, which was not part of this reading assignment (flag as open question / needs separate read of that spec page).",
+  "Notification method name: notifications/tools/list_changed (exact string, client-best-practices.md line 140, 148).",
+  "Error field: isError (boolean) on a tools/call result — 'a successful response with isError: true rather than a transport failure' (client-best-practices.md lines 296-298); no JSON-RPC error code is used for tool-execution failures, only this in-band boolean.",
+  "outputSchema is an optional field on a tool definition (client-best-practices.md line 178, 205), referenced via /specification/2026-07-28/server/tools#output-schema.",
+  "Method name referenced for server handshake in the dynamic-server-management diagram: server/discover (client-best-practices.md line 118) — returns 'Supported versions + capabilities' per the diagram; not otherwise documented in the four files.",
+  "Illustrative (non-normative, example-only) meta-tool/method names used for progressive discovery are host-invented, not protocol methods: search_tools, get_tool_details, search_available_servers, enable_server, disable_server, call_tool (client-best-practices.md lines 52-70, 112-127, 158-159) — these are host-side UX conventions, not part of the MCP wire protocol.",
+  "Stable-release version convention: 1.0.0 or higher, no pre-release identifiers -alpha, -beta, -rc (community__sdk-tiers.md line 53).",
+  "Conformance test source repository: https://github.com/modelcontextprotocol/conformance (community__sdk-tiers.md line 64).",
+  "Tier-advancement issue tracker: modelcontextprotocol/modelcontextprotocol GitHub repo (community__sdk-tiers.md line 89).",
+  "Exact required GitHub label strings (must match verbatim): Type — bug, enhancement, question; Status — 'needs confirmation', 'needs repro', 'ready for work', 'good first issue', 'help wanted'; Priority — P0, P1, P2, P3 (community__sdk-tiers.md lines 113-141).",
+  "P0 CVSS threshold: >= 7.0 (High or Critical severity) (community__sdk-tiers.md line 145).",
+  "Key program dates: conformance tests available 2026-01-23; official SDK tiering published 2026-02-23 (community__sdk-tiers.md lines 12-19)."
+ ],
+ "sdk_implications": [
+  "The PowerShell SDK must implement, at minimum for Tier 2 candidacy: full protocol core (connection establishment/handshake, message exchange, tools, resources, prompts) since P0 bugs are defined around exactly these primitives — treat these as the non-negotiable conformance floor.",
+  "For Tier 1 candidacy the SDK must also implement sampling and elicitation as client-side optional capabilities, plus 100% of applicable (non-experimental, non-legacy-unless-claimed, non-pending, non-disputed) conformance tests for whichever spec version(s) it targets — plan explicit conformance-test-suite integration (from github.com/modelcontextprotocol/conformance) into CI from day one, since both tiers are graded mechanically against it.",
+  "Tasks and MCP Apps (protocol extensions) and other experimental features are explicitly optional at every tier — do not block a Tier 1/2 push on implementing them, but the roadmap should still state their status ('required roadmap' language covers only non-experimental + optional capabilities).",
+  "Client component MUST implement the isError:true convention for tool call failures — the PowerShell SDK's client-side tool-invocation wrapper should surface isError:true as a thrown PowerShell exception/terminating error (mirroring client-best-practices.md 'Generated wrappers should convert this into a thrown exception'), not as a normal return with a hidden error flag, to match idiomatic PowerShell error handling (try/catch, -ErrorAction) while staying protocol-correct.",
+  "If the SDK later supports building 'host' applications (agents) atop MCP clients, it should expose hooks for: tool-definition caching keyed off ttlMs/cacheScope, list_changed-triggered cache invalidation, and optional progressive-discovery helpers (a search/catalog layer) — these are best-practice/optional but a Tier-1-aspiring, feature-complete SDK would plausibly need extension points for host authors to implement them, even though the spec itself doesn't mandate a specific discovery API.",
+  "Repository hygiene for tier credibility: adopt GitHub's native issue types (bug/enhancement/question) or the exact label strings; set up Status and Priority labels verbatim as specified; document and observe issue-triage SLAs (2 business days for Tier 1 / 1 month for Tier 2) and P0 resolution SLAs (7 days / 2 weeks) from day one so historical metrics support a future tier-advancement request.",
+  "Ship a genuine 1.0.0 (no -alpha/-beta/-rc) as the 'Stable Release' gate for even Tier 2, with a documented semver/breaking-change policy ('clear versioning') and a published dependency-update policy — both required at Tier 1 and Tier 2.",
+  "Publish a roadmap document (even pre-1.0) enumerating required (non-experimental) spec components and their implementation status, since 'published roadmap' (Tier 1) / 'published plan toward Tier 1' (Tier 2) is a hard requirement, not just nice-to-have.",
+  "Because the repo is currently empty except MIT LICENSE and there is no local pwsh/dotnet SDK in this environment, actual implementation and conformance-test execution cannot happen in this sandbox — planning must assume CI (e.g. GitHub Actions with pwsh + .NET) will run the conformance suite; note this as an environment constraint for the plan.",
+  "Design-principles.md implies API design choices for the PowerShell SDK should favor a single idiomatic PowerShell pattern per concern (convergence over choice), build only the resources/tools/prompts primitives and let higher-level patterns (skills, apps, tasks) be layered by the host rather than baked into core cmdlets (composability over specificity), and support capability negotiation gracefully (interoperability over optimization) — i.e., the SDK's client must correctly perform capability negotiation and degrade when a server lacks sampling/elicitation/etc. rather than assuming full support.",
+  "'Stability over velocity' and 'pragmatism over purity' argue for a conservative, backward-compatible cmdlet/module API surface for the PowerShell SDK once 1.0 ships, since spec additions are permanent commitments SDKs must keep supporting."
+ ],
+ "open_questions": [
+  "The four focus files do not give the full JSON-RPC shapes (params/result field names, required/optional) for tools/list, resources/read, or the newly-referenced server/discover method; these must be pulled from schema.ts / 2026-07-28_schema.json and the corresponding /specification/2026-07-28/server/* pages, which were out of scope for this pass.",
+  "The exact shape and enum values of the cacheScope hint and the ttlMs field's location (top-level field vs a _meta.\"io.modelcontextprotocol/...\" key) are not stated in the read files — need the caching utility spec page (/specification/2026-07-28/server/utilities/caching) to get wire-level detail.",
+  "server/discover appears only in an illustrative mermaid sequence diagram in client-best-practices.md; it is unclear whether this is a real 2026-07-28 protocol method (replacing/complementing 'initialize') or purely illustrative host-invented terminology — must verify against schema.ts and the lifecycle/handshake spec page before treating it as normative.",
+  "community__sdk-tiers.md and community__design-principles.md are community-process pages without explicit revision binding (no '2026-07-28' path segment) — unclear whether tier requirements are versioned per spec revision or are a standing cross-revision governance policy; treat as currently-in-force policy but note it is not itself part of the versioned specification.",
+  "No PowerShell SDK is listed in the official SDK table (Tier 1: TypeScript, Python, C#, Go, Rust; Tier 2: Java, Ruby; Tier 3: Swift, PHP, Kotlin) — confirm whether an unlisted new-language SDK must first go through some onboarding/recognition process by the SDK Working Group before tiering applies at all, which is not addressed in these four pages.",
+  "Conformance test suite's actual applicable-test count/categories per spec version, and how percentage pass rate is computed with partial suites for a brand-new SDK, is not detailed here — need conformance_README.md / conformance_SDK_INTEGRATION.md (available locally per the task's file list but not read in this pass) to plan CI integration precisely."
+ ],
+ "source": "docs/2026-07-28/develop/clients/client-best-practices.md; docs/2026-07-28/sdk.md; community/sdk-tiers.md; community/design-principles.md (all four read in full, no skimming)",
+ "summary": "Client Best Practices (2026-07-28) is entirely client-side guidance (SHOULD/MAY, no protocol MUSTs) for scaling hosts across many tools/servers: progressive discovery (tools/list deferred injection, search_tools/get_tool_details meta-tools, context-window threshold 1-5%, caching via ttlMs/cacheScope per the caching utility, list_changed-triggered invalidation, prompt-cache-preserving append-only tool arrays) and programmatic tool calling / code mode (sandboxed script execution, host-brokered stub interception, no direct sandbox network access, no credential exposure, isError:true -> thrown exception convention, uncaught errors surfaced as script result). docs/sdk.md lists official SDKs and tiers: Tier 1 (TypeScript, Python, C#, Go, Rust), Tier 2 (Java, Ruby), Tier 3 (Swift, PHP, Kotlin) — no PowerShell SDK exists yet. community/sdk-tiers.md defines the tiering system precisely: conformance pass rate (100%/80%/none), feature-adoption timelines (per-release/6mo/none), issue triage SLA (2 business days/1 month/none), critical-bug SLA (7 days/2 weeks/none), stable-release and versioning requirements, documentation depth, dependency policy, roadmap; plus exact required GitHub label taxonomy, P0 definition (CVSS>=7.0 or core-primitive failure), advancement process, and relegation rules (any test failing 4 weeks: T1->T2; >20% failing 4 weeks: T2->T3; unaddressed issues 2 months). community/design-principles.md gives eight cross-cutting values (convergence, composability, interoperability, stability, capability-over-compensation, demonstration, pragmatism, standardization) guiding protocol evolution and, by extension, SDK API design conservatism.</summary>\n"
+}

@@ -1,0 +1,295 @@
+{
+ "source": "Concurrency and process I/O model for a PowerShell MCP server. Spec pages (2026-07-28, local copies under scratchpad/spec/pages/): specification__2026-07-28__basic__transports__stdio.md (\"stdio.md\"), __basic__transports__index.md (\"transports.md\"), __basic__transports__streamable-http.md (\"http.md\"), __basic__patterns__cancellation.md (\"cancel.md\"), __basic__patterns__subscriptions.md (\"subs.md\"), __basic__patterns__progress.md (\"progress.md\"), __basic__index.md (\"basic.md\"), __server__utilities__logging.md (\"logging.md\"), __changelog.md, docs__2026-07-28__tools__debugging.md (\"debugging.md\"), docs__2026-07-28__develop__build-server.md (\"build-server.md\"); schema.ts (2026-07-28). PowerShell facts verified against raw.githubusercontent.com: PowerShell/PowerShell master sources (scriptblock.cs, LocalPipeline.cs, ConsoleHost.cs, ConsoleHostUserInterface.cs, MshCommandRuntime.cs, PowerShell.cs, RunspacePool.cs, InitialSessionState.cs, StartSleepCommand.cs, WaitEventCommand.cs, WriteConsoleCmdlet.cs), CHANGELOG/7.2.md, 7.4.md, 7.5.md, 7.6.md, and MicrosoftDocs/PowerShell-Docs reference/7.5 and 7.6 (about_Character_Encoding, about_Redirection, about_Pwsh, about_Classes, Start-ThreadJob, ConvertFrom-Json, ConvertTo-Json). Claims marked [VERIFY] rest on expert knowledge and must be checked by experiment (no pwsh in this container).",
+ "summary": "The stdio binding is newline-delimited UTF-8 JSON-RPC on stdin/stdout; stdout must carry nothing else, stderr is free for logs, stdin EOF is the primary graceful-shutdown signal, cancellation is a `notifications/cancelled` message, and `subscriptions/listen` is a long-lived request whose notifications share the single channel and are demultiplexed by `_meta[\"io.modelcontextprotocol/subscriptionId\"]`. PowerShell's platform constraints dominate the design: (a) every runspace executes one pipeline at a time; (b) script blocks and PowerShell classes are runspace-affine — invoking a bound script block from another thread is marshalled as an engine event to its home runspace and blocks the caller until that runspace pumps events, which a busy server loop never does (scriptblock.cs InvokeWithPipe, LocalPipeline.cs), so .NET delegates/continuations/`-Action` handlers must never run PowerShell code; (c) the ConsoleHost writes warnings/verbose/information/Write-Host and, when stderr is not redirected, even error records to stdout (ConsoleHostUserInterface.cs), while progress is suppressed only when stdout is redirected (since 7.2). The recommended architecture is therefore a single dispatcher thread (the caller's runspace) that owns a BOM-less UTF-8 StreamReader/StreamWriter over `[Console]::OpenStandardInput/Output()`, waits with `Task.WaitAny` on `ReadLineAsync` plus a `BlockingCollection` fed by worker runspaces, and executes user handlers as pre-registered functions in a hostless `RunspacePool` (`InitialSessionState.CreateDefault2`, `ThreadOptions = ReuseThread`) via `[powershell]::Create()` + `BeginInvoke`, cancelling with `BeginStop` plus a per-request `CancellationToken`. Subscriptions are handled natively by the dispatcher (registry + fan-out per subscription ID), never by a worker. Target PowerShell 7.4+ (LTS); Windows PowerShell 5.1 lacks in-box ThreadJob, `InvokeAsync`, `System.Text.Json`, `-AsHashtable` and defaults to non-UTF-8 console encodings.",
+ "methods": [
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server",
+   "params": "params: SubscriptionsListenRequestParams extends RequestParams { notifications: SubscriptionFilter (required) }; SubscriptionFilter { toolsListChanged?: boolean; promptsListChanged?: boolean; resourcesListChanged?: boolean; resourceSubscriptions?: string[] } (schema.ts 1270-1302). Standard per-request _meta (protocolVersion, clientCapabilities, clientInfo) applies.",
+   "result": "Long-lived: no result until the SERVER tears the stream down gracefully; then SubscriptionsListenResult extends Result { resultType: \"complete\"; _meta: SubscriptionsListenResultMetaObject { \"io.modelcontextprotocol/subscriptionId\": RequestId (required, equals the response id) } } (schema.ts 1326-1351; subs.md §Graceful Closure). Client-initiated cancel on stdio (notifications/cancelled) gets no response (cancel.md §Behavior Requirements 3).",
+   "capability_gate": "None declared for the method itself in the pages read; server acknowledges only the filter subset it supports (subs.md §Acknowledgment).",
+   "notes": "First message for the subscription MUST be notifications/subscriptions/acknowledged carrying the subscription ID; ordering is per subscription ID, other subscriptions' messages MAY interleave on stdio (subs.md §Acknowledgment). Concurrency implication: the SDK dispatcher must own the registry and the outbound queue so the ack precedes any fan-out for that ID. Server holds no subscription state across stdio reconnects (subs.md 162-164). Must NOT occupy a worker runspace for the lifetime of the stream."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "params": "params: SubscriptionsAcknowledgedNotificationParams extends NotificationParams { notifications: SubscriptionFilter (the honored subset); _meta: { \"io.modelcontextprotocol/subscriptionId\": RequestId } } (schema.ts 1371-1401; subs.md §Acknowledgment).",
+   "result": "n/a (notification)",
+   "capability_gate": "n/a",
+   "notes": "MUST be sent before any other notification on that subscription (subs.md 56-59)."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (stdio only) and notification s->c (only for subscriptions/listen teardown)",
+   "params": "params: CancelledNotificationParams extends NotificationParams { requestId: RequestId (required); reason?: string } (schema.ts 620-651).",
+   "result": "n/a (notification)",
+   "capability_gate": "n/a",
+   "notes": "Client->server on stdio is the only cancellation mechanism (stdio.md §Cancellation; cancel.md §Transport-Specific). Server MUST send it only referencing a subscriptions/listen request when tearing that stream down and MUST NOT use it otherwise (cancel.md 13-16, 73-74). On Streamable HTTP no client notification is expected; closing the SSE stream is the signal (http.md §Cancellation). SDK: map requestId -> running [powershell] instance; call BeginStop; suppress any later response for that id."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification s->c",
+   "params": "params: ProgressNotificationParams { progressToken: ProgressToken (string|integer, from request _meta.progressToken); progress: number (MUST increase); total?: number; message?: string } (schema.ts 1009-1043; progress.md).",
+   "result": "n/a",
+   "capability_gate": "Only when the request carried _meta.progressToken (progress.md §Progress Flow).",
+   "notes": "Request-scoped: flows on the same single channel (stdio) or the request's own SSE stream (http), never on a listen stream (http.md 124-131). MUST stop after completion (progress.md 92) -> SDK must drop progress enqueued by a worker after its response/cancellation was emitted. SHOULD rate-limit (progress.md 91)."
+  },
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "DiscoverRequest (schema.ts 653-662: servers MUST implement; clients MAY call). Field-level params not extracted here.",
+   "result": "DiscoverResult with supportedVersions etc. (stdio.md §Backward Compatibility 136-137); not extracted field-by-field here.",
+   "capability_gate": "None; mandatory for servers (changelog Major change 3).",
+   "notes": "Relevant to I/O: legacy clients may probe with it before anything else; on stdio it must be answered promptly, so the dispatcher must not block on pool warm-up (open the RunspacePool with BeginOpen and answer discover from the dispatcher thread)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Write anything to stdout that is not a valid MCP message; each message is one line; messages MUST NOT contain embedded newlines.",
+   "cite": "stdio.md lines 15, 20-21"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Encode JSON-RPC messages as UTF-8 (no BOM is implied by 'valid MCP message' framing; a BOM on stdout would be a non-message byte sequence).",
+   "cite": "transports.md §Messages line 31; stdio.md line 20"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Write UTF-8 strings to stderr for any logging (info, debug, error); client MAY capture/forward/ignore and SHOULD NOT treat stderr as an error indicator.",
+   "cite": "stdio.md lines 16-19; logging.md deprecation notice recommends stderr for stdio"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Write JSON-RPC requests to stdout; server-initiated interactions are carried in InputRequiredResult (MRTR).",
+   "cite": "stdio.md lines 57-60; transports.md §Messages 34-38"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Exit promptly when stdin is closed / reads return EOF (primary and only portable graceful-shutdown signal); client SHOULD close stdin, wait, then force-terminate (SIGTERM->SIGKILL, TerminateProcess/Job Objects on Windows).",
+   "cite": "stdio.md §Shutdown lines 94-109"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Initiate shutdown by closing its stdout and exiting.",
+   "cite": "stdio.md line 111-112"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Send notifications/cancelled referencing the request ID to cancel on stdio (no per-request stream exists).",
+   "cite": "stdio.md §Cancellation 83-85; cancel.md §Transport-Specific"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Stop work on a cancelled request as soon as practical, free resources, and not send a response for it.",
+   "cite": "stdio.md 86-87; cancel.md §Behavior Requirements 3"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send any further messages (responses, progress, log notifications) for a cancelled request.",
+   "cite": "stdio.md line 87; http.md §Cancellation 238-239"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Ignore cancellation for unknown IDs, already-completed requests, or uncancellable work; invalid/malformed cancellations SHOULD be ignored.",
+   "cite": "cancel.md §Behavior Requirements 4, §Error Handling"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Handle the cancel/complete race gracefully (cancellation may arrive after the response was sent).",
+   "cite": "cancel.md §Timing Considerations 91"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send notifications/cancelled referencing a subscriptions/listen request ID when tearing down that subscription stream; MUST NOT send notifications/cancelled for any other purpose.",
+   "cite": "cancel.md lines 13-16, 73-74"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "On server-initiated subscription end (e.g., shutdown) respond to the original subscriptions/listen request with a complete result carrying _meta subscriptionId before closing.",
+   "cite": "subs.md §Graceful Closure 130-137"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send notifications/subscriptions/acknowledged as the first message of a subscription (per subscription ID; other subscriptions' messages MAY interleave on stdio) and MUST NOT send notification types the client did not request.",
+   "cite": "subs.md lines 16-17, 56-61"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Tag every listen-stream notification and the closing response with _meta[\"io.modelcontextprotocol/subscriptionId\"] = the listen request's JSON-RPC id.",
+   "cite": "subs.md §Receiving Notifications 87-94; basic.md §_meta 415"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Emit notifications/message for a request lacking _meta[\"io.modelcontextprotocol/logLevel\"]; never deliver it on a listen stream; feature is deprecated -> stderr instead.",
+   "cite": "logging.md lines 65-74; changelog Major change 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Not rely on prior requests on the same connection/process for context; treat the stdio process as neither session nor conversation; cross-request state only via explicit identifiers.",
+   "cite": "basic.md §Statelessness 193-211"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Not reuse a request ID while a request with that ID is outstanding (server may therefore key in-flight tracking by id; duplicate handling is unspecified).",
+   "cite": "basic.md §Requests 48-51"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Establish timeouts for sent requests; SDKs SHOULD make them configurable per request; MAY reset on progress but SHOULD enforce a maximum.",
+   "cite": "cancel.md §Timeouts 48-66"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat SSE stream closure as cancellation on Streamable HTTP; SHOULD emit X-Accel-Buffering: no; encouraged to send ':' keep-alive comment lines on long-lived streams.",
+   "cite": "http.md lines 133-150, 235-239"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Restart a server that exits unexpectedly; in-flight requests are lost; listen streams must be re-established (server keeps no subscription state).",
+   "cite": "stdio.md §Unexpected Termination 116-120; subs.md 162-164"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "PowerShell platform: a runspace executes exactly one pipeline at a time; concurrency requires multiple runspaces (RunspacePool/ThreadJob/API); nested pipelines only from the owning thread.",
+   "cite": "LocalPipeline.cs (IsNested -> UseCurrentThread; otherwise thread per ThreadOptions)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "PowerShell platform: invoke a session-state-bound ScriptBlock (or a PowerShell class method without [NoRunspaceAffinity()]) from a thread whose current runspace differs from its home runspace while that runspace is busy — the call is queued as an OnScriptBlockInvoke engine event and blocks the caller (waitForCompletionInCurrentThread: true) until the home runspace processes pending actions, which only happens at pipeline end or in Wait-Event.",
+   "cite": "scriptblock.cs InvokeWithPipe lines 953-1037; LocalPipeline.cs line 490 (ProcessPendingActions at pipeline end); WaitEventCommand.cs 93-95; StartSleepCommand.cs (no pumping); about_Classes Example 5"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "PowerShell platform: let engine streams reach the ConsoleHost in the main runspace: warnings/verbose/debug/information/Write-Host are written to stdout; error records go to stdout unless stderr is redirected AND the host is non-interactive; progress is dropped only because stdout is redirected (7.2+).",
+   "cite": "ConsoleHostUserInterface.cs WriteErrorLine 1367-1401, WriteToConsole 740, WriteProgress 1341-1355; CHANGELOG/7.2.md line 1477 (#14716)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "PowerShell platform: open raw standard streams with explicit BOM-less UTF-8 ([Console]::OpenStandardInput/Output/Error + StreamReader/StreamWriter with [System.Text.UTF8Encoding]::new($false)); do not rely on [Console]::In/Out/Error, $OutputEncoding or [Console]::OutputEncoding (Windows defaults to OEM/ANSI code pages; $OutputEncoding only affects native-command piping).",
+   "cite": "about_Character_Encoding (7.5) §Changing the default encoding; expert knowledge on .NET Console encoding defaults on Windows [VERIFY]"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Launch with pwsh -NoLogo -NoProfile -NonInteractive [-ExecutionPolicy Bypass] -File server.ps1 so no banner/profile output hits stdout and interactive prompts throw instead of hanging; with -File the host does not consume stdin (only '-File -' or no command reads commands from stdin).",
+   "cite": "about_Pwsh (7.5) §-File, -NoLogo, -NonInteractive, -NoProfile; ConsoleHost.cs 1613 (ReadFromStdin = explicit || IsInputRedirected) and 2086/2148 (cleared for -File/-Command)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Run every user handler in a hostless worker runspace (no PSHost passed) so Write-Host/Write-Progress/Read-Host cannot touch stdout; Write-Host records then land in $ps.Streams.Information because the InformationOutputPipe is non-null.",
+   "cite": "MshCommandRuntime.cs WriteInformation 754-800; WriteConsoleCmdlet.cs 108-123 (PSHOST tag)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Serialize every outbound message with a single writer (dispatcher thread) so lines are atomic and per-subscription ordering (ack first) is preserved; flush after every line.",
+   "cite": "stdio.md lines 15, 43-55; subs.md 56-61"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Serialize JSON with -Compress (or System.Text.Json) and validate that the encoded line contains no raw CR/LF before writing; emit LF only.",
+   "cite": "stdio.md line 15; ConvertTo-Json (7.5) -Compress"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Bound concurrency via RunspacePool max size (default e.g. [Environment]::ProcessorCount, min 1) and queue excess requests; the protocol imposes no ordering of responses.",
+   "cite": "stdio.md lines 43-55 (single channel, correlate by id); RunspacePool.cs SetMaxRunspaces/GetAvailableRunspaces"
+  }
+ ],
+ "wire_details": [
+  "Framing: one JSON-RPC message per line, delimiter '\\n'; reader must also accept '\\r\\n' (StreamReader.ReadLine strips both); writer emits '\\n' only ($writer.NewLine = \"`n\"); no BOM; UTF-8 (stdio.md 15; transports.md 31).",
+  "stdin: $in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false), $false, 65536); $line = $in.ReadLine() (null == EOF -> shutdown). Async: $task = $in.ReadLineAsync() -> Task[string]; .NET 8/9/10 also has ReadLineAsync([CancellationToken]) (PS 7.4+), absent on .NET Framework (5.1).",
+  "stdout: $out = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), [System.Text.UTF8Encoding]::new($false)); $out.AutoFlush = $true; $out.NewLine = \"`n\". Never use [System.Text.Encoding]::UTF8 (its preamble makes StreamWriter emit EF BB BF on a non-seekable stream) [VERIFY].",
+  "stderr: $err = [System.IO.StreamWriter]::new([Console]::OpenStandardError(), [System.Text.UTF8Encoding]::new($false)); AutoFlush = $true. Alternative: [Console]::Error (uses [Console]::OutputEncoding, OEM code page on Windows).",
+  "Do not set [Console]::OutputEncoding / [Console]::InputEncoding as the primary fix: on Windows the setter calls SetConsoleOutputCP/SetConsoleCP; behaviour without an attached console must be verified [VERIFY]; $OutputEncoding (PS 7 default UTF-8, Windows PowerShell 5.1 default ASCII) only governs piping to native executables (about_Character_Encoding).",
+  "Broken pipe: writing after the client closed stdout raises System.IO.IOException (EPIPE on Unix, ERROR_NO_DATA/ERROR_BROKEN_PIPE on Windows); .NET ignores SIGPIPE; treat as shutdown.",
+  "Launch line: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <server.ps1>; env POWERSHELL_UPDATECHECK=Off (update banner is interactive-only but harmless to disable) [VERIFY]; -NoProfileLoadTime exists (7.5 docs).",
+  "Runspaces: [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2() (Core engine only; CreateDefault() loads more), .ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread (Default == UseNewThread: a new Thread per pipeline, LocalPipeline.cs 172-173; ReuseThread uses one PipelineThread per runspace, 203-216), .ApartmentState, .LanguageMode ([PSLanguageMode]::FullLanguage — the ISS default is NoLanguage, InitialSessionState.cs 1749), .ExecutionPolicy, .ImportPSModule([string[]]), .ImportPSModulesFromPath(path), .Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new(name, definitionText)), .Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new(name, value, description)), .ThrowOnRunspaceOpenError = $true.",
+  "Pool: $pool = [runspacefactory]::CreateRunspacePool($min, $max, $iss, $null <# no host #>); $pool.ThreadOptions; $pool.ApartmentState; $pool.CleanupInterval (TimeSpan); $pool.Open() / BeginOpen(cb,state); SetMaxRunspaces(int) -> bool; GetAvailableRunspaces(); Close()/BeginClose()/Dispose() (RunspacePool.cs 696-1265).",
+  "Invocation: $ps = [powershell]::Create(); $ps.RunspacePool = $pool; $ps.AddCommand('__mcp_handler_<name>').AddParameters($dict) (or AddScript($text, $true)); $ar = $ps.BeginInvoke() -> IAsyncResult (.AsyncWaitHandle, .IsCompleted); $ps.EndInvoke($ar) -> PSDataCollection[PSObject]; $ps.InvokeAsync() -> Task[PSDataCollection[PSObject]] (PowerShell.cs 3083; PS 7.x, not 5.1 [VERIFY exact first version]); $ps.Streams.Error/Warning/Verbose/Debug/Information/Progress (PSDataCollection); $ps.HadErrors; $ps.InvocationStateInfo.State; event InvocationStateChanged (a .NET event — do not attach PowerShell handlers); $ps.Stop() / BeginStop(cb,state) / EndStop / StopAsync(cb,state) -> Task (PowerShell.cs 3741-3855); PSInvocationSettings { Host, ApartmentState, FlowImpersonationPolicy, AddToHistory }; $ps.Dispose().",
+  "Detaching user script blocks: $unbound = $sb.Ast.GetScriptBlock() (keeps parsed AST, drops SessionStateInternal) or [scriptblock]::Create($sb.ToString()) (re-parse); SessionStateFunctionEntry(name, $sb.ToString()) compiles once per runspace at open. $sb.Module / GetNewClosure() bindings are lost — document.",
+  "Runspace affinity mechanics: ScriptBlock.InvokeWithPipe -> if SessionStateInternal.ExecutionContext != current TLS context (or TLS context null) -> Events.SubscribeEvent(OnScriptBlockInvoke ...) + GenerateEvent(processInCurrentThread: true, waitForCompletionInCurrentThread: true) (scriptblock.cs 953-1037). Pending actions are processed only at LocalPipeline end (LocalPipeline.cs 490) and inside Wait-Event every 200 ms (WaitEventCommand.cs 93-95); Start-Sleep only WaitOne()s (StartSleepCommand.cs 94). Classes: [NoRunspaceAffinity()] attribute (about_Classes Example 5; 7.4+ [VERIFY]).",
+  "ThreadJob: module name 'ThreadJob' in 7.4 and 7.5 (7.5 reverted the rename, CHANGELOG/7.5.md line 201); 'Microsoft.PowerShell.ThreadJob' v2.2.0 plus proxy 'ThreadJob' v2.1.0 in 7.6 (CHANGELOG/7.6.md 508-513). Start-ThreadJob [-ScriptBlock] [-InitializationScript] [-ArgumentList] [-ThrottleLimit <int, default 5, session-global>] [-StreamingHost <PSHost>] [-InputObject]; supports $using:. Not in-box in Windows PowerShell 5.1 (install Microsoft.PowerShell.ThreadJob from the Gallery).",
+  "Concurrent collections (all in-box on .NET 8+): [System.Collections.Concurrent.BlockingCollection[object]]::new() with .Add(), .TryTake([ref]$item, $ms, $ct), .CompleteAdding(), static ::TakeFromAny([BlockingCollection[object][]], [ref]$item, $ms, $ct); [System.Collections.Concurrent.ConcurrentDictionary[string,object]] (TryAdd/TryRemove/TryGetValue/AddOrUpdate); [System.Collections.Concurrent.ConcurrentQueue[T]]; [System.Threading.Channels.Channel]::CreateUnbounded[object]() (generic-method syntax needs PS 7.3+; Reader.TryRead / WaitToReadAsync().AsTask()); [hashtable]::Synchronized() (per-call lock only); [System.Threading.ManualResetEventSlim], [System.Threading.SemaphoreSlim], [System.Threading.Monitor]::Enter/Exit or [System.Threading.Lock] (.NET 9+, i.e. PS 7.5+).",
+  "Cancellation: [System.Threading.CancellationTokenSource]::new(); .CancelAfter($ms); .Token; .Cancel(); .Dispose(). Do NOT call $token.Register({...}) with a PowerShell script block (delegate runs on a foreign thread -> affinity marshalling). Pass the token to .NET APIs (HttpClient.GetAsync($uri,$token), Task.Delay($ms,$token)) and poll $token.IsCancellationRequested in loops.",
+  "Waiting from PowerShell: [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]$tasks, $ms) -> index or -1; $task.GetAwaiter().GetResult() (unwraps AggregateException); [System.Threading.WaitHandle]::WaitAny([WaitHandle[]], $ms). ConsoleHost installs no SynchronizationContext, so blocking on tasks cannot deadlock on a UI context [VERIFY].",
+  "Engine events: Register-ObjectEvent/Register-EngineEvent -Action run in the origin runspace only when it pumps (pipeline end / Wait-Event); Wait-Event -Timeout <sec> pumps every 200 ms; Register-EngineEvent -SourceIdentifier PowerShell.Exiting fires on normal exit, not on SIGKILL [VERIFY for SIGTERM].",
+  "Signals: Ctrl+C -> ConsoleHost break handler stops the running pipeline (PipelineStoppedException: not catchable by catch, finally runs) (ConsoleHost.cs 417-527, BindBreakHandler 1347-1353); SIGTERM on Linux/macOS terminates the .NET process (no PowerShell finally) [VERIFY]; primary shutdown signal remains stdin EOF.",
+  "JSON cmdlets: ConvertTo-Json [-Depth 0..100, default 2 (emits warning when exceeded)] [-Compress] [-EnumsAsStrings] [-AsArray] [-EscapeHandling Default|EscapeNonAscii|EscapeHtml]; ConvertFrom-Json [-AsHashtable (OrderedHashtable since 7.3)] [-Depth] [-NoEnumerate] [-DateKind Default|Local|Utc|Offset|String (7.5+, #20925)] (7.5 docs; CHANGELOG/7.5.md 827). Alternative: [System.Text.Json.JsonDocument]::Parse / [System.Text.Json.JsonSerializer] (in-box on .NET 8+, absent on 5.1).",
+  "Progress: ConsoleHost drops progress records when Console.IsOutputRedirected (ConsoleHostUserInterface.cs 1352-1355; since 7.2 #14716); still set $ProgressPreference='SilentlyContinue' in every runspace for older/other hosts.",
+  "Error routing: ConsoleHostUserInterface.WriteErrorLine -> Console.Error only if Console.IsErrorRedirected && !IsInteractive, else ConsoleTextWriter -> Console.Out when stdout redirected (lines 740, 1374-1376).",
+  "Versions: 7.4 = .NET 8 (GA 2023-11-16, LTS); 7.5 = .NET 9 (STS); 7.6 = .NET 10 (LTS; 7.6.4 current, .NET SDK 10.0.302) (CHANGELOG/7.4.md 767, 7.5.md 485-491, 7.6.md head)."
+ ],
+ "sdk_implications": [
+  "Thread model (decision): one dispatcher = the runspace that called Start-McpServer. It owns the stdin reader, the stdout writer, the in-flight table (ConcurrentDictionary requestId -> {PowerShell, CancellationTokenSource, progressToken, startedAt}), the subscription registry, and the outbound queue (BlockingCollection[object]). Loop: $readTask = $in.ReadLineAsync(); $idx = [Task]::WaitAny(@($readTask, $outboundSignalTask), 250); on inbound line -> parse/dispatch; on outbound item -> write line + flush; on timeout -> housekeeping (reap completed PowerShell instances via IsCompleted, enforce handler timeouts, optional Wait-Event -Timeout 0 style pumping). No PowerShell code ever runs on a thread-pool thread.",
+  "Worker execution (decision): RunspacePool built from CreateDefault2 ISS, no PSHost, ThreadOptions=ReuseThread, ISS variables $ProgressPreference/$InformationPreference/$WarningPreference/$VerbosePreference/$DebugPreference='SilentlyContinue', $ErrorActionPreference='Stop', ISS functions: one SessionStateFunctionEntry per registered tool/resource/prompt handler (text from $sb.ToString()) plus a slim SDK runtime wrapper (Invoke-McpHandlerCore) — NOT the whole SDK module — to keep runspace open time low. Per request: $ps=[powershell]::Create(); $ps.RunspacePool=$pool; AddCommand('Invoke-McpHandlerCore').AddParameters(@{Request=<hashtable snapshot>; Outbound=$queue; Token=$cts.Token; ...}); BeginInvoke(). The wrapper (running inside the worker runspace, so PowerShell code on a PowerShell-owned thread) invokes the handler function, converts output/errors to a JSON-RPC response object, and Adds it to the outbound queue; progress/log helpers ($Context.ReportProgress(), Write-McpLog) also just enqueue. The dispatcher only writes; it never calls user code.",
+  "Handler registration contract: handlers are re-created unbound (Ast.GetScriptBlock / function text); closures, $script:/module-scope variables and $using: are not available inside handlers unless explicitly supported: optional $using: support = walk UsingExpressionAst at registration, evaluate in the registering runspace once, inject as ISS variables (values must be thread-safe/immutable) — document as snapshot semantics identical to Start-ThreadJob's. Handlers receive everything via parameters: -Arguments (hashtable), -Context (object with RequestId, ProgressToken, CancellationToken, ClientInfo/ClientCapabilities from _meta, LogLevel, methods to enqueue progress/notifications).",
+  "Never pass the ConsoleHost ($Host) into worker runspaces and never pass $Host as PSInvocationSettings.Host: with no host, Write-Host records go to $ps.Streams.Information, Write-Progress to $ps.Streams.Progress, Read-Host/prompts throw — exactly what an MCP server needs. Surface collected Warning/Verbose/Debug/Information streams to stderr (and to notifications/message only when the request carried io.modelcontextprotocol/logLevel).",
+  "Main-runspace hygiene: at Start-McpServer set the same preference variables in the caller's scope, wrap the loop in try/finally, make sure every statement in the loop discards its success output ($null = ..., [void]) because any stray object goes through Out-Default to the ConsoleHost and thus to stdout; never use Write-Output/Write-Host/Write-Information/Write-Warning/Write-Error in SDK code paths running on the dispatcher; log via the stderr StreamWriter with an explicit lock (Monitor) because worker runspaces may log concurrently.",
+  "Child processes: warn users that a native process started from a handler with inherited handles (Start-Process without -RedirectStandardOutput, or [Diagnostics.Process] without RedirectStandardOutput) writes straight into the MCP stdout pipe; `& exe` inside a PowerShell pipeline is safe because PowerShell captures the child's stdout into the pipeline; native stderr inherits our stderr (allowed).",
+  "Cancellation (decision): on notifications/cancelled: look up requestId; if present, mark cancelled (ConcurrentDictionary flag) BEFORE calling $cts.Cancel() and $ps.BeginStop($null,$null); the dispatcher drops any outbound item whose requestId is flagged cancelled (satisfies 'MUST NOT send further messages'); unknown/finished ids are ignored (cancel.md 79-82). Stop() interrupts only at cmdlet/statement checkpoints; long .NET calls need the CancellationToken. Per-request server-side timeout is optional (MAY) but should be configurable (cancel.md 59-60); implement as CancelAfter + BeginStop + JSON-RPC error response (allowed: timeout is not a client cancellation).",
+  "Subscriptions (decision): subscriptions/listen is handled by the dispatcher, never dispatched to the pool: validate filter; compute honored subset (server capabilities); under one lock: add registry entry {id, filter} and enqueue the acknowledged notification (ack-first ordering per ID). Fan-out API (Send-McpToolsListChanged, Send-McpResourceUpdated -Uri, ...) callable from any runspace: take the same lock, iterate registry, enqueue one notification per matching subscription with _meta subscriptionId. Client cancel (notifications/cancelled with the listen id) -> remove entry, no response. Server-initiated teardown -> emit per spec (see open question on ordering of notifications/cancelled vs. complete result). Shutdown -> for each active subscription enqueue the complete result with _meta subscriptionId, drain, then exit. Progress/log notifications are never routed to listen streams.",
+  "Event-driven sources (FileSystemWatcher, timers) must not use Register-ObjectEvent -Action expecting timely execution while the dispatcher loop runs: either (a) the dispatcher periodically calls Wait-Event -Timeout 0 / processes Get-Event items itself, or (b) users trigger Send-McpResourceUpdated from ThreadJobs/worker code. Document that the loop pumps engine events once per idle tick if option (a) is chosen [VERIFY that Wait-Event -Timeout 0 still calls ProcessPendingActions once].",
+  "Shutdown sequence (decision): trigger = stdin EOF, IOException on stdout, Stop-McpServer, or PipelineStoppedException (Ctrl+C) in finally. Steps: stop reading; set shutting-down flag; cancel all in-flight (cts.Cancel + BeginStop) or wait up to a configurable grace (default ~2 s) — spec requires prompt exit; send complete results for active subscriptions; drain outbound queue; flush and dispose stdout writer; $pool.Close(); $pool.Dispose(); dispose readers/writers; exit 0. Any exception while draining is logged to stderr and ignored (client may already be gone).",
+  "Raising .NET async results into PowerShell (decision): never attach PowerShell script blocks as delegates (ContinueWith, Register, event handlers, RegisterWaitForSingleObject). Use pull-based waits from a PowerShell thread: Task.WaitAny / WaitHandle.WaitAny / BlockingCollection.TryTake with timeouts, then $task.GetAwaiter().GetResult(). Worker-side async work (HttpClient etc.) is awaited synchronously inside the worker runspace (that thread is dedicated with ReuseThread, so blocking is fine).",
+  "Data crossing runspaces must be thread-safe or ownership-transferred: pass immutable strings/JSON text, freshly built hashtables/arrays that only one thread touches at a time, or Concurrent* types; do not share PSCustomObject/OrderedDictionary/ArrayList instances for mutation; convert PSObject-wrapped values (PSObject.BaseObject) before enqueueing.",
+  "JSON layer decision: default to ConvertFrom-Json -AsHashtable (-DateKind String on 7.5+ to keep ISO-8601-looking strings as strings; on 7.4 they become [datetime] — document or use System.Text.Json) and ConvertTo-Json -Compress -Depth 100 for output; assert absence of raw \\r/\\n in the final line; preserve JSON-RPC id type (integer vs string) as received; treat absent vs null via hashtable ContainsKey. Consider a System.Text.Json fast path on PS 7.x for exact round-tripping and lower per-call cost.",
+  "Streamable HTTP servers in PowerShell should reuse the same dispatcher/worker model; the transport layer (HttpListener or Kestrel-less System.Net.HttpListener) maps request-stream closure to the same cancel path and writes SSE ':' keep-alives on listen streams; not detailed here.",
+  "Performance budget (estimates, benchmark in implementation): pwsh cold start -NoProfile ~150-400 ms (Windows with AV noticeably more); Import-Module of a mid-size script module 50-300 ms (prefer one compiled psm1 over many dot-sourced files, avoid classes with heavy static init, avoid Add-Type at startup — Roslyn compile costs 1-3 s); RunspacePool open ~50-200 ms per runspace with CreateDefault2 (open with BeginOpen, min=1, grow lazily); per-request overhead: [powershell]::Create+AddCommand+BeginInvoke ~1-3 ms, JSON (de)serialization 0.5-5 ms for small payloads, queue hop <1 ms -> hundreds of tool calls per second are attainable, far beyond what a stdio client generates. Keep ReuseThread to avoid ~1 MB stack + thread creation per pipeline. Answer server/discover, tools/list etc. from cached, pre-serialized JSON on the dispatcher without touching the pool.",
+  "Windows PowerShell 5.1 support decision: either unsupported (recommended: target 7.4+ LTS; ship modules with CompatiblePSEditions=Core) or a degraded serial mode (single runspace, synchronous ReadLine loop, no concurrency, no cancellation of running handlers, custom JSON shims) — do not attempt full parity."
+ ],
+ "legacy_delta": [
+  "PowerShell 7.4 (.NET 8, LTS, GA 2023-11-16): baseline target. Has generic-method syntax ([Channel]::CreateUnbounded[object](), PS 7.3+), OrderedHashtable from -AsHashtable (7.3+), progress suppression when stdout redirected (7.2+), 'ANSI' encoding value, ThreadJob module named 'ThreadJob', StreamReader.ReadLineAsync(CancellationToken) available (.NET 7+), no ConvertFrom-Json -DateKind (ISO-like strings become [datetime]), no System.Threading.Lock (use Monitor/[object] lock).",
+  "PowerShell 7.5 (.NET 9, STS): adds ConvertFrom-Json -DateKind (#20925) and ConvertTo-Json BigInteger/large-enum-as-number fixes; ThreadJob module name reverted to 'ThreadJob' (#26997); System.Threading.Lock available; otherwise same model.",
+  "PowerShell 7.6 (.NET 10, LTS; current 7.6.4): ThreadJob shipped as 'Microsoft.PowerShell.ThreadJob' v2.2.0 with 'ThreadJob' v2.1.0 proxy (import by either name); NullReferenceException fix when writing progress from multiple threads (#25440) — relevant if any worker progress reaches a host; ConsoleHost stderr honors NO_COLOR (#24391). No known changes to runspace/pipeline threading.",
+  "Windows PowerShell 5.1 (.NET Framework 4.x, Windows only): no in-box Start-ThreadJob (install Microsoft.PowerShell.ThreadJob from the Gallery); no PowerShell.InvokeAsync/StopAsync (BeginInvoke/EndInvoke/BeginStop only) [VERIFY]; no System.Text.Json, no System.Threading.Channels, no ValueTask; no ReadLineAsync(CancellationToken); no generic-method call syntax (reflection needed); ConvertFrom-Json lacks -AsHashtable/-Depth/-NoEnumerate/-DateKind and yields PSCustomObject (duplicate-case keys fail); ConvertTo-Json default -Depth 2, escapes non-ASCII/HTML chars as \\uXXXX, no -EscapeHandling/-AsArray/-EnumsAsStrings; $OutputEncoding defaults ASCII, [Console]::OutputEncoding OEM, redirection '>' writes UTF-16LE with BOM (about_Character_Encoding §Windows PowerShell); Write-Progress is rendered even with redirected stdout [VERIFY]; no [NoRunspaceAffinity()] attribute; no ternary/??/Clean block; startup ~0.3-1 s; classes have more affinity bugs. Raw-stream approach ([Console]::OpenStandardInput/Output + explicit UTF8Encoding(false)) works on 4.x and is the only portable encoding fix.",
+  "Protocol-side deltas that shape the I/O model (2025-11-25 / 2025-06-18 -> 2026-07-28): no initialize/initialized handshake and no session state (every request self-describing; stdio process is not a session) — the dispatcher no longer needs a per-connection state machine; ping and logging/setLevel removed; resources/subscribe and the HTTP GET stream replaced by subscriptions/listen (long-lived request on the shared stdio channel, demuxed by subscriptionId); server-initiated JSON-RPC requests (sampling/elicitation/roots) removed in favour of MRTR InputRequiredResult — so the server never needs to correlate inbound responses and the client never writes responses to stdin (stdio.md 37-39); server-sent notifications/cancelled now exists but only for listen teardown; notifications/message allowed only per-request with logLevel and is deprecated (stderr recommended); Streamable HTTP lost Mcp-Session-Id, GET stream, DELETE and Last-Event-ID resumability (changelog Major 1-9). Dual-era support means the legacy 2025-11-25 path must still handle inbound JSON-RPC responses (to server-initiated requests), initialize gating, ping, logging/setLevel and resources/subscribe on the same dispatcher."
+ ],
+ "open_questions": [
+  "Ordering/combination when the SERVER tears down a subscription: cancel.md (13-16) says the server MUST send notifications/cancelled referencing the listen id, subs.md (130-137) says it SHOULD respond with a complete result. Are both sent, and in which order? Check the TypeScript SDK v2 server implementation and conformance scenarios.",
+  "[VERIFY] .NET Console on Windows: what Console.InputEncoding/OutputEncoding resolve to when pwsh is launched with redirected pipes and (a) an inherited console, (b) CreateNoWindow/DETACHED_PROCESS; whether setting [Console]::OutputEncoding throws without a console. Experiment on Windows 10/11 with a Node/Python harness sending non-ASCII tool arguments.",
+  "[VERIFY] StreamWriter over [Console]::OpenStandardOutput() with [System.Text.Encoding]::UTF8 emits a BOM (expected yes for non-seekable streams) and with UTF8Encoding($false) does not; confirm no BOM with ConsoleStream on all three OSes.",
+  "[VERIFY] Does `[powershell]::Create()` with a RunspacePool created without a host really keep Write-Host/Write-Progress/Write-Warning from touching stdout in pwsh 7.4/7.5/7.6 (expected: records land in $ps.Streams.*)? Also confirm Read-Host throws rather than blocks.",
+  "[VERIFY] ConsoleHost error routing when the client redirects stdout but inherits stderr: confirm an uncaught error in the main runspace lands on stdout (per ConsoleHostUserInterface.WriteErrorLine) and that -NonInteractive makes IsInteractive false in that path.",
+  "[VERIFY] Exact first PowerShell version exposing PowerShell.InvokeAsync/StopAsync (believed 7.0) and whether Windows PowerShell 5.1 (SMA 3.0) lacks them.",
+  "[VERIFY] Wait-Event -Timeout 0 (or a minimal positive timeout) pumps pending -Action handlers exactly once and returns; measure cost per call to decide whether the dispatcher pumps engine events every idle tick.",
+  "[VERIFY] Behaviour of $ps.BeginStop() against a handler blocked inside a .NET call (HttpClient, Thread.Sleep, Task.Wait): confirm it does not unblock until the call returns and that the dedicated ReuseThread is not leaked; measure Stop latency for Start-Sleep/Invoke-RestMethod.",
+  "[VERIFY] SIGTERM behaviour of pwsh 7.x on Linux/macOS: does the process exit without running finally blocks, and does Register-EngineEvent PowerShell.Exiting or [AppDomain]::ProcessExit fire? Decide whether any cleanup beyond stdin-EOF handling is achievable.",
+  "[VERIFY] PSThreadOptions.ReuseThread on a RunspacePool: does each pooled runspace keep one PipelineThread alive (expected), and does CleanupInterval dispose idle runspaces above MinRunspaces (default 2 min)? Measure runspace open cost with CreateDefault2 vs CreateDefault on Windows and Linux for pool sizing defaults.",
+  "[VERIFY] Startup budget: measure pwsh -NoProfile -NonInteractive -File cold start and Import-Module of the SDK on Windows (Defender on), Linux, macOS; the conformance runner's default timeout is 30 s (conformance_SDK_INTEGRATION.md) so this is not a conformance blocker but matters for UX.",
+  "[VERIFY] Whether `$sb.Ast.GetScriptBlock()` preserves `param()` blocks, `[CmdletBinding()]` and default parameter values and whether a function defined via SessionStateFunctionEntry from that text behaves identically to the original for advanced functions; also how $PSCmdlet/$MyInvocation look inside worker-invoked handlers.",
+  "[VERIFY] ConvertFrom-Json on 7.4: which string patterns are auto-converted to [datetime] (affects tool arguments); confirm -DateKind String on 7.5+/7.6 fully disables conversion; evaluate System.Text.Json path cost.",
+  "Spec ambiguity: server behaviour on a duplicate in-flight request id (basic.md 48-51 only constrains the client) — reject with -32600, or process? Check conformance scenarios.",
+  "Spec ambiguity on stdio: whether the server should answer `notifications/cancelled` for an already-completed request with nothing at all (yes per cancel.md 79-82) and whether progress notifications enqueued by a worker after cancellation but before the dispatcher observed the flag must be suppressed (SDK will suppress; confirm conformance expectations).",
+  "Whether the SDK should support Windows PowerShell 5.1 at all; if yes, define the degraded serial mode and test matrix (ThreadJob from Gallery, no cancellation of running handlers)."
+ ]
+}

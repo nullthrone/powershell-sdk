@@ -1,0 +1,204 @@
+{
+ "legacy_delta": [
+  "Lifecycle split at the wire level: dated revisions through 2025-11-25 (and 2025-06-18, 2025-03-26) use the stateful `initialize` handshake; 2026-07-28 uses a stateless lifecycle where equivalent state travels via per-request `_meta` instead of a one-time handshake (conformance_README.md:74). A scenario shared by two revisions is run once per revision, at that revision's own wire, and a pass on one wire says nothing about the other (conformance_README.md:137-142).",
+  "2026-07-28 frozen requirement set (69 scenarios: 37 server + 32 client, per live `list --requirements 2026-07-28`) adds vs 2025-11-25 (48 scenarios: 30 server + 18 client): server-stateless, sep-2164-resource-not-found, caching, and all 14 `input-required-result-*` scenarios (server side); request-metadata, auth/resource-mismatch, auth/offline-access-scope, auth/offline-access-not-supported, auth/authorization-server-migration, 7 auth/iss-* + auth/metadata-issuer-mismatch scenarios, sep-2322-client-request-state, http-standard-headers, http-custom-headers, http-invalid-tool-headers, json-schema-ref-no-deref (client side).",
+  "Scenarios required at 2025-11-25 but absent from the 2026-07-28 frozen set: server-initialize, logging-set-level, ping, tools-call-with-logging, tools-call-sampling, tools-call-elicitation, elicitation-sep1034-defaults, elicitation-sep1330-enums, resources-subscribe, resources-unsubscribe (server); initialize, elicitation-sep1034-client-defaults, sse-retry (client). Their absence from the frozen list does not by itself prove the capability was removed from the spec -- only that this conformance project's frozen 2026-07-28 set does not carry that scenario's requirement forward; confirming spec-level removal needs the lifecycle/tools/elicitation spec pages, which were out of scope for this extraction.",
+  "auth/2025-03-26-oauth-metadata-backcompat and auth/2025-03-26-oauth-endpoint-fallback exist only at [2025-03-26] and belong to neither the 2025-11-25 nor 2026-07-28 requirement set -- pure backcompat scenarios for the oldest OAuth-metadata-discovery behavior.",
+  "The npm registry's `latest` dist-tag for @modelcontextprotocol/conformance (0.1.16, current as of 2026-09-16) predates 2026-07-28 support entirely: its `list` output only tags scenarios up to [2025-11-25]/[draft]/[extension]/[2025-03-26], and it has no `--requirements`, `--force`, `sdk` subcommand, or `tier-check --sdk`. Full 2026-07-28 support (matching conformance_README.md/SDK_INTEGRATION.md verbatim, including the 69/48-scenario frozen sets) lives only in the `alpha` dist-tag, currently 0.2.0-alpha.11 (published 2026-08-07)."
+ ],
+ "methods": [],
+ "open_questions": [
+  "What exactly 'stateless lifecycle (per-request _meta)' means on the wire for 2026-07-28 (is `initialize` still sent once, or is every request self-contained?) is asserted but not specified in these two docs -- needs the lifecycle/transport spec pages, which were outside this extraction's required reading list.",
+  "conformance_README.md:274/287 cite the GitHub composite Action as `modelcontextprotocol/conformance@v0.1.11`, but the npm package is already at 0.1.16 (latest) / 0.2.0-alpha.11 (alpha). Whether the Action tag versioning is independent of the npm package versioning, or the docs are simply stale, could not be verified: github.com and api.github.com are blocked in this environment for direct inspection of the Action's tags/releases.",
+  "The exact per-SDK `specOverrides` invocation differences named in conformance_README.md:376-384 (go-sdk `-stateless=false`, csharp-sdk `/stateless` endpoint, rust-sdk `STATELESS=1`, python-sdk per-revision baseline) are described only by example; the full `known-sdks.ts` config schema and whether/how a `powershell-sdk` entry would need to be structured (build cmd, server cmd, client cmd, specOverrides keys) is not in scope of the two files read and would require reading modelcontextprotocol/conformance's `src/sdk-runner/known-sdks.ts`, which is on GitHub (blocked for direct browsing here).",
+  "Whether `--suite` values are validated against the enumerated list (all, core, extensions, backcompat, auth, metadata, draft, sep-835 for clients; active, all, draft, pending for servers) or accepted as an arbitrary pass-through string is unclear: the live `--help` output for `client`/`server` in both the 0.1.16 and 0.2.0-alpha.11 CLI shows no enum constraint in the flag description, only examples, while conformance_README.md documents them as if they were a fixed set.",
+  "Exact HTTP header names/status codes/MIME types the http-standard-headers / http-custom-headers / http-invalid-tool-headers / http-header-validation / http-custom-header-server-validation / dns-rebinding-protection scenarios check are not stated in the two conformance docs (only scenario names) -- would need the transport/security spec pages or the scenario source in the conformance repo, both out of this extraction's scope.",
+  "The three 'pending' 2026-07-28 server scenarios (json-schema-2020-12, http-header-validation, http-custom-header-server-validation) are pending because 'the suite's own reference fixture cannot pass it yet' (conformance_README.md:177) -- unclear whether this is a known bug in the TypeScript everything-server reference or a genuinely unresolved spec ambiguity; matters for whether the PowerShell SDK should expect to eventually be required to pass them."
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A client under test must derive its lifecycle behavior from the protocol version it is asked to run: dated versions through 2025-11-25 use the stateful lifecycle (initialize handshake); the 2026-07-28 (draft-successor) version uses the stateless lifecycle (per-request `_meta`).",
+   "cite": "conformance_README.md:74"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A client under test must accept the MCP server URL as the last (final) argument of its invoked command.",
+   "cite": "conformance_README.md:74; conformance_SDK_INTEGRATION.md:21,39"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A client under test must read the MCP_CONFORMANCE_SCENARIO environment variable to determine which scenario is being executed.",
+   "cite": "conformance_SDK_INTEGRATION.md:40"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A client under test must read the MCP_CONFORMANCE_CONTEXT environment variable (JSON) for scenario-specific data such as OAuth credentials, when the scenario requires additional context.",
+   "cite": "conformance_README.md:74; conformance_SDK_INTEGRATION.md:41"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "SDKs that hard-code their protocol version may ignore the MCP_CONFORMANCE_PROTOCOL_VERSION environment variable; example/reference clients should use its value directly as their negotiated protocolVersion when --spec-version is passed to the harness.",
+   "cite": "conformance_README.md:74"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A server under test must already be running (framework manages no server lifecycle for server-mode testing) before conformance server tests are invoked; the SDK's CI must start, health-check and clean up the server itself.",
+   "cite": "conformance_SDK_INTEGRATION.md:45,59"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every JSON-RPC message the implementation under test sends is validated against the spec's JSON schema for the negotiated spec version; a violation fails the synthetic `wire-schema-valid` check, with every violating message and its schema errors reported.",
+   "cite": "conformance_README.md:103-115"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "An expected-failures baseline entry must not both list a scenario wholesale and list a `<scenario>:<check-id>` entry for the same scenario -- the pair is contradictory and the config is rejected.",
+   "cite": "conformance_README.md:256-257"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "In a YAML expected-failures baseline, a per-check entry must be written as the string `scenario:check-id` (with no space after the colon); `scenario: check-id` parses as a YAML mapping and is rejected as an error.",
+   "cite": "conformance_README.md:253"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "CI should fail (exit 1) when a baselined failure starts passing (stale baseline) and when a non-baselined scenario/check starts failing (regression); it should exit 0 when a baselined failure still fails or when a non-baselined scenario/check passes.",
+   "cite": "conformance_README.md:210-217; conformance_SDK_INTEGRATION.md:90-97"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Passing `--requirements <revision>` runs exactly the frozen scenario set for that revision at that revision's own wire version; it replaces `--suite`, `--spec-version`, and (for the CLI's own docs) `--scenario` -- these must not be combined.",
+   "cite": "conformance_README.md:152-155; live `server --help`/`client --help` output of @modelcontextprotocol/conformance@alpha (0.2.0-alpha.11), 2026-09-16"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Only scenarios a requirement set actually lists as required decide the tier pass rate/exit code; scenarios run under `extension`, `added-after-release`, or `pending` reasons are reported (`not_scored`) but must not affect the score.",
+   "cite": "conformance_README.md:165-182"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "The requirement sets deliberately cover no authorization-server scenarios (only an MCP server acting as OAuth resource server, and an MCP client acting as OAuth client), because the specification puts authorization-server implementation out of MCP's own scope.",
+   "cite": "conformance_README.md:131-135"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "A scenario belonging to both the 2025-11-25 and 2026-07-28 requirement sets must be run once per set/wire; passing it under one wire is not evidence of passing under the other.",
+   "cite": "conformance_README.md:137-142"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "For an SDK Tier 1 conformance claim, `tier-check` should be invoked with an explicit `--requirements` list (e.g. `2025-11-25,2026-07-28`), not left to the default 'run everything as it stands today' suite, because the default is not a stable target for a tier claim.",
+   "cite": "conformance_README.md:436-438"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "tier-check's exit code reflects only required (scored) scenarios: it is nonzero when any scored scenario fails or a leg (client or server) could not be measured; it is zero even with failing extensions, and governance findings (triage, P0 resolution, labels, policy) shape the reported tier but never the exit code.",
+   "cite": "conformance_README.md:440-442,476"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Omitting `--client-cmd` from a manual (`--repo`/`--conformance-server-url`) tier-check invocation skips the client leg, which is then reported as a gap, not silently passed.",
+   "cite": "conformance_README.md:436"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "When an SDK varies its wire era per server process or per endpoint (e.g. go-sdk only speaks 2026-07-28 when started with a stateless flag; csharp-sdk serves it at a separate `/stateless` path), a single server URL should not be used to measure two revisions -- use per-revision `specOverrides`/the `--sdk` path instead of one shared `--conformance-server-url`.",
+   "cite": "conformance_README.md:417-422"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "CLI flag values always override built-in `known-sdks.ts` config entries; resolution order is CLI flag > built-in entry.",
+   "cite": "conformance_README.md:370,386-391"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "The GitHub composite Action requires `mode` (`server` or `client`); server mode additionally requires `url`, client mode additionally requires `command`.",
+   "cite": "conformance_README.md:294-306; conformance_SDK_INTEGRATION.md:157-169"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "The Action's `timeout` input (client tests only) defaults to 30000 ms, `verbose` defaults to false, and `node-version` defaults to 20 when not specified.",
+   "cite": "conformance_README.md:304-306; conformance_SDK_INTEGRATION.md:167-169"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "A check id addresses every occurrence of that id within a run; repeated occurrences (loop/retry) collapse to a single, most-severe-first verdict, so baselining a repeated id excuses all of its occurrences.",
+   "cite": "conformance_README.md:249-252"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "A baselined per-check entry is tolerated even if that check is absent or skipped in a given run, because a scenario that bails out on a failed prerequisite legitimately never reaches later checks (the prerequisite's own failure is still reported).",
+   "cite": "conformance_README.md:242-245"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Client test results are saved to `results/<scenario>-<timestamp>/` containing `checks.json`, `stdout.txt`, `stderr.txt`; server test results are saved to `results/server-<scenario>-<timestamp>/` containing `checks.json`.",
+   "cite": "conformance_README.md:93-101"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "An explicitly requested `--spec-version` outside a scenario's applicability window skips that scenario (exit 0) unless `--force` is passed.",
+   "cite": "conformance_README.md:67-68"
+  }
+ ],
+ "sdk_implications": [
+  "Ship a single PowerShell reference server ('everything-server' pattern) that implements every server-side fixture needed across the required scenario groups: tools (list/call variants: text, image, audio, embedded-resource, mixed-content, error, progress), resources (list/read text/read binary/templates), prompts (list/get simple/get with args/get embedded-resource/get with image), completion, caching, DNS-rebinding protection, sep-2164-resource-not-found, and all 14 input-required-result-* flows (elicitation/sampling/list-roots/request-state/multi-round/etc.) for 2026-07-28; plus logging, resource subscribe/unsubscribe, and elicitation-sep1034/1330 fixtures if 2025-11-25 conformance is also claimed. It must be startable in both the stateful (initialize-handshake, <=2025-11-25) and stateless (per-request _meta, 2026-07-28) lifecycle modes, analogous to how go-sdk toggles `-stateless` and csharp-sdk exposes a `/stateless` route.",
+  "Ship a single PowerShell reference client ('everything-client' pattern) matching the TypeScript SDK's src/conformance/everything-client.ts contract: accepts the server URL as its last CLI argument, branches all behavior on MCP_CONFORMANCE_SCENARIO, parses MCP_CONFORMANCE_CONTEXT as JSON for OAuth/test context, and consults MCP_CONFORMANCE_PROTOCOL_VERSION when the harness passes --spec-version, to run every required client scenario: initialize/tools_call, request-metadata, the full auth/* set (metadata discovery vars 1-3, DCR, token-endpoint-auth basic/post/none, pre-registration, resource-mismatch, offline-access-scope/not-supported, authorization-server-migration, the iss-* issuer-validation family, metadata-issuer-mismatch, scope-from-www-authenticate/scopes-supported/omitted/step-up/retry-limit), sep-2322-client-request-state, http-standard-headers/custom-headers/invalid-tool-headers, and json-schema-ref-no-deref.",
+  "CI recipe: because the npm `latest` dist-tag (0.1.16) lacks 2026-07-28 support, pin conformance invocations to a specific pre-release (e.g. `@modelcontextprotocol/conformance@0.2.0-alpha.11` or later, or whatever supersedes it) rather than `npx @modelcontextprotocol/conformance@latest`, until 2026-07-28 support ships to `latest`. Track this pin explicitly and re-check the `latest` tag periodically.",
+  "Gate the PowerShell SDK's own conformance claims on `--requirements 2026-07-28` (37 server + 32 client scenarios) as the primary target (2026-07-28 is the current final spec), and additionally on `--requirements 2025-11-25` (30 server + 18 client scenarios) only if backward-compat with the prior stateful revision is also claimed -- each requires its own server-mode invocation at its own wire.",
+  "The 16 `extension`-classified scenarios (6 auth/* client scenarios: client-credentials-jwt/basic, enterprise-managed-authorization, dpop, dpop-nonce, wif-jwt-bearer; 10 tasks-* server scenarios) and the 1 `added-after-release` scenario (json-schema-2020-12-preservation) do not affect Tier scoring -- implement Tasks/DPoP/WIF/client-credentials support only if the PowerShell SDK intends to support those experimental/extension features; otherwise they can be knowingly left failing or unimplemented without blocking a tier claim.",
+  "The 3 `pending` 2026-07-28 server scenarios (json-schema-2020-12, http-header-validation, http-custom-header-server-validation) are not required (the suite's own reference fixture can't pass them yet) but should still be run for visibility; do not silently exclude them from the everything-server's scenario coverage on the assumption they're permanently optional.",
+  "Maintain a `conformance-baseline.yml` with top-level `server:`/`client:` keys, entries either whole scenario names or `scenario:check-id` pairs (no space after colon), and treat CI failures per the 4-row exit-code table (fail+baselined=0, fail+not baselined=1, pass+baselined=1 stale, pass+not baselined=0).",
+  "To join the cross-SDK conformance matrix (`sdk`/`tier-check --sdk` subcommands), the PowerShell SDK needs an entry added to the conformance project's own `src/sdk-runner/known-sdks.ts` (upstream repo, not this one) specifying build/server/client commands and any `specOverrides` needed per revision (e.g. a stateless-mode flag or endpoint for 2026-07-28); until that lands, use the manual `tier-check --repo <owner>/<repo> --conformance-server-url <url> --client-cmd <cmd> --requirements 2025-11-25,2026-07-28` path.",
+  "Because every scenario's wire traffic is auto-validated against the revision's JSON schema (`wire-schema-valid`/`wire-schema-harness-error` synthetic checks), the PowerShell SDK's JSON-RPC (de)serialization layer for both the 2025-11-25 and 2026-07-28 schemas must be schema-exact (field names, optionality, enum values) independent of scenario-specific logic -- a serialization bug will surface as a wire-schema failure even on an otherwise-passing scenario."
+ ],
+ "source": "conformance_README.md (full) and conformance_SDK_INTEGRATION.md (full), both at /tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/; cross-checked live against the published npm package @modelcontextprotocol/conformance (registry.npmjs.org, reached 2026-09-16): dist-tag `latest`=0.1.16, dist-tag `alpha`=0.2.0-alpha.11 (published 2026-08-07). `npx --yes @modelcontextprotocol/conformance list` (0.1.16) and `npx --yes @modelcontextprotocol/conformance@alpha list` / `list --requirements 2025-11-25` / `list --requirements 2026-07-28` / `--help` for `server`, `client`, `list`, `tier-check`, `sdk` (0.2.0-alpha.11) all ran successfully via npx (cached, nothing installed globally).",
+ "wire_details": [
+  "Env vars set by the harness for client-mode tests: MCP_CONFORMANCE_SCENARIO (scenario name string), MCP_CONFORMANCE_CONTEXT (JSON object, scenario-specific, e.g. OAuth creds; defaults effectively to '{}' if absent per the example client pattern), MCP_CONFORMANCE_PROTOCOL_VERSION (the resolved --spec-version value, forwarded only when --spec-version was passed).",
+  "Server URL is appended as the final positional argument to the client's --command string by the harness.",
+  "CLI: `npx @modelcontextprotocol/conformance client --command <cmd> [--scenario <name> | --suite <name>] [--spec-version <v>] [--force] [--requirements <rev>] [--expected-failures <path>] [--timeout <ms, default 30000>] [-o|--output-dir <dir>] [--verbose]`.",
+  "CLI: `npx @modelcontextprotocol/conformance server --url <url> [--scenario <name>] [--suite active|all|draft|pending, default active] [--spec-version <v>] [--force] [--requirements <rev>] [--expected-failures <path>] [-o|--output-dir <dir>] [--verbose]`.",
+  "CLI: `npx @modelcontextprotocol/conformance list [--client] [--server] [--authorization] [--spec-version <v>] [--requirements <rev>]`; live help (0.2.0-alpha.11) states 'Requirement sets available: 2025-11-25, 2026-07-28'.",
+  "CLI: `npx @modelcontextprotocol/conformance tier-check [--repo <owner/repo>] [--branch <b>] [--sdk <name[@ref]>] [--sdk-path <dir>] [--skip-build] [--cache-dir <dir>, default '.sdk-under-test'] [--timeout <ms>] [--conformance-server-url <url>] [--client-cmd <cmd>] [--skip-conformance] [--days <n>] [--output json|markdown|terminal, default terminal] [--token <t>] [--spec-version <v>] [--requirements <rev>]` plus subcommands `labels`, `triage`.",
+  "CLI: `npx @modelcontextprotocol/conformance sdk [<name>[@<ref>]] --mode client|server [--path <dir>] [--cache-dir <dir>] [--scenario <n>] [--suite <n>] [--skip-build] [--build-cmd <cmd>] [--client-cmd <cmd>] [--server-cmd <cmd>] [--server-url <url>] [--expected-failures <path>] [--timeout <ms>] [-o <dir>] [--spec-version <v>] [--requirements <rev>] [--verbose]`.",
+  "Client suites named in docs: all, core, extensions, backcompat, auth, metadata, draft, sep-835 (conformance_README.md:66; conformance_SDK_INTEGRATION.md:35). Server suites: active (default, excludes pending and draft), all, draft, pending (conformance_README.md:86, live `server --help` 0.2.0-alpha.11) -- note the shipped `latest` 0.1.16 CLI only exposes active/all/pending for server (no 'draft').",
+  "Requirement set totals (live, 0.2.0-alpha.11): 2025-11-25 = 48 required scenarios (30 server + 18 client); 2026-07-28 = 69 required scenarios (37 server + 32 client). Full enumerations captured verbatim in this session's tool output.",
+  "not_scored reason enum: `extension`, `added-after-release`, `pending` (conformance_README.md:171-181); a separate, distinct outcome `not measured` denotes a broken invocation (a named scenario the build no longer has), not an SDK failure (conformance_README.md:473).",
+  "Synthetic per-scenario check ids: `wire-schema-valid`, `wire-schema-harness-error` (conformance_README.md:109-115); scenarios with no instrumented wire traffic emit neither (tracked as upstream issue #418).",
+  "Per-check baseline id syntax: `<scenario>:<check-id>`, e.g. `server-stateless:sep-2575-server-implements-discover` (conformance_README.md:234).",
+  "Expected-failures YAML shape: top-level `server:` and `client:` keys, each a list of scenario names or `scenario:check-id` strings (conformance_README.md:195-202,231-235; conformance_SDK_INTEGRATION.md:74-80).",
+  "Exit-code matrix (identical in both files): fail+baselined -> 0; fail+not baselined -> 1; pass+baselined -> 1 (stale); pass+not baselined -> 0 (conformance_README.md:212-217; conformance_SDK_INTEGRATION.md:92-97).",
+  "Result artifact paths: client -> `results/<scenario>-<timestamp>/{checks.json,stdout.txt,stderr.txt}`; server -> `results/server-<scenario>-<timestamp>/checks.json` (conformance_README.md:93-101).",
+  "GitHub Action `modelcontextprotocol/conformance@v0.1.11` (as cited in conformance_README.md:274,287 and conformance_SDK_INTEGRATION.md:122,149 -- version not independently verifiable, github.com/api.github.com blocked) inputs: `mode` (required: server|client), `url` (required for server mode), `command` (required for client mode), `expected-failures` (optional path), `suite` (optional), `scenario` (optional), `timeout` (optional, default 30000 ms), `verbose` (optional, default false), `node-version` (optional, default 20).",
+  "SDK-runner cache directory default: `.sdk-under-test/` (override with `--cache-dir`); clones are fetched/reused across runs (conformance_README.md:395).",
+  "Package identity: npm package name `@modelcontextprotocol/conformance`; dist-tags at query time: `latest`=0.1.16, `alpha`=0.2.0-alpha.11 (last modified 2026-08-07T14:01:04Z per `npm view ... time`); full version list spans 0.1.0 through 0.1.16 and 0.2.0-alpha.0 through 0.2.0-alpha.11.",
+  "tier-check terminal report format (illustrative, from doc, not live figures): 'Scored against <revisions>, each run at its own wire version.', per-role lines 'Server X/Y required scenarios (Z%)' / 'Client X/Y required scenarios (Z%)', a 'Not scored (N run, M failing, no effect on tier):' block listing `✗ <scenario> (<reason>)`, and a 'Tier 1 Blockers:' list (conformance_README.md:456-469). `--output json` gives `passed`/`failed`/`total` (scored set, consistent with `pass_rate`) plus `not_scored` counted separately (conformance_README.md:478)."
+ ],
+ "summary": "Extracted from conformance_README.md and conformance_SDK_INTEGRATION.md (both read in full) plus live verification against the published @modelcontextprotocol/conformance npm package. This is a CLI/CI framework, not a wire-protocol addition: it drives an implementation-under-test as either a client (harness starts a fixture server, spawns the client with the server URL as last arg and MCP_CONFORMANCE_SCENARIO/_CONTEXT/_PROTOCOL_VERSION env vars) or a server (harness connects as an MCP client to an already-running server). Two 'roles' are scored -- MCP server as OAuth resource server, MCP client as OAuth client -- authorization-server scenarios exist but are never part of a requirement set. Critical finding: the npm `latest` tag (0.1.16) does NOT support 2026-07-28 (no --requirements, no server-stateless/input-required-result/sep-2164/sep-2322/http-* scenarios); full 2026-07-28 support, matching the local docs verbatim, lives only in the `alpha` tag (0.2.0-alpha.11). Live-queried frozen requirement sets: 2025-11-25 = 48 scenarios (30 server/18 client), 2026-07-28 = 69 scenarios (37 server/32 client), each scored only at its own wire (stateful initialize-handshake through 2025-11-25; stateless per-request _meta at 2026-07-28). Non-required scenarios fall into extension/added-after-release/pending buckets that run but never affect the tier score or exit code. Every message on the wire is auto-checked against the revision's JSON schema (wire-schema-valid/harness-error). Baselining supports whole-scenario or per-check (`scenario:check-id`) YAML entries with a strict 4-outcome exit-code contract. A GitHub composite Action and an `sdk`/`tier-check --sdk` cross-SDK runner (config in known-sdks.ts, not accessible here) round out the CI story; the TypeScript SDK's everything-client/everything-server are the named reference-implementation pattern SDK maintainers (including a future PowerShell SDK) are told to replicate."
+}

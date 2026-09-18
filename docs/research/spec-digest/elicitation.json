@@ -1,0 +1,476 @@
+{
+ "legacy_delta": [
+  "elicitationId removed: 2025-11-25 ElicitRequestURLParams had a required `elicitationId: string` (opaque, unique within server scope) [2025-11-25_schema.ts:2196-2200]; 2026-07-28 ElicitRequestURLParams has no id field at all [schema.ts:2821-2838]. Correlation across retries is now solely via the server's own `requestState` encoding (elicitation.md:377-378, changelog #11).",
+  "notifications/elicitation/complete removed entirely: 2025-11-25 defined `ElicitationCompleteNotification` (method `notifications/elicitation/complete`, params.elicitationId) [2025-11-25_schema.ts:2488-2501]. No replacement notification exists in 2026-07-28; the client learns the outcome of an out-of-band URL interaction only by retrying the original request under MRTR (changelog #11; elicitation.md:374-381).",
+  "Error code -32042 (URL_ELICITATION_REQUIRED) removed and permanently reserved/never reused: 2025-11-25 signalled a required URL elicitation via a JSON-RPC *error* response carrying `data.elicitations: ElicitRequestURLParams[]` [2025-11-25_schema.ts:180-199]. 2026-07-28 replaces this with a success-shaped `InputRequiredResult` (resultType:'input_required'), not an error (schema.ts:422-424 explicitly lists -32042 as retired-and-never-reused).",
+  "ElicitRequest no longer a standalone JSON-RPC message: 2025-11-25 `interface ElicitRequest extends JSONRPCRequest` (carried its own jsonrpc/id, sent as an independent server->client RPC call) [2025-11-25_schema.ts:2223-2226]. 2026-07-28 `interface ElicitRequest { method; params }` (schema.ts:2856-2859) has no jsonrpc/id — it only exists as a value inside the `InputRequests` map embedded in an `InputRequiredResult`.",
+  "ElicitResult no longer extends Result: 2025-11-25 `interface ElicitResult extends Result` [2025-11-25_schema.ts:2471]. 2026-07-28 `interface ElicitResult { action; content? }` (schema.ts:3134) has no extends clause — consistent with it being a value in `InputResponses`, not a top-level RPC result requiring `resultType`/`_meta`.",
+  "Task augmentation removed from elicitation params: 2025-11-25 `ElicitRequestFormParams`/`ElicitRequestURLParams extends TaskAugmentedRequestParams` (adding an optional `task` field, gated by a `tasks.requests.elicitation.create` client capability) [2025-11-25_schema.ts:2155,2185,371-376]. 2026-07-28 params carry no `task` field and no such nested capability; experimental tasks moved entirely out of core protocol into the `io.modelcontextprotocol/tasks` extension (changelog Major #6), decoupled from the `elicitation` capability object.",
+  "Transport model change (affects every elicitation exchange): 2025-11-25 elicitation/create was pushed via classic bidirectional JSON-RPC server->client request over a persistent connection established by `initialize`. 2026-07-28 is stateless (no `initialize`/`initialized` handshake, changelog Major #2) and elicitation/create travels only inside the MRTR pattern: embedded in `InputRequiredResult.inputRequests` on the server's reply to a client request, and answered via `inputResponses` on the client's retry of that same request (mrtr.md:12-15, 27).",
+  "Capability declaration moved from one-time handshake to per-request: 2025-11-25 declared `elicitation: {form?; url?}` once in the `InitializeRequest.capabilities`. 2026-07-28 requires `_meta['io.modelcontextprotocol/clientCapabilities'].elicitation` on every single client request (basic/index.md:369-393; elicitation.md:51-52), since there is no persistent negotiated session.",
+  "Error-code renumbering relevant to elicitation capability failures: `MissingRequiredClientCapability` moved -32003 -> -32021, used when the client omitted `elicitation` entirely; `HeaderMismatch` -32001->-32020; `UnsupportedProtocolVersion` -32004->-32022 (changelog Minor #12; schema.ts:434-450).",
+  "requestedSchema / PrimitiveSchemaDefinition / EnumSchema shapes (StringSchema, NumberSchema, BooleanSchema, Single/MultiSelect enum incl. LegacyTitledEnumSchema) are byte-for-byte unchanged between 2025-11-25 and 2026-07-28 (compare 2025-11-25_schema.ts:2237-2464 to schema.ts:2867-3118) — form mode's restricted-schema design carries over verbatim; only the request/response envelope around it changed."
+ ],
+ "methods": [
+  {
+   "name": "elicitation/create",
+   "direction": "server->client, embedded (never a standalone JSON-RPC message)",
+   "params": "Discriminated union `ElicitRequestParams = ElicitRequestFormParams | ElicitRequestURLParams` (schema.ts:2845-2846). Form: `mode?: \"form\"` (optional, defaults to form if the whole `mode` field is omitted — elicitation.md:94,102), `message: string` (required), `requestedSchema: { $schema?: string; type: \"object\"; properties: {[key:string]: PrimitiveSchemaDefinition}; required?: string[] }` (schema.ts:2788-2811). URL: `mode: \"url\"` (required literal), `message: string` (required), `url: string` (required, format uri, schema.ts:2821-2838). PrimitiveSchemaDefinition = StringSchema{type:'string',title?,description?,minLength?,maxLength?,format?:'email'|'uri'|'date'|'date-time',default?:string} | NumberSchema{type:'number'|'integer',title?,description?,minimum?,maximum?,default?:number} | BooleanSchema{type:'boolean',title?,description?,default?:boolean} | EnumSchema. EnumSchema = SingleSelectEnumSchema(Untitled:{type:'string',enum:string[],default?:string} | Titled:{type:'string',oneOf:[{const:string,title:string}],default?:string}) | MultiSelectEnumSchema(Untitled:{type:'array',minItems?,maxItems?,items:{type:'string',enum:string[]},default?:string[]} | Titled:{type:'array',minItems?,maxItems?,items:{anyOf:[{const:string,title:string}]},default?:string[]}) | LegacyTitledEnumSchema{type:'string',enum:string[],enumNames?:string[],default?:string} (deprecated, marked 'will be removed', not documented on the elicitation.md page at all — only in schema.ts/json, schema.ts:3100-3111).",
+   "result": "ElicitResult { action: 'accept'|'decline'|'cancel' (required); content?: {[key:string]: string|number|boolean|string[]} } (schema.ts:3134-3149). `content` present only when action='accept' AND mode='form'; omitted for url mode and for decline/cancel (elicitation.md:448-459).",
+   "capability_gate": "Client must declare `elicitation` in `_meta['io.modelcontextprotocol/clientCapabilities']` on the *carrier* client request (tools/call, prompts/get, or resources/read), with a `form` and/or `url` sub-key matching the mode used: `{elicitation:{form:{},url:{}}}`. An empty `elicitation:{}` object is equivalent to `{form:{}}` only (elicitation.md:49-79). At least one of form/url MUST be present if the client declares elicitation at all (elicitation.md:79). Whole-capability-absent -> `MissingRequiredClientCapabilityError` -32021 (basic/index.md:389-394). Mode-not-declared-though-capability-object-present is categorized under `InvalidParamsError` -32602 (schema.ts:370) — see open_questions for how the two interact.",
+   "notes": "Never sent as an independent JSON-RPC request/response pair. Delivered as a value in `InputRequiredResult.inputRequests[key]` (key = server-assigned string id, unique within the InputRequiredResult) and answered as a value in `InputResponseRequestParams.inputResponses[key]` on the client's retry of the original carrier request, using a NEW JSON-RPC id (mrtr.md:56-64,101-124,231-264)."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "params": "CallToolRequestParams extends InputResponseRequestParams (schema.ts:1863) — adds `inputResponses?: InputResponses` and `requestState?: string` on top of ordinary tool-call params.",
+   "result": "CallToolResult | InputRequiredResult (schema.ts:1849).",
+   "capability_gate": "None of its own for MRTR; gates only apply to the specific inputRequests the server chooses to embed (e.g. elicitation).",
+   "notes": "One of exactly three requests servers MAY answer with InputRequiredResult (mrtr.md:186-194)."
+  },
+  {
+   "name": "prompts/get",
+   "direction": "client->server",
+   "params": "GetPromptRequestParams extends InputResponseRequestParams (schema.ts:1602).",
+   "result": "GetPromptResult | InputRequiredResult (schema.ts:1651).",
+   "capability_gate": "Same as tools/call.",
+   "notes": "One of the three MRTR-supported carrier requests (mrtr.md:186-194)."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "extends ResourceRequestParams, InputResponseRequestParams (schema.ts:1206).",
+   "result": "ReadResourceResult | InputRequiredResult (schema.ts:1245).",
+   "capability_gate": "Same as tools/call.",
+   "notes": "One of the three MRTR-supported carrier requests. Servers MUST NOT send InputRequiredResult on any other client request (mrtr.md:186-194)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT use form mode elicitation to request sensitive information (passwords, API keys, access tokens, payment credentials).",
+   "cite": "elicitation.md:31-32"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST use URL mode for interactions involving sensitive information.",
+   "cite": "elicitation.md:33-34"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST provide UI that makes clear which server is requesting information.",
+   "cite": "elicitation.md:43"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST respect user privacy and provide clear decline and cancel options.",
+   "cite": "elicitation.md:44"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For form mode, clients MUST allow users to review and modify their responses before sending.",
+   "cite": "elicitation.md:45"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For URL mode, clients MUST clearly display the target domain/host and gather user consent before navigation.",
+   "cite": "elicitation.md:46"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that support elicitation MUST declare the `elicitation` capability in `_meta['io.modelcontextprotocol/clientCapabilities']` on each request.",
+   "cite": "elicitation.md:51-52"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients declaring the elicitation capability MUST support at least one mode (form or url).",
+   "cite": "elicitation.md:79"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send elicitation requests with modes not supported by the client.",
+   "cite": "elicitation.md:81"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "All elicitation requests MUST include `message`; `mode` is required for url ('url') and optional for form (defaults to 'form' if omitted).",
+   "cite": "elicitation.md:90-95,102"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST treat elicitation requests without a `mode` field as form mode.",
+   "cite": "elicitation.md:102"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Form mode requests MUST either specify mode:'form' or omit mode, and MUST include `requestedSchema`.",
+   "cite": "elicitation.md:108-112"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients that support defaults SHOULD pre-populate form fields with the schema's default values.",
+   "cite": "elicitation.md:237"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "URL mode requests MUST specify mode:'url', a message, and a `url` that MUST contain a valid URL.",
+   "cite": "elicitation.md:330-336"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD provide manual controls letting the user retry or cancel the original request after a URL-mode accept.",
+   "cite": "elicitation.md:379-381"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Servers SHOULD NOT assume elicitation requests will always succeed.",
+   "cite": "elicitation.md:589"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST handle cases where the user declines or cancels the elicitation, or the client fails to process the request.",
+   "cite": "elicitation.md:589"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST bind elicitation requests to the client and user identity.",
+   "cite": "elicitation.md:593"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST provide clear indication of which server is requesting information.",
+   "cite": "elicitation.md:594"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD implement user approval controls.",
+   "cite": "elicitation.md:595"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD allow users to decline elicitation requests at any time.",
+   "cite": "elicitation.md:596"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD present elicitation requests clearly indicating what information is requested and why.",
+   "cite": "elicitation.md:597"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "URL sent to the client MUST NOT include sensitive end-user information (credentials, PII, etc.).",
+   "cite": "elicitation.md:603"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT provide a URL pre-authenticated to access a protected resource (impersonation risk via a malicious client).",
+   "cite": "elicitation.md:604"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Servers SHOULD NOT include clickable URLs in any field of a form mode elicitation request.",
+   "cite": "elicitation.md:605"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD use HTTPS URLs for non-development environments.",
+   "cite": "elicitation.md:606"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT automatically pre-fetch the elicitation URL or its metadata.",
+   "cite": "elicitation.md:614"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT open the URL without explicit user consent.",
+   "cite": "elicitation.md:615"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST show the full URL to the user for examination before consent.",
+   "cite": "elicitation.md:616"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST open the URL in a secure manner that does not let the client or LLM inspect page content or user inputs (e.g. SFSafariViewController acceptable, WKWebView not).",
+   "cite": "elicitation.md:617-618"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD highlight the URL's domain to mitigate subdomain spoofing.",
+   "cite": "elicitation.md:619"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD warn on ambiguous/suspicious URIs (e.g. containing Punycode).",
+   "cite": "elicitation.md:620"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "Clients SHOULD NOT render URLs as clickable in any elicitation field except the `url` field of a URL-mode request.",
+   "cite": "elicitation.md:621"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT rely on client-provided user identification without server-side verification.",
+   "cite": "elicitation.md:625"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT request sensitive information via form mode.",
+   "cite": "elicitation.md:635"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD validate all responses against the provided `requestedSchema`.",
+   "cite": "elicitation.md:636"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD validate received data matches the requested schema.",
+   "cite": "elicitation.md:637"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST verify the identity of the user who opens a URL-mode elicitation URL before accepting information (anti-phishing).",
+   "cite": "elicitation.md:641"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST ensure the user who started the elicitation is the same user who completes the out-of-band flow.",
+   "cite": "elicitation.md:655"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST ensure its user-identity mechanism is resilient to attacks where an attacker modifies the elicitation URL.",
+   "cite": "elicitation.md:669"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If elicitation state is stored, it MUST be securely associated with individual users per security best practices; state storage MUST be protected against unauthorized access; for remote servers, user identification MUST be derived from MCP-authorization credentials (e.g. `sub` claim) when possible.",
+   "cite": "elicitation.md:473-476"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT rely on URL mode elicitation to authorize users for themselves (it is not MCP authorization).",
+   "cite": "elicitation.md:501"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Third-party credentials obtained via URL mode elicitation MUST NOT transit through the MCP client, and the server MUST NOT transmit them to the client.",
+   "cite": "elicitation.md:521,526"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The MCP server MUST NOT use the client's own credentials for the third-party service (token passthrough is forbidden).",
+   "cite": "elicitation.md:522"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "For third-party auth via URL mode, the user MUST authorize the MCP server directly, outside the MCP protocol, and the server MUST be stateful about the resulting tokens.",
+   "cite": "elicitation.md:523-524"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST send server-to-client requests such as elicitation/create using the MRTR pattern; the prior server-initiated-request pattern is no longer supported (breaking change).",
+   "cite": "mrtr.md:12-15"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "`inputRequests` keys MUST be unique within the scope of the request; values MUST be one of ElicitRequest, CreateMessageRequest, ListRootsRequest.",
+   "cite": "mrtr.md:231-232"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If `requestState` can influence authorization, resource access or business logic, the server MUST protect its integrity (HMAC/AEAD) and MUST reject state failing verification; integrity protection MAY be omitted only when tampering causes nothing worse than request failure.",
+   "cite": "mrtr.md:236-237"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "To bound replay, servers SHOULD embed and verify the authenticated principal, a short TTL, and an originating-request identifier inside the integrity-protected `requestState`.",
+   "cite": "mrtr.md:239-242"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Where a `requestState` must be single-use, the server MUST enforce that invariant itself (integrity protection alone does not guarantee it).",
+   "cite": "mrtr.md:243-248"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every InputRequiredResult MUST include at least one of `inputRequests` or `requestState`.",
+   "cite": "mrtr.md:250"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send an `inputRequests` entry (e.g. elicitation/create) that the client has not declared support for in its capabilities.",
+   "cite": "mrtr.md:252"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT assume clients will fulfill inputRequests or retry the original request; servers MAY repeat InputRequiredResult across attempts.",
+   "cite": "mrtr.md:254"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If InputRequiredResult contains `inputRequests`, the client MUST construct the requested inputs before retrying; if absent, the client MAY retry immediately.",
+   "cite": "mrtr.md:258-260"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If InputRequiredResult contains `requestState`, the client MUST echo back its exact value on retry and MUST NOT inspect/parse/modify/assume anything about its contents; if absent, the client MUST NOT include one on retry.",
+   "cite": "mrtr.md:261-262"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The JSON-RPC `id` MUST differ between the initial request and the retry.",
+   "cite": "mrtr.md:263"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "`inputRequests`/`requestState` MUST NOT be reused for any other request the client sends in parallel — they apply only to the retry of the exact original request.",
+   "cite": "mrtr.md:264"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD validate that InputResponses is well-formed and parseable; malformed protocol input SHOULD produce a JSON-RPC error with an appropriate code.",
+   "cite": "mrtr.md:268-269"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD ignore unrecognized/unexpected fields in InputResponses.",
+   "cite": "mrtr.md:271"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "If required information is still missing after a retry, servers SHOULD re-issue InputRequiredResult rather than error.",
+   "cite": "mrtr.md:273-274"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send InputRequiredResult on any client request other than prompts/get, resources/read, or tools/call.",
+   "cite": "mrtr.md:186-194"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every client request MUST carry `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in `_meta`; a request missing either required field is malformed and the server MUST reject it.",
+   "cite": "specification__2026-07-28__basic__index.md:367-382"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If processing a request requires a client capability not present in `clientCapabilities` (e.g. elicitation entirely undeclared), the server MUST return `MissingRequiredClientCapabilityError` (-32021) with `data.requiredCapabilities`; on HTTP the response status MUST be 400 Bad Request.",
+   "cite": "specification__2026-07-28__basic__index.md:389-394; schema.ts:503-526"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "For `UnsupportedProtocolVersionError` and `HeaderMismatchError`, the HTTP response status MUST be 400 Bad Request.",
+   "cite": "schema.ts:434-470,472-501"
+  }
+ ],
+ "wire_details": [
+  "Method name: `elicitation/create` (schema.ts:2856-2859) — never sent as a top-level JSON-RPC message in 2026-07-28; only as a value in `InputRequests`.",
+  "`_meta` key: `io.modelcontextprotocol/clientCapabilities` — required on every client request, type `ClientCapabilities` (basic/index.md:379).",
+  "`_meta` key: `io.modelcontextprotocol/protocolVersion` — required string, e.g. '2026-07-28' (basic/index.md:377).",
+  "Capability shape: `ClientCapabilities.elicitation?: { form?: JSONObject; url?: JSONObject }` (schema.ts:769-772). Omitting the whole `elicitation` key = no support. An empty `{}` for `elicitation` itself = form-only, for backwards compatibility (elicitation.md:67-77).",
+  "Result discriminator: every `Result` in 2026-07-28 carries a required `resultType` field: `'complete'` for normal results, `'input_required'` for `InputRequiredResult` (changelog Major #8). Clients MUST treat results from earlier-protocol servers that omit `resultType` as `'complete'`.",
+  "`InputRequiredResult` fields: `inputRequests?: InputRequests` (map, keys = server-assigned string ids), `requestState?: string` (opaque, server-defined encoding — base64 JSON / encrypted JWT / serialized binary all acceptable) (schema.ts:584-608; mrtr.md:234).",
+  "`ElicitResult.action` enum values: exactly `'accept' | 'decline' | 'cancel'` (schema.ts:3134-3149).",
+  "`ElicitRequestFormParams.mode` enum: `'form'` (optional/default). `ElicitRequestURLParams.mode` enum: `'url'` (required literal).",
+  "`StringSchema.format` enum: exactly `'email' | 'uri' | 'date' | 'date-time'` — no other formats supported (schema.ts:2882).",
+  "`content` value type in `ElicitResult`: `{[key: string]: string | number | boolean | string[]}` — array only ever holds strings (multi-select enum output) (schema.ts:3148).",
+  "Error codes: `HEADER_MISMATCH = -32020`; `MISSING_REQUIRED_CLIENT_CAPABILITY = -32021`; `UNSUPPORTED_PROTOCOL_VERSION = -32022` (schema.ts:434,442,450). Reserved-and-never-reused: `-32002` (old resource-not-found, replaced by `-32602`) and `-32042` (2025-11-25-only URL_ELICITATION_REQUIRED) (schema.ts:422-424).",
+  "MCP error-code partition: `-32000..-32019` implementation-defined (never assigned spec meaning); `-32020..-32099` reserved for MCP spec, allocated sequentially from -32020 (schema.ts:407-421).",
+  "HTTP status for HeaderMismatchError, UnsupportedProtocolVersionError, MissingRequiredClientCapabilityError: all MUST be `400 Bad Request` (schema.ts:456,475,505 and basic/index.md:394).",
+  "`MissingRequiredClientCapabilityError.error.data.requiredCapabilities`: type `ClientCapabilities` (schema.ts:519-524) — lists exactly which capabilities (e.g. `{elicitation:{url:{}}}`) were needed.",
+  "`UnsupportedProtocolVersionError.error.data`: `{supported: string[], requested: string}` (schema.ts:489-499).",
+  "InputRequests/InputResponses map key correlation: keys in `inputResponses` MUST correspond to keys in the `inputRequests` that produced them (mrtr.md:101-104).",
+  "PrimitiveSchemaDefinition JSON shapes are flat (no `$ref`, no nested `properties`, no arrays-of-objects) — `requestedSchema.properties[k]` must be exactly one of StringSchema/NumberSchema/BooleanSchema/EnumSchema (schema.ts:2867-2868; elicitation.md:119-120,239)."
+ ],
+ "sdk_implications": [
+  "Model `ElicitRequestParams` as a discriminated union on `mode` (absent-or-'form' vs required-'url'); the PowerShell type system must accept `mode` omission as an implicit 'form' on deserialize and always emit an explicit `mode` on serialize (or mirror the spec's own 'MAY omit for back-compat' allowance) — pick one and document it since the spec permits omission on the wire but the object model should probably normalize internally.",
+  "Model `PrimitiveSchemaDefinition` as a closed polymorphic type over StringSchema/NumberSchema/BooleanSchema/EnumSchema, and EnumSchema itself as Untitled/Titled Single/Multi-select plus the undocumented-on-the-page `LegacyTitledEnumSchema` (with `enumNames`) for round-trip compatibility with older payloads — do not drop this shape even though the human-readable elicitation.md page never shows it.",
+  "`ElicitResult` and `ElicitRequest` are NOT top-level JSON-RPC envelopes in this revision (no `jsonrpc`/`id`, no `resultType`) — the SDK's generic JSON-RPC message classes must not force these fields onto elicitation types; they are pure data values living inside `InputRequests`/`InputResponses` dictionaries.",
+  "Implement `InputRequests`/`InputResponses` as `IDictionary<string, T>`-like polymorphic containers keyed by an arbitrary server-chosen string id, deserializing each value's concrete type by inspecting its `method` property (`elicitation/create` -> ElicitRequest, `sampling/createMessage` -> CreateMessageRequest, `roots/list` -> ListRootsRequest) for requests, and structurally (presence of `action` -> ElicitResult, `role`/`content` -> CreateMessageResult, `roots` -> ListRootsResult) for responses, since InputResponses values carry no explicit type discriminator of their own.",
+  "Client runtime MUST attach `_meta['io.modelcontextprotocol/clientCapabilities']` (including `elicitation:{form,url}` when supported) to every outgoing request, not just tools/call — this is a foundational serialization concern for the whole client pipeline given the stateless (no-initialize) architecture, not an elicitation-specific add-on.",
+  "Server-side helper API should restrict emission of `InputRequiredResult` (and therefore `elicitation/create` requests) to handlers of exactly tools/call, prompts/get, and resources/read; attempting it from any other handler is a spec violation the SDK should catch at compile/registration time or throw on at runtime.",
+  "Server-side elicitation helper must check the caller's declared `_meta.clientCapabilities.elicitation` before constructing a request: capability object entirely absent -> raise/produce `MissingRequiredClientCapabilityError` (-32021, HTTP 400, `data.requiredCapabilities`); capability object present but the specific mode's key absent -> raise/produce `InvalidParamsError` (-32602) per schema.ts's categorization (verify this exact split against the reference TS SDK v2 before finalizing, see open_questions).",
+  "`requestState` must be treated by the client SDK as a fully opaque `string` — never parsed, validated, or mutated; the SDK should expose it as a plain opaque token type (not e.g. auto-base64-decoded) to prevent accidental inspection by consumer code.",
+  "Client SDK needs a pluggable/secure-browser abstraction for URL mode (equivalent guarantee to SFSafariViewController, not a WKWebView-style embeddable view the host process can script or scrape) — on non-macOS/iOS PowerShell hosts this likely means shelling out to the OS's default/secure browser rather than any embedded control, and the SDK contract should make that an explicit, documented requirement for GUI-hosting consumers.",
+  "Client SDK's URL-mode consent UI must render the full URL and prominently the host/domain, and must never render URLs from other elicitation fields (form messages, schema titles/descriptions) as clickable.",
+  "Client-side JSON Schema validation of `ElicitResult.content` against `requestedSchema` (SHOULD) should be implemented as a small purpose-built validator covering exactly the 4 primitive kinds + enum variants, not a general JSON Schema engine, since the wire format is intentionally restricted to flat primitives.",
+  "Retry plumbing: the client transport layer must guarantee a fresh JSON-RPC `id` on every retry of a carrier request (tools/call/prompts/get/resources/read) and must scope `inputResponses`/`requestState` strictly to that one retry, never leaking them into concurrently in-flight requests on the same connection/session."
+ ],
+ "open_questions": [
+  "Which error code applies when the client's `elicitation` capability object is present but lacks the specific mode key the server wants (e.g. client declared `{form:{}}`, server sends mode:'url')? The generic rule in basic/index.md (whole-capability-absent -> -32021 MissingRequiredClientCapabilityError) and the InvalidParamsError doc comment in schema.ts ('Elicitation: Server requests an elicitation mode not declared in client capabilities' -> -32602) point to two different codes for what look like two different but adjacent scenarios; the elicitation.md page itself states the MUST NOT rule (line 81) without naming any error code at all. Needs confirmation against the reference TypeScript SDK v2's actual behavior before the PowerShell SDK bakes in a specific choice.",
+  "Is `LegacyTitledEnumSchema` (with `enumNames`, schema.ts:3100-3111) still a shape servers are permitted to *send*, or purely a shape clients must still be able to *parse* for compatibility with older payloads? It is absent from the elicitation.md page's canonical 4-shape documentation and marked 'will be removed in a future version' in the schema comment, but no removal date or deprecation-registry entry was available locally to confirm its current lifecycle state.",
+  "No local `examples/` directory exists for the `{@includeCode ./examples/...}` references scattered through schema.ts for elicitation types (e.g. ElicitRequestFormParams/elicit-single-field.json, ElicitResult/accept-url-mode-no-content.json). All exact-JSON claims in this extraction come from the elicitation.md prose examples plus the .ts field definitions, not from these missing golden fixtures — recommend pulling the actual example files from the modelcontextprotocol/specification repo before writing wire-format conformance tests.",
+  "The spec never states explicitly whether a client MAY omit the `elicitation` key from `clientCapabilities` altogether (as opposed to sending `elicitation: {}`) with identical effect to 'not supported' — elicitation.md:67-77 only establishes that an empty `elicitation: {}` equals form-only support; it does not directly address a fully-absent key's equivalence to 'elicitation entirely unsupported' as `-32021`'s trigger, though that is the natural reading of basic/index.md:389-394's 'capability the client did not include'.",
+  "Whether `LegacyTitledEnumSchema`'s `enumNames` (non-standard vs. JSON Schema 2020-12, per its own doc comment) should be preserved as a first-class settable property on the PowerShell object model or only surfaced through a raw/extra-properties bag, given the SDK's general JSON Schema 2020-12 alignment elsewhere in the spec (e.g. tools' `inputSchema`/`outputSchema`, changelog Minor #10)."
+ ],
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/pages/specification__2026-07-28__client__elicitation.md (primary, read in full, lines 1-669), cross-referenced with specification__2026-07-28__basic__patterns__mrtr.md (full), specification__2026-07-28__basic__index.md (_meta / clientCapabilities / error sections), specification__2026-07-28__changelog.md (full), schema.ts (ElicitRequest/ElicitResult/PrimitiveSchemaDefinition/EnumSchema/ClientCapabilities/InputRequests/InputResponses/InputRequiredResult/error codes, lines ~330-610 and 2700-3150), and 2025-11-25_schema.ts (elicitationId, notifications/elicitation/complete, -32042, TaskAugmentedRequestParams) for the legacy-delta comparison.",
+ "summary": "Elicitation (2026-07-28) lets a server ask the user for input mid-request via `elicitation/create`, delivered exclusively through the Multi Round-Trip Requests (MRTR) pattern: a server reply to tools/call, prompts/get, or resources/read (the only three permitted carriers) may be an `InputRequiredResult` (resultType:'input_required') whose `inputRequests` map embeds one or more `ElicitRequest` values keyed by server-assigned ids, plus an opaque `requestState`. The client fulfills them and retries the original request (new JSON-RPC id) with `inputResponses` + echoed `requestState`. Two modes: form (in-band, `requestedSchema` restricted to a flat object of primitive properties — string/number/integer/boolean/enum, with titled single/multi-select variants and a deprecated `LegacyTitledEnumSchema`) and url (out-of-band, `url` + `message` only, data never exposed to the client). Responses use a 3-action model: accept (content on form-accept only), decline, cancel. Client capability is declared per-request via `_meta['io.modelcontextprotocol/clientCapabilities'].elicitation:{form?,url?}` (stateless architecture — no `initialize` handshake exists anymore); an empty `elicitation:{}` means form-only. Extensive security musts: no secrets via form mode, URL-mode phishing/session-binding requirements, safe-URL handling rules for both client and server, third-party-credential isolation from the MCP client. Versus 2025-11-25: `elicitationId` and `notifications/elicitation/complete` are removed, the -32042 URL_ELICITATION_REQUIRED error code is retired and never reused, `ElicitRequest`/`ElicitResult` are no longer standalone JSON-RPC envelopes, and task-augmentation support was stripped from elicitation params entirely."
+}

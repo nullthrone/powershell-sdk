@@ -1,0 +1,279 @@
+{
+ "source": "specification__2026-07-28__basic__patterns__index.md (Overview / message patterns), specification__2026-07-28__basic__patterns__cancellation.md, specification__2026-07-28__basic__patterns__progress.md; cross-checked against schema.ts (2026-07-28: RequestMetaObject, NotificationMetaObject, ProgressToken, RequestId, CancelledNotification[Params], ProgressNotification[Params], SubscriptionsListen*, ClientNotification/ServerNotification unions), transports__stdio.md and transports__streamable-http.md (Cancellation sections), patterns__subscriptions.md (Cancellation / Graceful Closure), basic__index.md (_meta table), 2025-11-25_schema.ts and 2025-06-18_schema.ts (legacy delta).",
+ "summary": "The 2026-07-28 core protocol is composed of exactly three message patterns, all carried unchanged by every transport: (1) Request/Response: client sends a request, server answers with one result or error, optionally preceded by request-scoped notifications (notifications/progress, notifications/message). (2) Multi Round-Trip Requests: server answers with an InputRequiredResult and the client re-issues the request (new id) with inputResponses. (3) Subscribe-and-Notify: client sends subscriptions/listen; reply is a long-lived stream, first message per subscription is notifications/subscriptions/acknowledged, all stream messages carry _meta[\"io.modelcontextprotocol/subscriptionId\"] = listen request id; stream state is request-scoped and re-issued after channel loss. Only the client initiates: servers MUST NOT send JSON-RPC requests; clients never send responses. Cancellation is transport-dependent: on Streamable HTTP closing the per-request SSE stream IS the cancellation (server MUST treat disconnect as cancel, no notifications/cancelled expected); on stdio the client MUST send notifications/cancelled {requestId, reason?}. Servers MUST send notifications/cancelled only to tear down a subscriptions/listen stream (stdio) and MUST NOT use it otherwise. Cancellation is best-effort: receivers SHOULD stop work, free resources and not respond; MAY ignore unknown/completed/uncancellable requests; both sides MUST handle races; clients SHOULD ignore late responses; invalid notifications SHOULD be ignored. Timeouts SHOULD exist per request, be configurable, MAY reset on progress but SHOULD have a hard maximum. Progress: client opts in via params._meta.progressToken (string|number, unique across active requests); server MAY emit notifications/progress {progressToken, progress (monotonically increasing, may be float), total?, message?}; only for active tokens; MUST stop after completion; both sides SHOULD track tokens and rate-limit. Progress notifications travel only on the originating request's response stream (HTTP) and never carry subscriptionId.",
+ "methods": [
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (primary); notification s->c ONLY on stdio to terminate a subscriptions/listen stream",
+   "params": "params: CancelledNotificationParams { requestId: RequestId (string|number) — REQUIRED (non-optional in 2026-07-28 schema.ts L626; 'MUST correspond to the ID of a request the client previously issued'); reason?: string — optional, 'MAY be logged or presented to the user'; _meta?: NotificationMetaObject (inherited from NotificationParams; no reserved key is defined for this notification) }",
+   "result": "none (notification). No response is sent for the cancelled request itself (server SHOULD not respond; client SHOULD ignore any late response).",
+   "capability_gate": "None. Not gated by any capability; part of the core protocol. Schema unions: ClientNotification = CancelledNotification (the ONLY client notification in 2026-07-28, schema.ts L3166); ServerNotification includes CancelledNotification (L3175).",
+   "notes": "Transport rule (cancellation.md 'Transport-Specific Cancellation'; stdio.md 'Cancellation'; streamable-http.md 'Cancellation' + Note L92-102): on stdio the client MUST send this notification to cancel; on Streamable HTTP it is NOT required or expected — closing the SSE response stream is the cancellation signal, and the HTTP page states the core protocol defines no client-to-server notifications over Streamable HTTP (header requirements for notification POSTs are undefined). Server-sent usage (cancellation.md L13-16, Behavior Requirements #2; schema.ts L637): requestId MUST be the id of a subscriptions/listen request; used solely to tear down that subscription stream; MUST NOT be used for any other purpose. Race semantics: may arrive after completion; both sides MUST handle gracefully. The 2025-xx text 'A client MUST NOT attempt to cancel its initialize request' is absent in 2026-07-28 (there is no initialize request in this revision)."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification s->c",
+   "params": "params: ProgressNotificationParams { progressToken: ProgressToken (string|number) — REQUIRED, must equal the token supplied in the originating request's params._meta.progressToken; progress: number — REQUIRED, MUST increase with each notification even if total unknown, MAY be floating point; total?: number — optional, MAY be floating point, omitted if unknown; message?: string — optional, SHOULD be relevant human-readable progress info; _meta?: NotificationMetaObject — 'io.modelcontextprotocol/subscriptionId' is ABSENT on progress notifications (schema.ts L126-128) }",
+   "result": "none (notification).",
+   "capability_gate": "None. Opt-in is per request via params._meta.progressToken (RequestMetaObject.progressToken?: ProgressToken, schema.ts L67; basic__index.md _meta table L354). 'The receiver is not obligated to provide these notifications.' Only in ServerNotification union (schema.ts L3176); NOT in ClientNotification in 2026-07-28.",
+   "notes": "Delivery scoping: on Streamable HTTP, delivered only on the SSE response stream of the originating request, never on a subscriptions/listen stream (streamable-http.md L109-113, L129-131); on stdio, written to stdout as an in-flight-request notification (stdio.md L49-50). Timeout interaction: receivers MAY reset a request timeout on progress but SHOULD keep a maximum timeout (cancellation.md 'Timeouts')."
+  },
+  {
+   "name": "subscriptions/listen (as referenced by the patterns index and cancellation page; full definition on the subscriptions page)",
+   "direction": "client->server (long-lived request)",
+   "params": "params: SubscriptionsListenRequestParams { _meta: RequestMetaObject (required, incl. io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities); notifications: SubscriptionFilter (required; server MUST NOT send notification types not explicitly requested) }",
+   "result": "SubscriptionsListenResult { resultType: 'complete'; _meta: SubscriptionsListenResultMetaObject { 'io.modelcontextprotocol/subscriptionId': RequestId (required; equals the response id) } } — sent ONLY when the server tears the subscription down gracefully; otherwise the stream stays open and no response is sent. Stream messages: first message per subscription id MUST be notifications/subscriptions/acknowledged { notifications: SubscriptionFilter }, then the opted-in notifications/* each carrying _meta['io.modelcontextprotocol/subscriptionId'].",
+   "capability_gate": "None stated on the patterns pages; not a declared capability.",
+   "notes": "Included here because cancellation semantics reference it: client ends it by closing the SSE stream (HTTP) or notifications/cancelled referencing the listen request id (stdio); server ends it by SHOULD sending the success response then closing (HTTP) or, on stdio, MUST send notifications/cancelled referencing the listen request id (cancellation.md L13-16; schema.ts L637). Stream state is scoped to the request; on channel loss the client re-issues subscriptions/listen (patterns index L67-69; subscriptions.md L162-164)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT initiate JSON-RPC requests; clients do not send JSON-RPC responses. Every interaction begins with the client.",
+   "cite": "patterns/index.md 'Overview' L16-23"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "While a request is in flight the server MAY send notifications scoped to it (notifications/progress, notifications/message) before the response.",
+   "cite": "patterns/index.md 'Request and Response' L27-31"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For Subscribe-and-Notify, stream state is scoped to the subscriptions/listen request; if the underlying channel is lost the client re-issues the request (on stdio reconnection the client MUST re-send subscriptions/listen; server holds no subscription state).",
+   "cite": "patterns/index.md 'Subscribe and Notify' L62-69; subscriptions.md 'Graceful Closure' L162-164"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "A client SHOULD send a cancellation notification to indicate that a request it previously issued should be terminated (when it wants it terminated; transport rules below govern the concrete signal).",
+   "cite": "cancellation.md intro L9-11"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A server MUST send notifications/cancelled referencing a subscriptions/listen request ID when it tears down that subscription stream (stdio).",
+   "cite": "cancellation.md L13-15; Behavior Requirements #2 L73-74; schema.ts L637"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send notifications/cancelled for any other purpose than terminating a subscriptions/listen stream.",
+   "cite": "cancellation.md L15-16; schema.ts L637 'Servers MUST NOT use this notification to cancel any other request.'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Streamable HTTP: the server MUST treat a client disconnect (closing the SSE response stream) as cancellation of that request; no notifications/cancelled is required or expected.",
+   "cite": "cancellation.md 'Transport-Specific Cancellation' L41-43; streamable-http.md 'Cancellation' L235-236"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "After a request is cancelled (HTTP stream closed or stdio notifications/cancelled), the server MUST NOT send any further messages for it, and SHOULD stop work as soon as practical.",
+   "cite": "streamable-http.md L237-239; stdio.md L86-87"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "stdio: to cancel an in-flight request the client MUST send notifications/cancelled referencing the request ID (there is no per-request stream to close).",
+   "cite": "cancellation.md L44-45; stdio.md 'Cancellation' L83-85"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Cancellation notifications MUST only reference requests that were previously issued by the client and are believed to still be in-progress (params.requestId MUST correspond to a request the client previously issued).",
+   "cite": "cancellation.md Behavior Requirements #1 L70-72; schema.ts L622-626"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers receiving cancellation notifications SHOULD stop processing the cancelled request, free associated resources, and not send a response for the cancelled request.",
+   "cite": "cancellation.md Behavior Requirements #3 L75-78; schema.ts L641"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY ignore cancellation notifications if the referenced request is unknown, processing has already completed, or the request cannot be cancelled.",
+   "cite": "cancellation.md Behavior Requirements #4 L79-82"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "The client SHOULD ignore any response to the cancelled request that arrives afterward.",
+   "cite": "cancellation.md Behavior Requirements #5 L83-84"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Both parties MUST handle cancellation race conditions gracefully (notification may arrive after processing completed and after a response was already sent).",
+   "cite": "cancellation.md 'Timing Considerations' L88-91"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Invalid cancellation notifications SHOULD be ignored: unknown request IDs, already completed requests, malformed notifications (fire-and-forget; no error response).",
+   "cite": "cancellation.md 'Error Handling' L115-122"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Both parties SHOULD log cancellation reasons for debugging; application UIs SHOULD indicate when cancellation is requested.",
+   "cite": "cancellation.md 'Implementation Notes' L110-111"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementations SHOULD establish timeouts for all sent requests; when no success/error response arrives within the timeout the sender SHOULD cancel the request (HTTP: close the response stream; stdio: send notifications/cancelled) and stop waiting.",
+   "cite": "cancellation.md 'Timeouts' L49-57"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "SDKs and other middleware SHOULD allow request timeouts to be configured on a per-request basis.",
+   "cite": "cancellation.md 'Timeouts' L59-60"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Implementations MAY reset the timeout clock when receiving a progress notification for the request.",
+   "cite": "cancellation.md 'Timeouts' L62-64"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementations SHOULD always enforce a maximum timeout regardless of progress notifications.",
+   "cite": "cancellation.md 'Timeouts' L64-66"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "The server MAY send progress notifications to report status of requests the client issued; it is not obligated to (may send none, at any frequency, may omit total).",
+   "cite": "progress.md L10-11, L35, Behavior Requirements #2 L66-69; schema.ts L65"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Progress tokens MUST be a string or integer value (ProgressToken = string | number) and MUST be unique across all active requests.",
+   "cite": "progress.md L18-20; schema.ts L165"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The progress value MUST increase with each notification, even if the total is unknown; progress and total MAY be floating point.",
+   "cite": "progress.md L55-57"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "The message field SHOULD provide relevant human-readable progress information.",
+   "cite": "progress.md L58"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Progress notifications MUST only reference tokens that were provided in an active request and are associated with an in-progress operation.",
+   "cite": "progress.md Behavior Requirements #1 L62-64"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Progress notifications MUST stop after completion of the request.",
+   "cite": "progress.md 'Implementation Notes' L92"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Clients and servers SHOULD track active progress tokens.",
+   "cite": "progress.md 'Implementation Notes' L90"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Both parties SHOULD implement rate limiting of progress notifications to prevent flooding.",
+   "cite": "progress.md 'Implementation Notes' L91"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Streamable HTTP: notifications sent on a request's SSE response stream MUST relate to the originating client request; request-scoped notifications (progress, message) are NOT delivered on the subscriptions/listen stream.",
+   "cite": "streamable-http.md L109-113, L129-131"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST include _meta['io.modelcontextprotocol/subscriptionId'] on every notification delivered via a subscriptions/listen stream; the key is absent on progress notifications for in-flight requests.",
+   "cite": "schema.ts NotificationMetaObject L120-134; stdio.md L51-55; basic/index.md L415"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "stdio: clients MUST correlate subscription-stream notifications using _meta['io.modelcontextprotocol/subscriptionId'].",
+   "cite": "stdio.md L51-55"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "notifications/subscriptions/acknowledged MUST be the first message the server sends carrying a given subscriptionId; the server MUST NOT send any notification on the subscription before acknowledging it (ordering is per subscription id, not per channel, on stdio).",
+   "cite": "schema.ts L1386-1391; patterns/index.md L76-79"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When the server ends a subscription on its own initiative it SHOULD respond to the original subscriptions/listen request with a success result (resultType 'complete', _meta subscriptionId) before closing the stream (HTTP); on stdio the MUST for notifications/cancelled applies.",
+   "cite": "subscriptions.md 'Cancellation'/'Graceful Closure' L124-126, L132-138; cancellation.md L13-15"
+  }
+ ],
+ "wire_details": [
+  "Method constant: \"notifications/cancelled\" (schema.ts L649).",
+  "Method constant: \"notifications/progress\" (schema.ts L1041).",
+  "Method constant: \"subscriptions/listen\" (schema.ts L1315); \"notifications/subscriptions/acknowledged\" (schema.ts L1399).",
+  "CancelledNotificationParams: requestId: RequestId (string | number, REQUIRED); reason?: string. Example: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"123\",\"reason\":\"User requested cancellation\"}} (cancellation.md L26-35).",
+  "ProgressNotificationParams: progressToken: string|number (REQUIRED); progress: number (REQUIRED, JSON number, may be float); total?: number; message?: string. Example: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"abc123\",\"progress\":50,\"total\":100,\"message\":\"Reticulating splines...\"}} (progress.md L42-53).",
+  "Request opt-in key: params._meta.progressToken (string | number) — a plain (non-prefixed) reserved _meta key listed in the basic/index.md reserved-keys table L354 alongside io.modelcontextprotocol/* keys. Example: {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"some_method\",\"params\":{\"_meta\":{\"progressToken\":\"abc123\"}}} (progress.md L22-33).",
+  "_meta key: \"io.modelcontextprotocol/subscriptionId\" (value: RequestId = JSON-RPC id of the subscriptions/listen request) — present on every subscription-stream notification and on the SubscriptionsListenResult; absent on progress notifications (schema.ts L133, L1334).",
+  "JSON-RPC: jsonrpc = \"2.0\"; RequestId = string | number; notifications have no id; JSONRPCErrorResponse.id is optional (schema.ts L261-302).",
+  "No error codes are defined by the cancellation or progress pages: invalid/late cancellation notifications are silently ignored, never answered with a JSON-RPC error (cancellation.md L115-122).",
+  "No HTTP headers are defined for cancellation or progress. Streamable HTTP cancellation = client closes the SSE response stream (Content-Type: text/event-stream) of that request; the spec states header requirements for notification POSTs are not defined by this revision and notifications/cancelled is not expected over HTTP (streamable-http.md L92-102).",
+  "Streamable HTTP servers SHOULD send X-Accel-Buffering: no on SSE streams so progress notifications are not buffered by proxies (streamable-http.md L133-139). Last-Event-ID / resumable SSE is NOT supported (L152).",
+  "stdio framing: one JSON message per line on stdout/stdin, single shared channel, no per-request streams; server MUST NOT write JSON-RPC requests to stdout (stdio.md L43-57).",
+  "Schema unions (2026-07-28): ClientNotification = CancelledNotification only; ServerNotification = CancelledNotification | ProgressNotification | ... | SubscriptionsAcknowledgedNotification (schema.ts L3166-3182)."
+ ],
+ "sdk_implications": [
+  "Client core: per-request timeout (configurable per call, with a global default and a hard maximum ceiling), optional reset-on-progress; on timeout perform transport-appropriate cancellation and reject the pending promise/task locally.",
+  "Client core: expose Cancel(requestId, reason?) / CancellationToken integration. Transport abstraction must expose a 'cancel signal' primitive: stdio transport sends notifications/cancelled {requestId, reason}; Streamable HTTP transport aborts the in-flight HTTP request/SSE stream and sends no notification. The SDK must never emit notifications/cancelled over Streamable HTTP.",
+  "Client core: keep a pending-request table keyed by RequestId; after local cancellation mark the entry so late responses/errors and further notifications for that id are discarded (no exception, log at debug).",
+  "Client core: progress opt-in API per request (e.g. -ProgressAction/callback); SDK generates progressToken values (string or integer) guaranteed unique across active requests (e.g. monotonically increasing counter or GUID); inject into params._meta.progressToken; dispatch incoming notifications/progress by progressToken to the callback; drop notifications for unknown/completed tokens; remove token when response arrives; optional rate-limit/coalescing.",
+  "Client core: validate incoming notifications/progress (progressToken required, progress required numeric, total/message optional) and notifications/cancelled from server; server-sent notifications/cancelled is only valid when requestId matches an active subscriptions/listen request — then end that subscription locally (and optionally auto-resubscribe); ignore otherwise.",
+  "Client core: never send a JSON-RPC response; never accept JSON-RPC requests from the server (server->client interactions come only via InputRequiredResult per MRTR).",
+  "Server core: maintain a table of in-flight requests keyed by RequestId with a per-request cancellation token; stdio transport: on notifications/cancelled look up requestId, trigger the token, suppress the eventual response (do not write a result/error for a cancelled request), free resources; ignore unknown/completed/malformed silently (log reason). Streamable HTTP transport: wire the HTTP connection-aborted/SSE-closed event to the same cancellation token; after cancellation suppress all further messages for that request.",
+  "Server core: expose a per-request context object to handlers carrying CancellationToken, the progressToken (if any), and a ReportProgress(progress, total?, message?) method that (a) is a no-op when no token was supplied, (b) enforces monotonic increase (reject or clamp non-increasing values), (c) stops emitting once the handler completes/cancels, (d) optionally rate-limits, (e) routes the notification to the originating request's response stream (HTTP) or stdout (stdio) and never onto a subscription stream, and never adds io.modelcontextprotocol/subscriptionId.",
+  "Server core: notifications/cancelled emission API restricted to subscription teardown on stdio (referencing the listen request id); on HTTP send the SubscriptionsListenResult (resultType 'complete', _meta subscriptionId) then close the stream. Refuse/assert against any other server-side use.",
+  "Both: implement the three patterns generically in the protocol layer (request/response with request-scoped notifications; MRTR retry with inputResponses; long-lived listen streams with per-subscription ordering) so transports need only framing/delivery, per patterns/index.md 'Adding Patterns'.",
+  "Both: message validation must reject notifications/cancelled lacking requestId (required in 2026-07-28) unless operating in a legacy (2025-11-25) mode where it was optional for task cancellation.",
+  "Logging: log cancellation reasons and cancelled request ids on both sides; surface 'cancellation requested' state to host UIs (Write-Progress in PowerShell maps naturally to progress notifications).",
+  "Conformance: the tools-call-with-progress scenario exists in the conformance suite (conformance_README.md L198, SDK_INTEGRATION.md L76); the server SDK must correctly emit progress for tools/call when a progressToken is supplied."
+ ],
+ "legacy_delta": [
+  "Direction: 2025-06-18/2025-11-25 allowed notifications/cancelled to be sent by EITHER side for any previously-issued request in the same direction (servers could cancel their own sampling/elicitation/roots requests). 2026-07-28: clients cancel their requests; servers send it ONLY to tear down a subscriptions/listen stream on stdio and MUST NOT use it for anything else (there are no server-initiated requests any more).",
+  "requestId optionality: 2025-11-25 CancelledNotificationParams.requestId was optional (omitted when cancelling tasks via tasks/cancel; 'MUST NOT be used for cancelling tasks'). 2026-07-28: requestId is required; tasks and tasks/cancel do not exist in the 2026-07-28 schema.",
+  "initialize rule: 2025-06-18 and 2025-11-25 stated 'A client MUST NOT attempt to cancel its initialize request'. 2026-07-28 has no initialize request/lifecycle; the rule is gone. A dual-era SDK must keep the guard only in legacy mode.",
+  "Transport semantics: earlier revisions had no transport-specific cancellation rule; notifications/cancelled was the universal mechanism over both stdio and HTTP. 2026-07-28: over Streamable HTTP closing the per-request SSE stream IS the cancellation and notifications/cancelled is not expected (core protocol defines no client->server notifications over HTTP); notifications/cancelled is stdio-only.",
+  "Schema unions: 2025-xx ClientNotification also included InitializedNotification, ProgressNotification, RootsListChangedNotification; ServerNotification included CancelledNotification/ProgressNotification for server-initiated requests. 2026-07-28: ClientNotification = CancelledNotification only; ProgressNotification is server->client only (clients no longer receive requests, so they never report progress).",
+  "Progress: ProgressToken type (string|number), progressToken location (params._meta.progressToken) and ProgressNotificationParams fields (progressToken, progress, total?, message?) are unchanged across 2025-06-18, 2025-11-25 and 2026-07-28. New in 2026-07-28: _meta is a typed RequestMetaObject where io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities are REQUIRED on every request alongside the optional progressToken; NotificationMetaObject gained io.modelcontextprotocol/subscriptionId (absent on progress notifications).",
+  "Timeout text (SHOULD establish timeouts, per-request configurability, MAY reset on progress, SHOULD enforce maximum) is carried over from 2025-xx; new is the explicit mapping of timeout-triggered cancellation to 'close the HTTP response stream' vs 'send notifications/cancelled on stdio'.",
+  "Progress race/behavior rules (tokens active only, MUST increase, MUST stop after completion, rate limiting, tracking) are unchanged from 2025-11-25."
+ ],
+ "open_questions": [
+  "Streamable HTTP: the spec says notifications/cancelled is 'not expected' over HTTP but does not say a server MUST reject or MUST ignore one if a client POSTs it; header requirements for notification POSTs are explicitly undefined. Decide whether the PowerShell HTTP server silently accepts (202) and ignores it, or treats it as an ordinary notification POST.",
+  "Server-sent notifications/cancelled on Streamable HTTP: cancellation.md L13-15 phrases the MUST without a transport qualifier, while schema.ts L637 and subscriptions.md scope it to stdio (HTTP uses the SubscriptionsListenResult + stream close). Treat as stdio-only; confirm against TypeScript SDK v2 behavior.",
+  "Progress before acknowledgement/after cancellation: the spec says progress MUST stop 'after completion' but does not define behavior for progress emitted between a cancellation signal and handler exit; SDK should suppress (consistent with 'MUST NOT send any further messages').",
+  "Uniqueness of progressToken 'across all active requests' — scope is per client/session; unclear whether uniqueness must hold across multiple concurrent sessions of one server process (SDK should key tokens per session).",
+  "progress monotonicity enforcement: spec does not state receiver behavior for a non-increasing progress value (ignore? accept?). SDK receiver should accept and log; sender should enforce.",
+  "No guidance on what to do with a progressToken supplied on subscriptions/listen (long-lived request); presumably allowed but meaningless; SDK may ignore.",
+  "Rate limiting thresholds for progress are unspecified (SHOULD only) — choose a default (e.g. coalesce to at most N/s) and make it configurable."
+ ]
+}

@@ -1,0 +1,579 @@
+{
+ "source": "MCP Apps extension (io.modelcontextprotocol/ui). Local files read in full: pages/extensions__apps__overview.md, pages/extensions__apps__build.md. Core schema.ts/2026-07-28_schema.json grepped for related terms - no hits, confirming this extension lives entirely outside the core schema files. Full normative text fetched via curl from https://raw.githubusercontent.com/modelcontextprotocol/ext-apps/main/specification/2026-01-26/apps.mdx (SEP-1865, Status: Stable 2026-01-26) since the two required pages explicitly defer all wire-level detail to that spec and to https://apps.extensions.modelcontextprotocol.io (github.com HTML blocked, so raw.githubusercontent.com was used per environment rules).",
+ "summary": "MCP Apps (io.modelcontextprotocol/ui) is a SEP-1724 extension, not part of core schema.ts. It lets tools declare _meta.ui.resourceUri pointing to a predeclared ui:// resource (mimeType text/html;profile=mcp-app, fetched via standard resources/read) that hosts render in a sandboxed iframe. Communication between the rendered View and the Host uses a parallel JSON-RPC/postMessage dialect reusing some core MCP methods (tools/call, resources/read, notifications/message, ping) plus new ui/* methods for lifecycle (ui/initialize<->ui/notifications/initialized), host actions (ui/open-link, ui/message, ui/request-display-mode, ui/update-model-context), and host->view data/lifecycle notifications (tool-input, tool-input-partial, tool-result, tool-cancelled, resource-teardown, size-changed, host-context-changed) plus sandbox-proxy-only messages for web hosts. Capability negotiation happens at core initialize via capabilities.extensions['io.modelcontextprotocol/ui'].mimeTypes (REQUIRED array). Tool visibility (['model','app'], default both) gates tools/list exposure to the model and tools/call eligibility from the app. Security model mandates iframe sandboxing, CSP built from resource _meta.ui.csp (restrictive default if omitted), and a same-origin-protecting double-iframe sandbox proxy for web hosts. A PowerShell SERVER SDK can fully implement tool/resource registration and capability-gating (pure JSON-RPC/_meta shaping, no browser needed). The CLIENT/HOST rendering role (iframe, CSP enforcement, postMessage relay, WebView2 hosting) is a browser/webview concern outside typical PowerShell module scope. No MCP-Apps-specific error codes exist beyond generic -32000; all error messages are illustrative, not enumerated.",
+ "legacy_delta": [
+  "MCP Apps is not part of core schema.ts/2026-07-28_schema.json - confirmed by grep: no 'ui.'/resourceUri/ext-apps hits in local schema.ts. It layers entirely on _meta fields and a new ui:// resource scheme plus a parallel JSON-RPC dialect over postMessage, so core protocol version negotiation (2026-07-28) is orthogonal to this extension's own protocolVersion string (spec examples use '2026-01-26' and even '2024-11-05' inconsistently in different examples - treat as spec inconsistency, not a hard requirement).",
+  "Deprecated legacy field: flat _meta['ui/resourceUri'] (string key literally containing a slash) - superseded by _meta.ui.resourceUri. Spec states the deprecated form 'will be removed before GA'; current status is 'Stable (2026-01-26)' per the SEP header, so an SDK built now should treat the flat key as legacy/optional read-fallback only, never write it.",
+  "No prior (2025-11-25 or 2025-06-18) schema references this extension at all - it postdates those revisions; there is no migration path to document beyond the intra-extension resourceUri deprecation noted above."
+ ],
+ "methods": [
+  {
+   "name": "initialize (core MCP, host<->server transport)",
+   "direction": "client->server",
+   "params": "Host advertises capabilities.extensions['io.modelcontextprotocol/ui'] = { mimeTypes: string[] } in the standard MCP initialize request.",
+   "result": "Standard InitializeResult; server may consult getUiCapability(clientCapabilities) to decide whether to register UI-enabled tools.",
+   "capability_gate": "Extension is only in effect if both sides negotiate io.modelcontextprotocol/ui via the SEP-1724 extensions capability mechanism at core initialize time. mimeTypes is REQUIRED on the setting object when present.",
+   "notes": "apps.mdx lines 1494-1522. Example JSON in the spec pairs this extension setting with protocolVersion '2024-11-05', which is stale/inconsistent - an SDK should use the negotiated core protocolVersion (2026-07-28) regardless."
+  },
+  {
+   "name": "resources/read (core MCP, reused for UI resources)",
+   "direction": "client->server",
+   "params": "{ uri: 'ui://...' }",
+   "result": "{ contents: [{ uri, mimeType: 'text/html;profile=mcp-app', text?: string, blob?: string(base64), _meta?: { ui?: UIResourceMeta } }] }",
+   "capability_gate": "None beyond core resources capability; Host MUST use resources/read to fetch a tool-referenced ui:// resource (apps.mdx line 391).",
+   "notes": "mimeType MUST be exactly 'text/html;profile=mcp-app' (lines 268, 240). Content MUST be provided via text or blob and MUST be valid HTML5 (lines 269-270). Host MAY prefetch/cache (line 392). Servers MAY omit UI-only resources from resources/list and notifications/resources/list_changed (line 393)."
+  },
+  {
+   "name": "tools/call (core MCP, also usable by the View)",
+   "direction": "client->server (Host->Server); also View->Host is forwarded Host->Server",
+   "params": "Standard { name, arguments } - for a UI-tagged tool the Host also treats a matching _meta.ui.resourceUri as the render target.",
+   "result": "Standard CallToolResult { content, structuredContent?, _meta? } - delivered verbatim as ui/notifications/tool-result params.",
+   "capability_gate": "tools/call FROM an app (View) for a given tool: Host MUST reject the call unless that tool's _meta.ui.visibility array includes 'app' (line 401). Cross-server tool calls from an app are always blocked (line 402).",
+   "notes": "lines 493-495 list tools/call as one of the standard MCP messages a View is permitted to use over the postMessage transport."
+  },
+  {
+   "name": "tools/list (core MCP)",
+   "direction": "client->server",
+   "params": "none / standard",
+   "result": "Standard ListToolsResult; each Tool MAY carry _meta.ui: McpUiToolMeta {resourceUri?, visibility?}.",
+   "capability_gate": "Host MUST NOT include a tool in the list surfaced to the agent when its visibility array omits 'model' (line 400).",
+   "notes": "visibility defaults to ['model','app'] when _meta.ui.visibility is omitted (line 397)."
+  },
+  {
+   "name": "ui/initialize",
+   "direction": "notification c->s is actually a request (View->Host, has id)",
+   "params": "McpUiAppCapabilities under 'appCapabilities': { experimental?:{}, tools?:{listChanged?:boolean}, availableDisplayModes?: Array<'inline'|'fullscreen'|'pip'> }, plus clientInfo, protocolVersion (mirrors core initialize shape).",
+   "result": "McpUiInitializeResult: { protocolVersion, hostCapabilities: HostCapabilities, hostInfo: {name,version}, hostContext?: HostContext }",
+   "capability_gate": "View MUST include appCapabilities in the ui/initialize request (line 512). View MUST declare every display mode it supports in appCapabilities.availableDisplayModes (line 781).",
+   "notes": "MCP-Apps-specific handshake, distinct from core 'initialize'. Host MUST NOT send any request/notification to the View before receiving ui/notifications/initialized (line 485)."
+  },
+  {
+   "name": "ui/notifications/initialized",
+   "direction": "notification c->s (View->Host)",
+   "params": "{} (empty/no-required-fields notification completing the handshake, analogous to core notifications/initialized)",
+   "result": "n/a (notification)",
+   "capability_gate": "none additional",
+   "notes": "Completes the ui/initialize handshake (line 507)."
+  },
+  {
+   "name": "ping (core MCP)",
+   "direction": "client->server (either direction, reused)",
+   "params": "standard empty ping params",
+   "result": "standard empty result",
+   "capability_gate": "none",
+   "notes": "Listed as one of the 'Standard MCP Messages' the View may use (line 508) for connection health check."
+  },
+  {
+   "name": "notifications/message (core MCP)",
+   "direction": "notification c->s (View->Host)",
+   "params": "Standard MCP log message notification.",
+   "result": "n/a",
+   "capability_gate": "HostCapabilities.logging?:{} indicates host accepts log messages (lines 643-644).",
+   "notes": "Used for logging to host, distinct from ui/message (chat) and ui/update-model-context (model context) - lines 1094, 1353-1355."
+  },
+  {
+   "name": "ui/open-link",
+   "direction": "client->server (View->Host request)",
+   "params": "{ url: string }",
+   "result": "Success: {} (empty object). Error: JSON-RPC error, code -32000 (implementation-defined), message one of 'Link opening denied by user' | 'Invalid URL' | 'Policy violation' (illustrative, not exhaustive enum).",
+   "capability_gate": "Host advertises support via HostCapabilities.openLinks?:{} (lines 631-632). Host controls whether to allow it at all.",
+   "notes": "Host SHOULD open the URL in the user's default browser or a new tab (line 996)."
+  },
+  {
+   "name": "ui/message",
+   "direction": "client->server (View->Host request)",
+   "params": "{ role: 'user', content: { type: 'text', text: string } }",
+   "result": "Success: {}. Error: code -32000, message 'Message sending denied' | 'Invalid message format'.",
+   "capability_gate": "None explicit beyond host policy/consent.",
+   "notes": "Host SHOULD add the message to conversation context preserving the specified role (line 1033); Host MAY request user consent (line 1034)."
+  },
+  {
+   "name": "ui/request-display-mode",
+   "direction": "client->server (View->Host request)",
+   "params": "{ mode: 'inline' | 'fullscreen' | 'pip' }",
+   "result": "{ mode: 'inline'|'fullscreen'|'pip' } - the actual resulting mode, which MAY differ from requested.",
+   "capability_gate": "Host MUST NOT switch to a mode absent from the View's appCapabilities.availableDisplayModes if that field was set (line 786).",
+   "notes": "Host MUST return the resulting mode regardless of outcome (line 787); if unavailable, Host SHOULD return the current mode (line 788); Host MAY decline requests for undeclared modes (line 789)."
+  },
+  {
+   "name": "ui/update-model-context",
+   "direction": "client->server (View->Host request)",
+   "params": "{ content?: ContentBlock[], structuredContent?: Record<string,unknown> }",
+   "result": "Success: {}. Error: code -32000, message 'Context update denied' | 'Invalid content format'.",
+   "capability_gate": "None explicit; host policy driven.",
+   "notes": "Each call OVERWRITES prior View-sent context (lines 1093, 1098). Host SHOULD surface it to the model on future turns (1097); MAY defer until next user message including a ui/message (1099); MAY dedupe identical calls (1100); if multiple updates arrive before next user turn, Host SHOULD send only the last (1101)."
+  },
+  {
+   "name": "ui/notifications/tool-input",
+   "direction": "server->client (Host->View notification)",
+   "params": "{ arguments: Record<string,unknown> }",
+   "result": "n/a",
+   "capability_gate": "none",
+   "notes": "Host MUST send exactly once, with complete tool arguments, after the View's initialize completes (lines 1106, 1118). MUST precede ui/notifications/tool-result (line 1118)."
+  },
+  {
+   "name": "ui/notifications/tool-input-partial",
+   "direction": "server->client (Host->View notification)",
+   "params": "{ arguments: Record<string,unknown> } - best-effort recovered/closed partial JSON.",
+   "result": "n/a",
+   "capability_gate": "none",
+   "notes": "Host MAY send zero or more times before the complete tool-input (line 1120). Host MUST stop sending these once the complete ui/notifications/tool-input is sent (line 1136). View MUST NOT rely on partial arguments for critical operations (line 1142)."
+  },
+  {
+   "name": "ui/notifications/tool-result",
+   "direction": "server->client (Host->View notification)",
+   "params": "CallToolResult (standard MCP type - content, structuredContent?, _meta?)",
+   "result": "n/a",
+   "capability_gate": "none",
+   "notes": "Host MUST send this when tool execution completes, IF the View is displayed during execution (line 1155)."
+  },
+  {
+   "name": "ui/notifications/tool-cancelled",
+   "direction": "server->client (Host->View notification)",
+   "params": "{ reason: string }",
+   "result": "n/a",
+   "capability_gate": "none",
+   "notes": "Host MUST send this if tool execution was cancelled for ANY reason (user action, sampling error, classifier intervention, etc.) - line 1169."
+  },
+  {
+   "name": "ui/resource-teardown",
+   "direction": "server->client (Host->View request, has id)",
+   "params": "{ reason: string }",
+   "result": "Success: {}. Error: code -32000, message 'Teardown error'.",
+   "capability_gate": "none",
+   "notes": "Host MUST send before tearing down the UI resource for any reason (line 1201). Host SHOULD wait for the View's response before actually tearing down, to avoid data loss (line 1202)."
+  },
+  {
+   "name": "ui/notifications/size-changed",
+   "direction": "client->server (View->Host notification)",
+   "params": "{ width: number, height: number } (viewport pixels)",
+   "result": "n/a",
+   "capability_gate": "Only meaningful/required when Host is using flexible dimensions.",
+   "notes": "View SHOULD send when its rendered content size changes (line 1217). When using flexible containerDimensions, Host MUST listen for this and resize the iframe accordingly (line 718)."
+  },
+  {
+   "name": "ui/notifications/host-context-changed",
+   "direction": "server->client (Host->View notification)",
+   "params": "Partial<HostContext> (any subset of HostContext fields)",
+   "result": "n/a",
+   "capability_gate": "none",
+   "notes": "Host MAY send on any context change (theme toggle, display-mode change, orientation, resize) - line 1229. Payload is a PARTIAL update; View SHOULD merge into current state rather than replace (line 1229)."
+  },
+  {
+   "name": "ui/notifications/sandbox-proxy-ready",
+   "direction": "notification c->s (Sandbox Proxy -> Host)",
+   "params": "{}",
+   "result": "n/a",
+   "capability_gate": "Only applicable when Host is a web page using the double-iframe sandbox-proxy architecture (line 472-473).",
+   "notes": "Sandbox MUST send this when ready to process the subsequent sandbox-resource-ready notification (line 476)."
+  },
+  {
+   "name": "ui/notifications/sandbox-resource-ready",
+   "direction": "server->client (Host -> Sandbox Proxy notification)",
+   "params": "{ html: string, sandbox?: string (iframe sandbox attribute override), csp?: {connectDomains?, resourceDomains?, frameDomains?, baseUriDomains?}, permissions?: {camera?, microphone?, geolocation?, clipboardWrite?} }",
+   "result": "n/a",
+   "capability_gate": "Sandbox-proxy architecture only.",
+   "notes": "Sent once Sandbox signals ready (line 477). Reserved namespace 'ui/notifications/sandbox-*': the Sandbox MUST forward every other message transparently between Host and View, and MUST NOT itself originate any other request/notification (rules 6-7, lines 485-486)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A UI resource URI MUST use the ui:// scheme.",
+   "cite": "apps.mdx lines 64-66, 267"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "UI resource mimeType SHOULD be 'text/html;profile=mcp-app' for HTML-based UIs in the initial MVP.",
+   "cite": "apps.mdx lines 93-95"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "resources/read response mimeType for a UI resource MUST be exactly 'text/html;profile=mcp-app'.",
+   "cite": "apps.mdx line 240, 268"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "UI resource content MUST be provided via either 'text' (string) or 'blob' (base64-encoded), and MUST be a valid HTML5 document.",
+   "cite": "apps.mdx lines 269-270"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Host MUST construct CSP headers based on the resource's declared _meta.ui.csp domains.",
+   "cite": "apps.mdx line 274"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If ui.csp is omitted, Host MUST apply the restrictive default CSP: default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; connect-src 'none'.",
+   "cite": "apps.mdx lines 275-284"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Host MAY further restrict CSP but MUST NOT allow undeclared domains beyond what the resource metadata declares.",
+   "cite": "apps.mdx line 286"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Host SHOULD log CSP configurations for security review (audit trail).",
+   "cite": "apps.mdx line 287"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If a tool declares _meta.ui.resourceUri and host supports MCP Apps, the referenced resource MUST exist on the server, and Host MUST use resources/read to fetch it.",
+   "cite": "apps.mdx lines 390-391"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Host MAY prefetch and cache UI resource content for performance.",
+   "cite": "apps.mdx line 392"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY omit UI-only resources from resources/list and notifications/resources/list_changed since they're discovered via tool metadata.",
+   "cite": "apps.mdx line 393"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Host MUST NOT include a tool in the tools list surfaced to the agent (tools/list results consumed by the model) if its _meta.ui.visibility array does not include 'model'.",
+   "cite": "apps.mdx line 400"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Host MUST reject tools/call requests originating from the app (View) for tools whose visibility does not include 'app'.",
+   "cite": "apps.mdx line 401"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Cross-server tool calls from an app context are always blocked, regardless of visibility settings.",
+   "cite": "apps.mdx line 402"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If the Host is a web page, it MUST wrap the View via an intermediate Sandbox proxy of a different origin than the Host.",
+   "cite": "apps.mdx lines 472-474"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The Sandbox MUST have exactly the permissions allow-scripts and allow-same-origin.",
+   "cite": "apps.mdx line 475"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The Sandbox MUST send ui/notifications/sandbox-proxy-ready before processing a sandbox-resource-ready notification.",
+   "cite": "apps.mdx line 476"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Once ready, the Host MUST send the raw HTML via ui/notifications/sandbox-resource-ready.",
+   "cite": "apps.mdx line 477"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The Sandbox MUST load the View HTML with CSP enforcing declared csp domains; frame-src 'none' unless frameDomains given; base-uri 'self' unless baseUriDomains given; object-src 'none' always; restrictive defaults if no CSP metadata.",
+   "cite": "apps.mdx lines 478-483"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If permissions are declared, the Sandbox MAY set the inner iframe's allow attribute accordingly.",
+   "cite": "apps.mdx line 484"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The Sandbox MUST forward all messages between Host and View transparently except those whose method starts with 'ui/notifications/sandbox-'.",
+   "cite": "apps.mdx line 485"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "The Host MUST NOT send any request or notification to the View before receiving the View's ui/notifications/initialized.",
+   "cite": "apps.mdx line 485"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "The Sandbox SHOULD NOT create/send its own requests to Host or View (avoids needing to synthesize new request ids).",
+   "cite": "apps.mdx line 486"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "The Host MAY forward any non-'ui/' message from the View (via Sandbox) on to the MCP Apps server; Host SHOULD ensure the View's MCP connection is spec-compliant and MAY block or require user approval for some messages.",
+   "cite": "apps.mdx line 487"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The View sending ui/initialize MUST include its capabilities in appCapabilities.",
+   "cite": "apps.mdx line 512"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "The Host SHOULD include hostContext in the McpUiInitializeResult.",
+   "cite": "apps.mdx line 533"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "View MUST declare all display modes it supports in appCapabilities.availableDisplayModes during initialization.",
+   "cite": "apps.mdx line 781"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "View MUST check the requested mode is present in host's availableDisplayModes before requesting a change.",
+   "cite": "apps.mdx line 782"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "View MUST handle the response mode differing from what it requested.",
+   "cite": "apps.mdx line 783"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Host MUST NOT switch a View to a display mode absent from its declared appCapabilities.availableDisplayModes (when that field was set).",
+   "cite": "apps.mdx line 786"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Host MUST return the resulting display mode (updated or not) in the response to ui/request-display-mode.",
+   "cite": "apps.mdx line 787"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "If requested mode unavailable, Host SHOULD return the current display mode.",
+   "cite": "apps.mdx line 788"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Host MAY decline display-mode requests from Views that never declared support for that mode.",
+   "cite": "apps.mdx line 789"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When using flexible containerDimensions (no fixed height/width), hosts MUST listen for ui/notifications/size-changed and update iframe dimensions accordingly.",
+   "cite": "apps.mdx line 718"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Host MUST send ui/notifications/tool-input (complete arguments) exactly once, after the View's initialize completes, and it MUST precede ui/notifications/tool-result.",
+   "cite": "apps.mdx lines 1106, 1118"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Host MUST stop sending ui/notifications/tool-input-partial once the complete ui/notifications/tool-input has been sent.",
+   "cite": "apps.mdx line 1136"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "View MUST NOT rely on partial tool-input arguments for critical operations.",
+   "cite": "apps.mdx line 1142"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Host MUST send ui/notifications/tool-result when tool execution completes if the View is displayed during execution.",
+   "cite": "apps.mdx line 1155"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Host MUST send ui/notifications/tool-cancelled if the tool execution was cancelled for any reason.",
+   "cite": "apps.mdx line 1169"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Host MUST send ui/resource-teardown before tearing down the UI resource for any reason.",
+   "cite": "apps.mdx line 1201"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Host SHOULD wait for the View's response to ui/resource-teardown before actually tearing down, to avoid data loss.",
+   "cite": "apps.mdx line 1202"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "View SHOULD send ui/notifications/size-changed when its rendered content size changes.",
+   "cite": "apps.mdx line 1217"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "View SHOULD merge partial host-context-changed updates into its current state rather than replace wholesale.",
+   "cite": "apps.mdx line 1229"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Host SHOULD open ui/open-link URLs in the user's default browser or a new tab.",
+   "cite": "apps.mdx line 996"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Host SHOULD add a ui/message's content to the conversation context, preserving the specified role.",
+   "cite": "apps.mdx line 1033"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Host MAY request user consent before acting on a ui/message.",
+   "cite": "apps.mdx line 1034"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Host SHOULD provide ui/update-model-context content to the model in future turns; if multiple updates arrive before the next user turn, Host SHOULD send only the last.",
+   "cite": "apps.mdx lines 1097, 1101"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The 'mimeTypes' field in the io.modelcontextprotocol/ui extension capability setting is REQUIRED.",
+   "cite": "apps.mdx line 1522"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD check client capabilities (via getUiCapability) before registering UI-enabled tools.",
+   "cite": "apps.mdx line 1531"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD provide text-only fallback behavior for all UI-enabled tools.",
+   "cite": "apps.mdx line 1558"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Tools MUST return a meaningful content array even when UI is available.",
+   "cite": "apps.mdx line 1559"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY register different tool variants based on host capabilities.",
+   "cite": "apps.mdx line 1560"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "All View content MUST be rendered in sandboxed iframes with restricted permissions.",
+   "cite": "apps.mdx line 1698"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Host SHOULD validate all incoming messages from UI iframes, reject malformed message types, and log View-initiated RPC calls for security review.",
+   "cite": "apps.mdx lines 1708-1710"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Hosts MUST enforce Content Security Policies based on resource metadata.",
+   "cite": "apps.mdx line 1725"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Host MUST block connections to undeclared domains.",
+   "cite": "apps.mdx line 1756"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Host SHOULD warn users when a UI requires external domain access.",
+   "cite": "apps.mdx line 1757"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Host MAY implement global domain allowlists/blocklists.",
+   "cite": "apps.mdx line 1758"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "Apps SHOULD NOT assume declared sandbox permissions (camera/microphone/geolocation/clipboardWrite) are actually granted; must use JS feature detection as fallback.",
+   "cite": "apps.mdx line 171"
+  }
+ ],
+ "wire_details": [
+  "Extension identifier constant: 'io.modelcontextprotocol/ui' (apps.mdx line 40, 1498, 1507, 1768).",
+  "Resource URI scheme constant: 'ui://' - reserved exclusively for MCP Apps (line 1767).",
+  "MIME type constant: 'text/html;profile=mcp-app' - the ONLY content type in this MVP; RESOURCE_MIME_TYPE constant name used by the TS SDK (build.md lines 256, 295).",
+  "_meta key path for tool UI linkage: _meta.ui.resourceUri (string), _meta.ui.visibility (Array<'model'|'app'>, default ['model','app']). Deprecated/legacy flat key: _meta['ui/resourceUri'] (to be removed before GA).",
+  "_meta key path for resource metadata: _meta.ui = { csp?, permissions?, domain?, prefersBorder? } on both the resource declaration and the resources/read content entry.",
+  "csp sub-object fields: connectDomains[] (maps to CSP connect-src), resourceDomains[] (maps to img-src/script-src/style-src/font-src/media-src - supports wildcard subdomains like https://*.example.com), frameDomains[] (maps to frame-src), baseUriDomains[] (maps to base-uri). All empty/omitted = most restrictive default per directive.",
+  "permissions sub-object fields: camera:{}, microphone:{}, geolocation:{}, clipboardWrite:{} - map to Permission Policy features of the same names (camera, microphone, geolocation, clipboard-write) and to the iframe 'allow' attribute.",
+  "domain field: host-defined dedicated sandbox origin string, format is host-specific (examples: '{hash}.claudemcpcontent.com', 'www-example-com.oaiusercontent.com').",
+  "prefersBorder: boolean | omitted (true=visible border+bg, false=none, omitted=host default).",
+  "Default restrictive CSP string (when ui.csp omitted), exact directive order per spec: default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; connect-src 'none'.",
+  "Full CSP construction template (with metadata present) additionally sets: font-src 'self' <resourceDomains>; frame-src <frameDomains or 'none'>; object-src 'none' (always, hardcoded, no override); base-uri <baseUriDomains or 'self'>.",
+  "Sandbox iframe attribute requirement: allow-scripts allow-same-origin exactly (for the outer Sandbox Proxy iframe in web-host architecture).",
+  "JSON-RPC error code used across all View->Host request error responses (ui/open-link, ui/message, ui/update-model-context, ui/resource-teardown): -32000, explicitly labeled 'Implementation-defined error' - message strings are illustrative examples, not a fixed enum.",
+  "Success responses for these same request methods return an empty object {} as 'result'.",
+  "Method name prefix convention: 'ui/' for MCP-Apps-specific requests/notifications; 'ui/notifications/' for MCP-Apps-specific notifications; reserved sub-prefix 'ui/notifications/sandbox-*' for Sandbox<->Host-only messages that must never be forwarded to/from the View.",
+  "McpUiAppCapabilities.availableDisplayModes enum: 'inline' | 'fullscreen' | 'pip'. McpUiDisplayMode is the same 3-value union.",
+  "HostContext.platform enum: 'web' | 'desktop' | 'mobile'. HostContext.theme enum: 'light' | 'dark'.",
+  "HostContext.locale: BCP 47 string (e.g. 'en-US'); HostContext.timeZone: IANA tz string (e.g. 'America/New_York').",
+  "HostContext.safeAreaInsets: {top,right,bottom,left} numbers (pixels).",
+  "HostContext.containerDimensions is a union: either {height:number} or {maxHeight?:number}, combined with either {width:number} or {maxWidth?:number} - 4 combinations, each dimension independently fixed vs flexible vs unbounded-if-omitted.",
+  "Standardized CSS variable name list (McpUiStyleVariableKey): a closed set of ~60 tokens covering --color-background-*, --color-text-*, --color-border-*, --color-ring-*, --font-sans/--font-mono, --font-weight-*, --font-text-*-size/line-height, --font-heading-*-size/line-height, --border-radius-*, --border-width-regular, --shadow-*. Full list is in apps.mdx lines 799-888.",
+  "HostCapabilities fields (returned in McpUiInitializeResult.hostCapabilities): experimental?:{}, openLinks?:{}, serverTools?:{listChanged?:boolean}, serverResources?:{listChanged?:boolean}, logging?:{}, sandbox?:{permissions?:{...}, csp?:{...}}.",
+  "McpUiInitializeResult top-level fields: protocolVersion (string), hostCapabilities (HostCapabilities), hostInfo:{name,version}, hostContext?:HostContext.",
+  "Standard MCP methods explicitly reusable by the View over the postMessage transport (closed list): tools/call, resources/read, notifications/message, ping, plus the ui/initialize<->ui/notifications/initialized handshake pair (apps.mdx lines 493-508).",
+  "Transport is window.postMessage; message envelope is plain JSON-RPC 2.0 ({jsonrpc:'2.0', id?, method, params} / {jsonrpc:'2.0', id, result|error}); target origin in the spec's own sample code uses '*' (an SDK SHOULD tighten this in production, though the spec text itself does not mandate a specific targetOrigin value)."
+ ],
+ "sdk_implications": [
+  "A PowerShell SERVER SDK CAN fully implement the server-side surface: (1) register tools with _meta.ui.resourceUri / _meta.ui.visibility (hashtable-built Tool records - no new protocol needed, just correct _meta nesting matching McpUiToolMeta), (2) serve ui:// resources via a resources/read handler returning mimeType 'text/html;profile=mcp-app' with text or blob content and optional _meta.ui (csp/permissions/domain/prefersBorder), (3) implement getUiCapability-equivalent logic: parse initialize params.capabilities.extensions['io.modelcontextprotocol/ui'].mimeTypes and gate whether to register the UI-tagged tool variant vs. a text-only fallback tool. None of this requires a browser, iframe, or postMessage - it fits a PowerShell MCP server SDK cleanly within existing stdio/HTTP transport handling.",
+  "The CLIENT/HOST role (rendering the iframe, running the Sandbox Proxy, enforcing CSP, doing postMessage relaying, tracking display modes/container sizing, theming) is fundamentally a browser/webview concern. A PowerShell *host* SDK could only provide this by hosting a WebView2 (Windows) or an embedded browser control and wiring its message channel to the MCP transport - out of scope for a typical cross-platform PowerShell module; should be scoped as 'host support requires a hosting UI shell (e.g. WebView2), not pure PowerShell', or omitted from v1.",
+  "SDK must model _meta as an open/extensible bag: implement _meta.ui.resourceUri, _meta.ui.visibility with default ['model','app'], and preserve unknown _meta.ui.* fields losslessly on round-trip since the extension is still evolving (experimental fields, deferred content types).",
+  "Server SDK MUST enforce visibility-based tools/list filtering (exclude tools without 'model' in visibility from lists returned to LLM-facing callers) and, if it also does any host-side call routing/proxying, tools/call rejection for app-originated calls on tools lacking 'app' in visibility. A pure stdio server that only sees tools/call from one undifferentiated client cannot itself distinguish 'model-originated' vs 'app-originated' calls unless the caller (host) marks/relays them separately - flagged as an open design question.",
+  "Server SDK should expose helpers equivalent to registerAppTool/registerAppResource: a function taking name+description+inputSchema+resourceUri that auto-populates the correct nested _meta.ui shape, plus a resource-registration helper enforcing the ui:// prefix and 'text/html;profile=mcp-app' mimeType, mirroring @modelcontextprotocol/ext-apps/server ergonomics.",
+  "Because mimeTypes is REQUIRED in the client's extension capability setting, a PowerShell server SDK's capability-check helper must treat a MISSING or empty mimeTypes array as 'extension not usable' even if the extensions key is present, and must specifically check for 'text/html;profile=mcp-app' membership before registering UI-enabled tools, else fall back to plain-text tool registration per the Graceful Degradation requirement.",
+  "Any PowerShell code building CSP for a Windows-hosted WebView2 sandbox (if attempted) must reproduce the exact default-deny CSP string and the metadata-driven CSP template verbatim, including the hardcoded object-src 'none' with no override path.",
+  "Do not invent methods beyond the closed set: ui/initialize, ui/notifications/initialized, ui/open-link, ui/message, ui/request-display-mode, ui/update-model-context, ui/notifications/tool-input, ui/notifications/tool-input-partial, ui/notifications/tool-result, ui/notifications/tool-cancelled, ui/resource-teardown, ui/notifications/size-changed, ui/notifications/host-context-changed, ui/notifications/sandbox-proxy-ready, ui/notifications/sandbox-resource-ready - plus reuse of core tools/call, resources/read, notifications/message, ping."
+ ],
+ "open_questions": [
+  "The spec's own examples are internally inconsistent about protocolVersion: the extension-capability example under 'Client<>Server Capability Negotiation' uses '2024-11-05' (apps.mdx line 1504) while the postMessage transport example uses '2026-01-26' (line 464) and the McpUiInitializeResult example also uses '2026-01-26' (line 599). Unclear whether ui/initialize's protocolVersion refers to the MCP-Apps dialect's own SEP-status date or must match the negotiated core MCP protocol version (2026-07-28) - needs clarification before an SDK hardcodes a value.",
+  "The spec never defines how a Host distinguishes an app-originated tools/call from a model-originated one when both arrive at the same MCP server connection - critical for enforcing the visibility:['app'] tools/call rejection rule (line 401). This determination logic is host-internal and unspecified in the extension text; a PowerShell server SDK cannot itself enforce this without host cooperation.",
+  "No error code other than the generic -32000 'implementation-defined' is specified anywhere in this extension - confirm this is intentional/final rather than an omission in the fetched revision of apps.mdx (pulled from the 'main' branch via raw.githubusercontent.com, which may not exactly equal the pinned '2026-01-26' spec tag referenced by its own Status line).",
+  "The 2026-07-28 core spec's own pages (overview.md, build.md) only informally reference this extension and defer full detail to https://apps.extensions.modelcontextprotocol.io, which was not directly fetched (github.com HTML blocked). The apps.mdx content used here came from raw.githubusercontent.com main branch, not verified against a specific pinned tag matching 'Stable (2026-01-26)'; recommend re-verifying against a tagged release before finalizing wire types.",
+  "Whether the 'App' convenience class helpers mentioned in prose (applyHostStyleVariables, applyDocumentTheme, applyHostFonts) carry any protocol-level requirement or are pure client-side SDK sugar with no wire effect - appears to be sugar only, but worth an explicit scoping decision for the PowerShell SDK plan."
+ ]
+}
