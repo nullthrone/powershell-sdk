@@ -1,0 +1,20 @@
+[
+  { "name": "bug", "color": "d73a4a", "description": "Type: something is not working" },
+  { "name": "enhancement", "color": "a2eeef", "description": "Type: new feature or request" },
+  { "name": "question", "color": "d876e3", "description": "Type: further information is requested" },
+  { "name": "needs confirmation", "color": "fbca04", "description": "Status: reported, not yet confirmed by a maintainer" },
+  { "name": "needs repro", "color": "fbca04", "description": "Status: a reproduction is required before work can start" },
+  { "name": "ready for work", "color": "0e8a16", "description": "Status: confirmed and ready to be picked up" },
+  { "name": "good first issue", "color": "7057ff", "description": "Status: good for newcomers" },
+  { "name": "help wanted", "color": "008672", "description": "Status: extra attention is needed" },
+  { "name": "P0", "color": "b60205", "description": "Priority: critical (CVSS >= 7.0 or core MCP operations broken); target fix within 7 days" },
+  { "name": "P1", "color": "d93f0b", "description": "Priority: high" },
+  { "name": "P2", "color": "e99695", "description": "Priority: medium" },
+  { "name": "P3", "color": "f9d0c4", "description": "Priority: low" },
+  { "name": "conformance", "color": "1d76db", "description": "Relates to the MCP conformance suite or the baseline" },
+  { "name": "spec: 2026-07-28", "color": "0052cc", "description": "Relates to the current specification revision" },
+  { "name": "spec: legacy", "color": "5319e7", "description": "Relates to the 2025-11-25 / 2025-06-18 dual-era support" },
+  { "name": "security", "color": "b60205", "description": "Security-relevant change or report" },
+  { "name": "dependencies", "color": "0366d6", "description": "Dependency updates (Dependabot, build dependencies)" },
+  { "name": "documentation", "color": "0075ca", "description": "Improvements or additions to documentation" }
+]

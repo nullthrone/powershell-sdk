@@ -1,0 +1,17 @@
+# Normalise line endings to LF in the repository and on checkout on every platform.
+* text=auto eol=lf
+
+*.ps1    text eol=lf
+*.psm1   text eol=lf
+*.psd1   text eol=lf
+*.ps1xml text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.ts     text eol=lf
+*.txt    text eol=lf
+
+*.png   binary
+*.ico   binary
+*.nupkg binary

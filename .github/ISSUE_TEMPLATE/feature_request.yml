@@ -1,0 +1,23 @@
+name: Feature request
+description: A new capability or an improvement.
+labels: ['enhancement', 'needs confirmation']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today, or what is harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Sketch of the API or behaviour you have in mind, ideally as PowerShell.
+      render: powershell
+  - type: input
+    id: spec
+    attributes:
+      label: Specification reference
+      description: Section of the specification, extension or SEP this relates to, if any.
+      placeholder: https://modelcontextprotocol.io/specification/2026-07-28/...

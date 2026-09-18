@@ -1,0 +1,56 @@
+name: Install pinned PowerShell
+description: >-
+  Downloads the given PowerShell release from github.com/PowerShell/PowerShell, extracts it into the runner's
+  temp folder and prepends it to PATH so that later `shell: pwsh` steps use exactly this version.
+inputs:
+  version:
+    description: PowerShell version to install, e.g. 7.4.20
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Download and extract (Linux, macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        PWSH_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS-$(uname -m)" in
+          Linux-x86_64)  asset="linux-x64.tar.gz" ;;
+          Linux-aarch64) asset="linux-arm64.tar.gz" ;;
+          macOS-arm64)   asset="osx-arm64.tar.gz" ;;
+          macOS-x86_64)  asset="osx-x64.tar.gz" ;;
+          *) echo "Unsupported runner: $RUNNER_OS-$(uname -m)"; exit 1 ;;
+        esac
+        url="https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-${asset}"
+        dest="$RUNNER_TEMP/pwsh-${PWSH_VERSION}"
+        mkdir -p "$dest"
+        echo "Downloading $url"
+        curl -sSfL --retry 5 --retry-delay 5 -o "$RUNNER_TEMP/pwsh.tar.gz" "$url"
+        tar -xzf "$RUNNER_TEMP/pwsh.tar.gz" -C "$dest"
+        chmod +x "$dest/pwsh"
+        echo "$dest" >> "$GITHUB_PATH"
+    - name: Download and extract (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        PWSH_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $version = $env:PWSH_VERSION
+        $url = "https://github.com/PowerShell/PowerShell/releases/download/v$version/powershell-$version-win-x64.zip"
+        $archive = Join-Path $env:RUNNER_TEMP 'pwsh.zip'
+        $dest = Join-Path $env:RUNNER_TEMP "pwsh-$version"
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $archive -MaximumRetryCount 5 -RetryIntervalSec 5
+        Expand-Archive -Path $archive -DestinationPath $dest -Force
+        Add-Content -Path $env:GITHUB_PATH -Value $dest
+    - name: Verify
+      shell: pwsh
+      env:
+        PWSH_VERSION: ${{ inputs.version }}
+      run: |
+        $actual = $PSVersionTable.PSVersion.ToString()
+        Write-Host "pwsh $actual from $PSHOME"
+        if ($actual -ne $env:PWSH_VERSION) { throw "Expected PowerShell $env:PWSH_VERSION on PATH but found $actual." }

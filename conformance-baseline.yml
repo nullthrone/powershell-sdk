@@ -1,0 +1,10 @@
+# Expected failures for the MCP conformance suite (@modelcontextprotocol/conformance, version pinned in
+# requirements.psd1). Entries are scenario names or "<scenario>:<check-id>" (no whitespace around the colon).
+#
+# Exit-code contract of the suite: fail + baselined = 0, fail + not baselined = 1,
+# pass + baselined = 1 (stale entry, remove it), pass + not baselined = 0.
+#
+# This file may only shrink. Version 1.0.0 requires empty lists for both requirement sets
+# (2026-07-28 and 2025-11-25). Conformance runs start in milestone M2; see docs/conformance.md.
+server: []
+client: []

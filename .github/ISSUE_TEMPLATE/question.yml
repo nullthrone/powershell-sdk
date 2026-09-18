@@ -1,0 +1,15 @@
+name: Question
+description: Ask about usage, design decisions or the roadmap.
+labels: ['question']
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to achieve? Which host or client is involved?
