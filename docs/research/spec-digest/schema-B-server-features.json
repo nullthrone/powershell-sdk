@@ -1,0 +1,792 @@
+{
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/schema.ts (read in full, 3197 lines); pages: specification__2026-07-28__server__tools.md, __server__resources.md, __server__prompts.md, __server__utilities__completion.md, __server__utilities__pagination.md, __server__utilities__caching.md, __server__utilities__logging.md, __basic__patterns__subscriptions.md, __basic__patterns__progress.md, __basic__patterns__cancellation.md, __basic__patterns__mrtr.md, __basic__index.md, __basic__versioning.md, __basic__transports__streamable-http.md, __basic__transports__stdio.md, __changelog.md, __deprecated.md; legacy: 2025-11-25_schema.ts and 2025-06-18_schema.ts (targeted sections). Focus B: tools, resources, resource templates, prompts, completion, subscriptions/listen, and the notification family (list_changed x3, resources/updated, subscriptions/acknowledged, progress, cancelled, message).",
+ "summary": "Revision 2026-07-28 is stateless: every request's params.\\_meta MUST carry io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities (clientInfo SHOULD), every result MUST carry resultType (\"complete\" | \"input_required\"), and servers MUST NOT infer anything from prior requests. Server features (tools, resources, prompts, completions) are gated by ServerCapabilities exposed via mandatory server/discover; calling an unadvertised feature yields -32601. List results (tools/list, prompts/list, resources/list, resources/templates/list) and resources/read extend both PaginatedResult (nextCursor?) and CacheableResult (ttlMs>=0 and cacheScope \"public\"|\"private\", both REQUIRED). tools/call, prompts/get and resources/read may return InputRequiredResult (inputRequests/requestState) under MRTR; the client retries with inputResponses/requestState and a new id. Tool.inputSchema is any JSON Schema 2020-12 object with type:\"object\"; outputSchema any schema; structuredContent any JSON value; x-mcp-header annotations mirror args into Mcp-Param-{name} headers on Streamable HTTP (clients MUST reject tools with invalid annotations). Tool names SHOULD be 1-128 chars of [A-Za-z0-9_.-], unique, deterministically ordered. Resource-not-found is now -32602 (clients SHOULD still accept -32002). resources/subscribe|unsubscribe and HTTP GET are replaced by subscriptions/listen with an opt-in SubscriptionFilter; the server MUST first send notifications/subscriptions/acknowledged and MUST tag every stream message with \\_meta[\"io.modelcontextprotocol/subscriptionId\"] = listen request id; graceful close is a SubscriptionsListenResult. Progress and (deprecated) notifications/message flow only on the originating request's stream. notifications/cancelled is client->server on stdio only; servers send it only to end a listen stream on stdio. Logging, sampling, roots are deprecated (SEP-2577).",
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "capability_gate": "None; servers MUST implement it (schema.ts DiscoverRequest doc; versioning.md 'Protocol Version Negotiation'). Clients MAY call it.",
+   "params": "params: RequestParams = { _meta: RequestMetaObject (REQUIRED object) } where RequestMetaObject = { \"io.modelcontextprotocol/protocolVersion\": string (REQUIRED); \"io.modelcontextprotocol/clientCapabilities\": ClientCapabilities (REQUIRED, {} allowed); \"io.modelcontextprotocol/clientInfo\"?: Implementation; \"io.modelcontextprotocol/logLevel\"?: LoggingLevel (@deprecated SEP-2577); progressToken?: string|number; plus any other _meta keys }",
+   "result": "DiscoverResult extends CacheableResult: { resultType (REQUIRED); ttlMs: number >=0 (REQUIRED); cacheScope: \"public\"|\"private\" (REQUIRED); supportedVersions: string[] (REQUIRED); capabilities: ServerCapabilities (REQUIRED); instructions?: string; _meta?: ResultMetaObject { \"io.modelcontextprotocol/serverInfo\"?: Implementation } }. ServerCapabilities = { experimental?: {[k]:JSONObject}; logging?: JSONObject (@deprecated); completions?: JSONObject; prompts?: { listChanged?: boolean }; resources?: { subscribe?: boolean; listChanged?: boolean }; tools?: { listChanged?: boolean }; extensions?: {[k]:JSONObject} }. Implementation = BaseMetadata+Icons + { version: string (REQUIRED); description?: string; websiteUrl?: string (uri) }.",
+   "notes": "Included because it is where Focus-B capability gates come from. Modern-vs-legacy probe on stdio (stdio.md 'Backward Compatibility')."
+  },
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "capability_gate": "Server MUST declare ServerCapabilities.tools (tools.md 'Capabilities'); otherwise -32601 (schema.ts MethodNotFoundError doc).",
+   "params": "ListToolsRequest extends PaginatedRequest; params: PaginatedRequestParams (REQUIRED object, since _meta is required) = { _meta: RequestMetaObject (REQUIRED); cursor?: Cursor(string, opaque) }",
+   "result": "ListToolsResult extends PaginatedResult, CacheableResult: { resultType (REQUIRED); tools: Tool[] (REQUIRED, MAY be empty); nextCursor?: string; ttlMs: number >=0 (REQUIRED); cacheScope: \"public\"|\"private\" (REQUIRED); _meta?: ResultMetaObject }. Tool extends BaseMetadata, Icons: { name: string (REQUIRED); title?: string; icons?: Icon[]; description?: string; inputSchema: { $schema?: string; type: \"object\" (REQUIRED); [key]: unknown } (REQUIRED); outputSchema?: { $schema?: string; [key]: unknown }; annotations?: ToolAnnotations; _meta?: MetaObject }. ToolAnnotations (all hints): { title?: string; readOnlyHint?: boolean (default false); destructiveHint?: boolean (default true; meaningful only when readOnlyHint==false); idempotentHint?: boolean (default false; meaningful only when readOnlyHint==false); openWorldHint?: boolean (default true) }. Icon: { src: string uri (REQUIRED; http(s) or data:); mimeType?: string; sizes?: string[] ('WxH' or 'any'); theme?: \"light\"|\"dark\" }. Display-name precedence: title, annotations.title, name.",
+   "notes": "Pagination + caching apply. Set MUST NOT vary per-connection; MAY vary by per-request authorization. SHOULD be deterministic order. Property schemas MAY carry x-mcp-header (string) for Streamable HTTP header mirroring. No 'execution'/taskSupport field in 2026-07-28 (it existed in 2025-11-25)."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "capability_gate": "Server ServerCapabilities.tools. Server MUST NOT include inputRequests in an InputRequiredResult for client capabilities the client did not declare in _meta clientCapabilities (mrtr.md server req 7); missing capability -> -32021 MissingRequiredClientCapabilityError.",
+   "params": "CallToolRequestParams extends InputResponseRequestParams (extends RequestParams): { _meta: RequestMetaObject (REQUIRED); name: string (REQUIRED); arguments?: { [key]: unknown }; inputResponses?: InputResponses = { [serverKey]: ElicitResult | CreateMessageResult | ListRootsResult }; requestState?: string (opaque, echoed verbatim) }",
+   "result": "CallToolResultResponse.result: CallToolResult | InputRequiredResult. CallToolResult extends Result: { resultType (REQUIRED, \"complete\"); content: ContentBlock[] (REQUIRED); structuredContent?: unknown (any JSON value; must conform to outputSchema if defined); isError?: boolean (default false); _meta?: ResultMetaObject }. ContentBlock = TextContent {type:\"text\"; text: string; annotations?; _meta?} | ImageContent {type:\"image\"; data: string base64 (REQUIRED); mimeType: string (REQUIRED); annotations?; _meta?} | AudioContent {type:\"audio\"; data: string base64; mimeType: string; annotations?; _meta?} | ResourceLink (extends Resource) {type:\"resource_link\"; uri; name; title?; description?; mimeType?; annotations?; size?; icons?; _meta?} | EmbeddedResource {type:\"resource\"; resource: TextResourceContents|BlobResourceContents (REQUIRED); annotations?; _meta?}. Annotations: { audience?: (\"user\"|\"assistant\")[]; priority?: number 0..1; lastModified?: string ISO8601 }. InputRequiredResult extends Result: { resultType: \"input_required\"; inputRequests?: { [key]: ElicitRequest | CreateMessageRequest | ListRootsRequest }; requestState?: string } — at least one of the two MUST be present; not cacheable, carries no ttlMs/cacheScope.",
+   "notes": "Tool execution errors go in result with isError:true; unknown tool / malformed request / server errors are JSON-RPC errors (-32602 for unknown tool or invalid args). Retry after input_required MUST use a new JSON-RPC id. On Streamable HTTP client MUST send Mcp-Method: tools/call, Mcp-Name: <params.name>, and Mcp-Param-{name} for x-mcp-header-annotated args. structuredContent SHOULD also be serialized into a TextContent block for backward compatibility."
+  },
+  {
+   "name": "notifications/tools/list_changed",
+   "direction": "notification s->c",
+   "capability_gate": "ServerCapabilities.tools.listChanged=true AND client opted in via subscriptions/listen with notifications.toolsListChanged=true (schema.ts ToolListChangedNotification doc; tools.md 'List Changed Notification').",
+   "params": "params?: NotificationParams = { _meta?: NotificationMetaObject { \"io.modelcontextprotocol/subscriptionId\": RequestId (REQUIRED when delivered on a listen stream, which is the only allowed delivery) } }. No other fields.",
+   "result": "n/a (notification). Effect on client: invalidates cached tools/list pages immediately (caching.md 'Interaction with Notifications').",
+   "notes": "Only delivered on a subscriptions/listen stream. Servers SHOULD send when the list changes."
+  },
+  {
+   "name": "resources/list",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.resources (resources.md 'Capabilities'); else -32601.",
+   "params": "PaginatedRequestParams: { _meta: RequestMetaObject (REQUIRED); cursor?: string }",
+   "result": "ListResourcesResult extends PaginatedResult, CacheableResult: { resultType; resources: Resource[] (REQUIRED, MAY be empty); nextCursor?; ttlMs (REQUIRED >=0); cacheScope (REQUIRED); _meta? }. Resource extends BaseMetadata, Icons: { uri: string uri (REQUIRED); name: string (REQUIRED); title?: string; icons?: Icon[]; description?: string; mimeType?: string; annotations?: Annotations; size?: number (raw bytes before base64); _meta?: MetaObject }.",
+   "notes": "Set MUST NOT vary per-connection; MAY vary by authorization. Deterministic-order SHOULD is stated for tools only (tools.md), not for resources (not stated in material)."
+  },
+  {
+   "name": "resources/templates/list",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.resources; else -32601.",
+   "params": "PaginatedRequestParams: { _meta (REQUIRED); cursor?: string }",
+   "result": "ListResourceTemplatesResult extends PaginatedResult, CacheableResult: { resultType; resourceTemplates: ResourceTemplate[] (REQUIRED); nextCursor?; ttlMs (REQUIRED); cacheScope (REQUIRED); _meta? }. ResourceTemplate extends BaseMetadata, Icons: { uriTemplate: string (RFC 6570 URI template, REQUIRED); name: string (REQUIRED); title?; icons?; description?; mimeType? (only if all matching resources share it); annotations?: Annotations; _meta?: MetaObject }. No 'size' field on ResourceTemplate.",
+   "notes": "Arguments of templates may be auto-completed via completion/complete with ref type ref/resource."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.resources; else -32601. MRTR input requests gated by client-declared capabilities (-32021 if missing).",
+   "params": "ReadResourceRequestParams extends ResourceRequestParams, InputResponseRequestParams: { _meta (REQUIRED); uri: string uri (REQUIRED); inputResponses?: InputResponses; requestState?: string }",
+   "result": "ReadResourceResultResponse.result: ReadResourceResult | InputRequiredResult. ReadResourceResult extends CacheableResult: { resultType; contents: (TextResourceContents | BlobResourceContents)[] (REQUIRED, MAY contain multiple items e.g. directory read); ttlMs (REQUIRED >=0); cacheScope (REQUIRED); _meta? }. ResourceContents base: { uri: string uri (REQUIRED); mimeType?: string; _meta?: MetaObject }. TextResourceContents adds text: string (REQUIRED; only if representable as text). BlobResourceContents adds blob: string base64 (REQUIRED).",
+   "notes": "Not found -> JSON-RPC error -32602 (server MUST); clients SHOULD also accept legacy -32002. Server MUST NOT return empty contents for a non-existent resource. Results from retries carrying inputResponses/requestState MUST NOT be cached. On Streamable HTTP: Mcp-Method: resources/read, Mcp-Name: <params.uri> (base64 sentinel if not header-safe)."
+  },
+  {
+   "name": "notifications/resources/list_changed",
+   "direction": "notification s->c",
+   "capability_gate": "ServerCapabilities.resources.listChanged=true AND client opted in via subscriptions/listen notifications.resourcesListChanged=true.",
+   "params": "params?: NotificationParams { _meta?: { \"io.modelcontextprotocol/subscriptionId\": RequestId } }",
+   "result": "n/a; invalidates cached resources/list.",
+   "notes": "Only on a listen stream (schema.ts ResourceListChangedNotification doc)."
+  },
+  {
+   "name": "notifications/resources/updated",
+   "direction": "notification s->c",
+   "capability_gate": "ServerCapabilities.resources.subscribe=true AND URI listed in subscriptions/listen notifications.resourceSubscriptions (schema.ts ResourceUpdatedNotification doc).",
+   "params": "ResourceUpdatedNotificationParams extends NotificationParams: { _meta?: { \"io.modelcontextprotocol/subscriptionId\": RequestId (MUST be present on listen streams) }; uri: string uri (REQUIRED; may be a sub-resource of the subscribed URI) }",
+   "result": "n/a",
+   "notes": "Replaces resources/subscribe + notifications/resources/updated flow of 2025-11-25."
+  },
+  {
+   "name": "prompts/list",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.prompts (prompts.md 'Capabilities'); else -32601 (schema.ts example 'Prompts not supported').",
+   "params": "PaginatedRequestParams: { _meta (REQUIRED); cursor?: string }",
+   "result": "ListPromptsResult extends PaginatedResult, CacheableResult: { resultType; prompts: Prompt[] (REQUIRED); nextCursor?; ttlMs (REQUIRED); cacheScope (REQUIRED); _meta? }. Prompt extends BaseMetadata, Icons: { name: string (REQUIRED); title?; icons?; description?: string; arguments?: PromptArgument[]; _meta?: MetaObject }. PromptArgument extends BaseMetadata: { name: string (REQUIRED); title?: string; description?: string; required?: boolean }.",
+   "notes": "Set MUST NOT vary per-connection; MAY vary by authorization."
+  },
+  {
+   "name": "prompts/get",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.prompts; MRTR input requests gated by client capabilities (-32021).",
+   "params": "GetPromptRequestParams extends InputResponseRequestParams: { _meta (REQUIRED); name: string (REQUIRED); arguments?: { [key]: string } (string values only); inputResponses?: InputResponses; requestState?: string }",
+   "result": "GetPromptResultResponse.result: GetPromptResult | InputRequiredResult. GetPromptResult extends Result: { resultType; description?: string; messages: PromptMessage[] (REQUIRED); _meta? }. PromptMessage: { role: \"user\"|\"assistant\" (REQUIRED); content: ContentBlock (REQUIRED, single block, not array) }. GetPromptResult is NOT a CacheableResult (no ttlMs/cacheScope).",
+   "notes": "Errors: invalid prompt name -32602; missing required arguments -32602; internal -32603 (SHOULD). Embedded resources in messages MUST include valid uri, appropriate mimeType and text or blob (prompts.md 'Embedded Resources'). Streamable HTTP: Mcp-Method: prompts/get, Mcp-Name: <params.name>."
+  },
+  {
+   "name": "notifications/prompts/list_changed",
+   "direction": "notification s->c",
+   "capability_gate": "ServerCapabilities.prompts.listChanged=true AND listen filter promptsListChanged=true.",
+   "params": "params?: NotificationParams { _meta?: { \"io.modelcontextprotocol/subscriptionId\": RequestId } }",
+   "result": "n/a; invalidates cached prompts/list.",
+   "notes": "Only on a listen stream."
+  },
+  {
+   "name": "completion/complete",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.completions (completion.md 'Capabilities'); else -32601.",
+   "params": "CompleteRequestParams extends RequestParams: { _meta (REQUIRED); ref: PromptReference { type: \"ref/prompt\"; name: string (REQUIRED); title?: string } | ResourceTemplateReference { type: \"ref/resource\"; uri: string (URI or RFC 6570 template, REQUIRED) } (REQUIRED); argument: { name: string (REQUIRED); value: string (REQUIRED) } (REQUIRED); context?: { arguments?: { [key]: string } } }",
+   "result": "CompleteResult extends Result: { resultType; completion: { values: string[] (REQUIRED, @maxItems 100); total?: number; hasMore?: boolean } (REQUIRED); _meta? }. Not cacheable per schema (no CacheableResult).",
+   "notes": "Errors (SHOULD): -32601 capability not supported, -32602 invalid prompt name / missing required args, -32603 internal. Values SHOULD be sorted by relevance. Unchanged from 2025-11-25 apart from resultType/_meta rules."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server (long-lived request; response is a stream)",
+   "capability_gate": "No dedicated capability; the server honors only filter entries it supports: toolsListChanged needs tools.listChanged, promptsListChanged needs prompts.listChanged, resourcesListChanged needs resources.listChanged, resourceSubscriptions needs resources.subscribe (inferred from capability definitions in schema.ts ServerCapabilities and resources.md; the acknowledgment omits unsupported types).",
+   "params": "SubscriptionsListenRequestParams extends RequestParams: { _meta (REQUIRED); notifications: SubscriptionFilter (REQUIRED) } where SubscriptionFilter = { toolsListChanged?: boolean; promptsListChanged?: boolean; resourcesListChanged?: boolean; resourceSubscriptions?: string[] (resource URIs) }. All fields optional; omitted = not subscribed.",
+   "result": "SubscriptionsListenResult extends Result: { resultType: \"complete\"; _meta: SubscriptionsListenResultMetaObject (REQUIRED) = ResultMetaObject + { \"io.modelcontextprotocol/subscriptionId\": RequestId (REQUIRED; equals this response's id) } }. Sent ONLY when the server tears the subscription down gracefully; otherwise the request never completes. An abrupt transport close carries no response.",
+   "notes": "Subscription identity = JSON-RPC id of this request. Multiple concurrent subscriptions allowed. Client ends it by closing the SSE stream (HTTP) or sending notifications/cancelled with requestId = listen id (stdio). After stdio restart client MUST re-send. Server MUST NOT send notification types not requested. Request-scoped notifications (progress, message) are never delivered on this stream. HTTP: servers SHOULD emit SSE comment keep-alives (':\\r\\n') and X-Accel-Buffering: no."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "capability_gate": "Sent in response to every accepted subscriptions/listen (subscriptions.md 'Acknowledgment').",
+   "params": "SubscriptionsAcknowledgedNotificationParams extends NotificationParams: { _meta: { \"io.modelcontextprotocol/subscriptionId\": RequestId } (MUST be present); notifications: SubscriptionFilter (REQUIRED; subset the server agreed to honor; unsupported types omitted) }",
+   "result": "n/a",
+   "notes": "MUST be the first message carrying that subscriptionId; server MUST NOT send any notification on the subscription before it. On stdio ordering is per subscription ID, other subscriptions' messages MAY interleave. Client SHOULD compare acknowledged filter to requested."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification s->c (schema lists it only in ServerNotification; progress.md says server MAY send for client requests)",
+   "capability_gate": "Client opts in per request via _meta.progressToken; receiver not obligated to send (schema.ts RequestMetaObject.progressToken).",
+   "params": "ProgressNotificationParams extends NotificationParams: { _meta?: NotificationMetaObject (subscriptionId absent, because progress is request-scoped); progressToken: string|number (REQUIRED); progress: number (REQUIRED, MUST increase; may be float); total?: number; message?: string }",
+   "result": "n/a",
+   "notes": "Delivered only on the response stream of the originating request (HTTP) or the shared stdout channel (stdio); never on a listen stream. MUST stop after completion. Tokens MUST be unique across active requests."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (stdio only in practice); also s->c on stdio solely to terminate a subscriptions/listen stream",
+   "capability_gate": "None.",
+   "params": "CancelledNotificationParams extends NotificationParams: { _meta?; requestId: RequestId (REQUIRED; MUST be an id of a request the client previously issued — or, for server-sent, the id of a subscriptions/listen request); reason?: string }",
+   "result": "n/a",
+   "notes": "Streamable HTTP: closing the SSE response stream IS the cancellation; no notifications/cancelled expected; header requirements for notification POSTs are undefined in this revision. Invalid/unknown/late cancellations SHOULD be ignored. Servers MUST NOT use it to cancel anything other than a listen stream."
+  },
+  {
+   "name": "notifications/message",
+   "direction": "notification s->c",
+   "capability_gate": "ServerCapabilities.logging (deprecated) AND request carried _meta[\"io.modelcontextprotocol/logLevel\"]; server MUST NOT emit for requests without that field (logging.md 'Per-request log level').",
+   "params": "LoggingMessageNotificationParams extends NotificationParams: { _meta?; level: LoggingLevel (REQUIRED) = \"debug\"|\"info\"|\"notice\"|\"warning\"|\"error\"|\"critical\"|\"alert\"|\"emergency\"; logger?: string; data: unknown (REQUIRED, any JSON) }",
+   "result": "n/a",
+   "notes": "@deprecated as of 2026-07-28 (SEP-2577; earliest removal first revision on/after 2027-07-28). Request-scoped: MUST NOT be delivered on a listen stream. Invalid logLevel value -> server SHOULD reject request with -32602. Replaces logging/setLevel."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every request's params._meta includes io.modelcontextprotocol/protocolVersion (string) and io.modelcontextprotocol/clientCapabilities (ClientCapabilities, {} allowed); missing => server MUST reject with -32602 (HTTP 400).",
+   "cite": "basic/index.md 'Per-request protocol fields'; schema.ts RequestMetaObject, RequestParams"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Include io.modelcontextprotocol/clientInfo (Implementation with name+version) on every request unless configured not to.",
+   "cite": "schema.ts RequestMetaObject; basic/index.md _meta"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include io.modelcontextprotocol/serverInfo (Implementation) in every result's _meta unless configured not to.",
+   "cite": "schema.ts ResultMetaObject; basic/index.md 'Per-response protocol fields'"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "Use clientInfo/serverInfo to change behavior or for security decisions.",
+   "cite": "schema.ts RequestMetaObject/ResultMetaObject; basic/index.md note"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include resultType in every result ('complete' for ordinary results, 'input_required' for InputRequiredResult).",
+   "cite": "schema.ts Result; basic/index.md 'ResultType'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat an absent resultType from an earlier-version server as 'complete'; treat any unrecognized resultType value as invalid.",
+   "cite": "schema.ts Result; basic/index.md 'ResultType'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Infer capabilities, protocol version or identity from prior requests on the same connection; every request is processed independently.",
+   "cite": "schema.ts RequestMetaObject.clientCapabilities; basic/index.md 'Statelessness'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return MissingRequiredClientCapabilityError (-32021, data.requiredCapabilities: ClientCapabilities; HTTP 400) when processing needs a client capability not declared in the request.",
+   "cite": "schema.ts MissingRequiredClientCapabilityError; basic/index.md _meta"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return UnsupportedProtocolVersionError (-32022, data.supported: string[], data.requested: string; HTTP 400) when the requested protocol version is unsupported.",
+   "cite": "schema.ts UnsupportedProtocolVersionError; versioning.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement server/discover returning supportedVersions, capabilities, optional instructions, plus ttlMs and cacheScope.",
+   "cite": "schema.ts DiscoverRequest/DiscoverResult; caching.md 'Cacheable Results'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return -32601 (Method not found) for methods gated behind a server capability the server did not advertise (e.g. prompts/list without prompts capability).",
+   "cite": "schema.ts MethodNotFoundError; completion.md 'Error Handling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Declare the tools capability to support tools; declared servers MUST respond to tools/list with the set currently available to the requesting client (MAY be empty).",
+   "cite": "tools.md 'Capabilities'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Let the tools/prompts/resources list vary per-connection or as a side effect of other requests on the connection (MAY vary by per-request authorization).",
+   "cite": "tools.md, prompts.md, resources.md 'Capabilities'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Return tools from tools/list in a deterministic order across requests when the set is unchanged.",
+   "cite": "tools.md 'Capabilities'; changelog.md Minor 3"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include ttlMs (>= 0) and cacheScope ('public'|'private') on 'complete' results of server/discover, tools/list, prompts/list, resources/list, resources/templates/list, resources/read.",
+   "cite": "caching.md 'Cacheable Results', 'TTL Field'; schema.ts CacheableResult"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Apply the same cacheScope to all pages of a given list request.",
+   "cite": "caching.md 'Interaction with Pagination'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Rely on cacheScope alone for access control; MUST apply per-primitive access controls.",
+   "cite": "caching.md 'Security Considerations'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Serve a cached response for a request whose method or parameters differ; MUST NOT cache results of retries carrying inputResponses or requestState.",
+   "cite": "caching.md 'Cache Key'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Share 'private'-scoped cache entries across authorization contexts.",
+   "cite": "schema.ts CacheableResult.cacheScope; caching.md 'Cache Scope Field'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Treat ttlMs 0 as immediately stale, positive as fresh for that many ms from receipt, absent as 0, negative as 0; re-fetch when stale on next access; do not use TTL as a polling interval (if polling, MUST apply jitter and backoff).",
+   "cite": "caching.md 'TTL Field', 'Freshness Calculation'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Invalidate a fresh cached list immediately when the corresponding list_changed notification arrives; discard all cached pages and re-fetch from start if a cursor becomes invalid.",
+   "cite": "caching.md 'Interaction with Notifications', 'Interaction with Pagination'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat cursors as opaque: never parse/modify them, never assume page size; an empty-string cursor is valid and MUST NOT be treated as end of results.",
+   "cite": "pagination.md 'Implementation Guidelines'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Treat a missing nextCursor as end of results and support both paginated and non-paginated flows.",
+   "cite": "pagination.md"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Provide stable cursors, handle invalid cursors gracefully, and return -32602 for invalid cursors.",
+   "cite": "pagination.md 'Implementation Guidelines', 'Error Handling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Tool.inputSchema is a valid JSON Schema object (not null) with type:'object' at the root; defaults to 2020-12 when $schema absent; any 2020-12 keyword may appear.",
+   "cite": "tools.md 'Tool'; schema.ts Tool.inputSchema"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Support JSON Schema 2020-12 for schemas without $schema; validate per declared dialect; handle unsupported dialects by returning an appropriate error.",
+   "cite": "basic/index.md 'JSON Schema Usage'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Automatically dereference $ref values resolving to network URIs; any opt-in fetch mode MUST be disabled by default; schemas with unresolved external $ref SHOULD be rejected, not treated as permissive.",
+   "cite": "basic/index.md '$ref Resolution'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Bound composition-keyword validation cost (max depth, subschema cap, time budget).",
+   "cite": "basic/index.md 'Composition-Keyword Resource Use'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Tool names: 1-128 chars, case-sensitive, only [A-Za-z0-9_.-], no spaces/commas, unique within a server.",
+   "cite": "tools.md 'Tool Names'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Aggregating clients/proxies disambiguate colliding tool names (e.g. server-id prefix) and SHOULD NOT rely on serverInfo.name for that.",
+   "cite": "tools.md 'Tool Names' note"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Consider tool annotations untrusted unless from trusted servers; never base tool-use decisions on annotations from untrusted servers.",
+   "cite": "tools.md 'Tool' warning; schema.ts ToolAnnotations"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "When outputSchema is provided, structuredContent MUST conform to it.",
+   "cite": "tools.md 'Output Schema'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Validate structuredContent against outputSchema.",
+   "cite": "tools.md 'Output Schema'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "A tool returning structuredContent also returns the serialized JSON in a TextContent block.",
+   "cite": "tools.md 'Structured Content'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Report tool-originated errors inside CallToolResult with isError:true, not as protocol errors; unknown tool / unsupported tools / exceptional conditions are JSON-RPC errors (-32602 for unknown tool or invalid arguments).",
+   "cite": "schema.ts CallToolResult.isError, InvalidParamsError; tools.md 'Error Handling'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Provide tool execution errors (isError) to the LLM; MAY provide protocol errors.",
+   "cite": "tools.md 'Error Handling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate all tool inputs, implement access controls, rate limit tool invocations, sanitize tool outputs.",
+   "cite": "tools.md 'Security Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Prompt for confirmation on sensitive operations, show tool inputs before calling, validate results before passing to LLM, implement timeouts, log tool usage.",
+   "cite": "tools.md 'Security Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers using embedded resources SHOULD implement the resources capability.",
+   "cite": "tools.md 'Embedded Resources'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "x-mcp-header values: not empty; MUST match RFC 9110 token syntax; no control chars/CR/LF; case-insensitively unique within inputSchema; only on integer/string/boolean properties (never 'number'); integers within +/-(2^53-1); only on properties statically reachable via a chain of 'properties' keys (not through items, oneOf/anyOf/allOf/not, if/then/else, $ref).",
+   "cite": "tools.md 'x-mcp-header'; streamable-http.md 'Schema Extension'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On Streamable HTTP, reject tool definitions with invalid x-mcp-header values by excluding the tool from tools/list results (SHOULD log a warning with tool name and reason); other transports MAY ignore x-mcp-header.",
+   "cite": "tools.md 'x-mcp-header'; streamable-http.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On Streamable HTTP tools/call, mirror each x-mcp-header-annotated argument present in arguments into header Mcp-Param-{name}, omitting when null/absent, encoding per Value Encoding rules.",
+   "cite": "streamable-http.md 'Custom Headers from Tool Parameters', 'Client Behavior'"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Mark sensitive parameters (passwords, keys, tokens, PII) with x-mcp-header.",
+   "cite": "tools.md 'x-mcp-header' warning"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every POST includes MCP-Protocol-Version header equal to _meta protocolVersion, Mcp-Method header (= method) on all requests, and Mcp-Name (= params.name or params.uri) on tools/call, resources/read, prompts/get; non-header-safe values use '=?base64?{b64}?=' sentinel encoding.",
+   "cite": "streamable-http.md 'Protocol Version Header', 'Standard Request Headers', 'Value Encoding'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On Streamable HTTP, validate headers against body (decoding base64 sentinel first) and reject mismatches, missing required headers or invalid characters with HTTP 400 and JSON-RPC -32020 HeaderMismatch.",
+   "cite": "streamable-http.md 'Server Validation'; schema.ts HeaderMismatchError"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "On HeaderMismatch caused by Mcp-Param-* headers, call tools/list to refresh the tool's inputSchema and retry.",
+   "cite": "streamable-http.md 'Client Behavior'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Declare the resources capability to support resources; respond to resources/list with the set currently available (MAY be empty).",
+   "cite": "resources.md 'Capabilities'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return JSON-RPC error -32602 when the requested resource does not exist; MUST NOT return an empty contents array for a non-existent resource; SHOULD use -32603 for internal errors.",
+   "cite": "resources.md 'Error Handling'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Also accept -32002 as resource-not-found from earlier-version servers.",
+   "cite": "resources.md 'Error Handling'; basic/index.md 'Error Codes'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Emit legacy codes -32002 or -32042, or any -32020..-32099 code not defined by the spec; new codes MUST NOT be allocated in -32000..-32019.",
+   "cite": "basic/index.md 'Error Codes'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate all resource URIs; properly encode binary data (base64 blob); sanitize file paths to prevent directory traversal for file:// resources.",
+   "cite": "resources.md 'Security Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Use https:// URIs only when the client can fetch the resource directly from the web; otherwise prefer another/custom scheme (custom schemes MUST follow RFC 3986).",
+   "cite": "resources.md 'Common URI Schemes'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Return multiple resource contents for one resources/read; identify file:// non-regular files with XDG MIME types like inode/directory.",
+   "cite": "resources.md 'Reading Resources', 'file://'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Declare the prompts capability to support prompts; respond to prompts/list with the set currently available (MAY be empty).",
+   "cite": "prompts.md 'Capabilities'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "prompts/get errors: invalid prompt name -32602, missing required arguments -32602, internal -32603; validate prompt arguments before processing.",
+   "cite": "prompts.md 'Error Handling', 'Implementation Considerations'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Image/audio content in prompt messages is base64-encoded with a valid mimeType; embedded resources include a valid URI, appropriate MIME type and either text or base64 blob.",
+   "cite": "prompts.md 'PromptMessage'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Carefully validate all prompt inputs and outputs to prevent injection or unauthorized resource access.",
+   "cite": "prompts.md 'Security'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Declare the completions capability to support completion/complete.",
+   "cite": "completion.md 'Capabilities'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "completion.values MUST NOT exceed 100 items.",
+   "cite": "schema.ts CompleteResult (@maxItems 100); completion.md 'Completion Results'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Completion errors: -32601 capability not supported, -32602 invalid prompt name / missing required arguments, -32603 internal; return relevance-sorted suggestions, rate limit, validate inputs.",
+   "cite": "completion.md 'Error Handling', 'Implementation Considerations'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Completion implementations validate inputs, rate limit, control access to sensitive suggestions and prevent completion-based information disclosure.",
+   "cite": "completion.md 'Security'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Debounce rapid completion requests, cache results where appropriate, handle missing/partial results gracefully; include previously resolved values in context.arguments.",
+   "cite": "completion.md 'Implementation Considerations', 'Requesting Completions'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send on a subscriptions/listen stream any notification type the client did not explicitly request in the SubscriptionFilter.",
+   "cite": "schema.ts SubscriptionFilter, SubscriptionsListenRequestParams; subscriptions.md 'Opening a Stream'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send notifications/subscriptions/acknowledged (with notifications = honored subset) as the first message carrying the subscription's io.modelcontextprotocol/subscriptionId; MUST NOT send any notification on that subscription before it.",
+   "cite": "schema.ts SubscriptionsAcknowledgedNotification; subscriptions.md 'Acknowledgment'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include _meta['io.modelcontextprotocol/subscriptionId'] (= JSON-RPC id of the listen request) on every notification delivered via a listen stream and on the SubscriptionsListenResult.",
+   "cite": "schema.ts NotificationMetaObject, SubscriptionsListenResultMetaObject; basic/index.md _meta"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, correlate stream notifications to their subscription using io.modelcontextprotocol/subscriptionId; after a stdio restart re-send subscriptions/listen (server holds no subscription state).",
+   "cite": "subscriptions.md 'Receiving Notifications', 'Graceful Closure'; stdio.md 'Receiving Messages'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Check the acknowledged filter against the requested filter and handle unsupported types gracefully.",
+   "cite": "subscriptions.md 'Acknowledgment'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When ending a subscription on its own initiative, respond to the listen request with a SubscriptionsListenResult (resultType 'complete', _meta subscriptionId) before closing the stream.",
+   "cite": "schema.ts SubscriptionsListenResult; subscriptions.md 'Graceful Closure'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On stdio, send notifications/cancelled referencing the subscriptions/listen request ID when tearing down that stream; MUST NOT send notifications/cancelled for any other purpose.",
+   "cite": "schema.ts CancelledNotification; cancellation.md intro and 'Behavior Requirements' 2"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Deliver request-scoped notifications (notifications/progress, notifications/message) on a subscriptions/listen stream or any stream other than the originating request's response stream.",
+   "cite": "logging.md 'Per-request log level'; streamable-http.md 'Receiving Messages'; changelog.md Major 4"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Send notifications/tools|prompts|resources/list_changed to opted-in listen streams when the corresponding list changes, if listChanged was declared.",
+   "cite": "tools.md, prompts.md, resources.md 'List Changed Notification'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "progressToken is a string or integer and unique across all active requests.",
+   "cite": "progress.md 'Progress Flow'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Progress notifications only reference tokens from active in-progress requests; progress value increases each notification; notifications MUST stop after completion.",
+   "cite": "progress.md 'Progress Flow', 'Behavior Requirements', 'Implementation Notes'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Choose not to send progress, send at any frequency, omit total; progress/total MAY be floating point; message SHOULD be human-readable.",
+   "cite": "progress.md"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Track active progress tokens and rate-limit progress notifications.",
+   "cite": "progress.md 'Implementation Notes'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, cancel an in-flight request by sending notifications/cancelled with its requestId; on Streamable HTTP, close the SSE response stream (no notifications/cancelled expected).",
+   "cite": "cancellation.md 'Transport-Specific Cancellation'; stdio.md 'Cancellation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On Streamable HTTP, treat client closing the response stream as cancellation; MUST NOT send further messages for a cancelled request.",
+   "cite": "streamable-http.md 'Cancellation'; stdio.md 'Cancellation'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "On cancellation: stop processing, free resources, do not send a response; MAY ignore unknown/completed/uncancellable requests; invalid cancellations SHOULD be ignored.",
+   "cite": "cancellation.md 'Behavior Requirements', 'Error Handling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Handle cancellation race conditions gracefully (notification may arrive after completion).",
+   "cite": "cancellation.md 'Timing Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Establish per-request-configurable timeouts for all sent requests and cancel on expiry; MAY reset on progress but SHOULD enforce a maximum timeout regardless.",
+   "cite": "cancellation.md 'Timeouts'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Respond to tools/call, prompts/get, resources/read with InputRequiredResult; MUST NOT do so on any other client request.",
+   "cite": "mrtr.md 'Supported Requests'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every InputRequiredResult includes at least one of inputRequests or requestState; inputRequests keys unique within the request; values only ElicitRequest, CreateMessageRequest or ListRootsRequest; never request a capability the client did not declare.",
+   "cite": "schema.ts InputRequiredResult; mrtr.md 'Server Requirements' 2,6,7"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat incoming requestState as attacker-controlled; protect its integrity (HMAC/AEAD) when it influences authorization/resource access/business logic and reject failed verification; SHOULD embed principal, TTL and originating-request identifier; single-use invariants MUST be enforced server-side.",
+   "cite": "mrtr.md 'Server Requirements' 4,5; 'Security Considerations'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Construct all inputRequests before retrying when present; echo requestState verbatim (never inspect/modify) and omit it when the server did not send one; use a different JSON-RPC id on retry; never reuse inputResponses/requestState on other parallel requests.",
+   "cite": "mrtr.md 'Client Requirements' 1-4"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ignore unrecognized fields in InputResponses; if required input is still missing, respond with a new InputRequiredResult rather than an error.",
+   "cite": "mrtr.md 'Error Handling'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Emit notifications/message for a request lacking _meta['io.modelcontextprotocol/logLevel']; SHOULD reject unrecognized level values with -32602.",
+   "cite": "logging.md 'Per-request log level', 'Error Handling'; schema.ts RequestMetaObject.logLevel"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "New implementations adopt Logging, Sampling or Roots (deprecated by SEP-2577, earliest removal >= 2027-07-28); log to stderr (stdio) or OpenTelemetry instead.",
+   "cite": "deprecated.md; changelog.md 'Deprecated'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients rendering icons support image/png and image/jpeg (image/jpg); SHOULD support image/svg+xml and image/webp; MUST reject icon URIs with unsafe schemes (javascript:, file:, ftp:, ws:, local app schemes) and take listed security precautions.",
+   "cite": "schema.ts Icons; basic/index.md 'icons'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "_meta keys follow the prefix/name grammar; prefixes whose second label is 'modelcontextprotocol' or 'mcp' are reserved; implementations MUST NOT assume values at reserved keys; traceparent/tracestate/baggage are exempt from the prefix rule and MUST follow W3C formats.",
+   "cite": "schema.ts MetaObject; basic/index.md '_meta'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Request ids are string or integer, never null, and unique among the sender's outstanding requests; notifications carry no id; responses echo the request id; error codes are integers.",
+   "cite": "basic/index.md 'Messages'"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "stdio: one newline-delimited JSON-RPC message per line, no embedded newlines; server writes nothing but valid MCP messages to stdout and MUST NOT write JSON-RPC requests to stdout; client MUST NOT write responses to stdin.",
+   "cite": "stdio.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "Streamable HTTP: single POST endpoint; client sends Accept: application/json, text/event-stream; server answers a request with application/json or text/event-stream (client supports both), a notification with 202 Accepted; server MUST NOT send JSON-RPC requests on the stream; unknown method => 404 + -32601; invalid Origin => 403; GET/DELETE => 405.",
+   "cite": "streamable-http.md 'Sending Messages', 'Receiving Messages', 'Security & Endpoint', 'Earlier Streamable HTTP Revisions'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A broken SSE response stream loses the in-flight request; re-issue it as a new request with a new id (no Last-Event-ID resumability).",
+   "cite": "changelog.md Major 9; streamable-http.md"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Dual-era clients probe with server/discover on stdio (fallback to initialize only on a non-modern error or timeout, never keyed to one error code) and inspect 400 bodies on HTTP before falling back; cache the era per server process/origin.",
+   "cite": "stdio.md 'Backward Compatibility'; streamable-http.md 'Backward Compatibility'; versioning.md"
+  }
+ ],
+ "wire_details": [
+  "LATEST_PROTOCOL_VERSION = \"2026-07-28\"; JSONRPC_VERSION = \"2.0\" (schema.ts)",
+  "Client->server methods (ClientRequest union): server/discover, completion/complete, prompts/get, prompts/list, resources/list, resources/templates/list, resources/read, subscriptions/listen, tools/call, tools/list. ClientNotification: notifications/cancelled only.",
+  "Server notifications (ServerNotification union): notifications/cancelled (stdio listen teardown only), notifications/progress, notifications/message (deprecated), notifications/resources/updated, notifications/resources/list_changed, notifications/tools/list_changed, notifications/prompts/list_changed, notifications/subscriptions/acknowledged.",
+  "MRTR embedded request methods (never sent as standalone JSON-RPC requests): elicitation/create, sampling/createMessage (deprecated), roots/list (deprecated).",
+  "_meta keys: progressToken; io.modelcontextprotocol/protocolVersion (req, string); io.modelcontextprotocol/clientCapabilities (req, ClientCapabilities); io.modelcontextprotocol/clientInfo (opt, Implementation); io.modelcontextprotocol/logLevel (opt, deprecated, LoggingLevel); io.modelcontextprotocol/serverInfo (result _meta, opt); io.modelcontextprotocol/subscriptionId (notification/result _meta, RequestId of listen request); traceparent, tracestate, baggage (OpenTelemetry, no prefix).",
+  "resultType values: \"complete\", \"input_required\" (extensions MAY add values advertised via capabilities); absent => treat as \"complete\".",
+  "CacheableResult: ttlMs (number, @minimum 0, ms, Cache-Control max-age semantics) and cacheScope (\"public\" | \"private\") both REQUIRED; present on DiscoverResult, ListToolsResult, ListPromptsResult, ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult; absent on GetPromptResult, CallToolResult, CompleteResult, SubscriptionsListenResult, InputRequiredResult.",
+  "Pagination: params.cursor?: string (opaque), result.nextCursor?: string; supported by resources/list, resources/templates/list, prompts/list, tools/list.",
+  "JSON-RPC standard codes: -32700 PARSE_ERROR, -32600 INVALID_REQUEST, -32601 METHOD_NOT_FOUND (unknown or capability-gated method), -32602 INVALID_PARAMS (unknown tool, invalid tool args, unknown prompt, missing required prompt args, invalid/expired cursor, invalid log level, resource not found, elicitation mode not declared, sampling tool-result mixing, missing required _meta fields), -32603 INTERNAL_ERROR.",
+  "MCP codes: -32020 HEADER_MISMATCH (HTTP 400), -32021 MISSING_REQUIRED_CLIENT_CAPABILITY (HTTP 400; data.requiredCapabilities: ClientCapabilities), -32022 UNSUPPORTED_PROTOCOL_VERSION (HTTP 400; data.supported: string[], data.requested: string). Reserved never-reuse: -32002 (legacy resource not found; clients SHOULD still accept), -32042 (legacy URL elicitation required). Range -32000..-32019 implementation-defined legacy; -32020..-32099 spec-reserved.",
+  "HTTP headers: MCP-Protocol-Version (req on every POST, must equal _meta protocolVersion), Mcp-Method (req, = method), Mcp-Name (req on tools/call = params.name, resources/read = params.uri, prompts/get = params.name), Mcp-Param-{name} (from x-mcp-header annotated args; value types string as-is, integer decimal, boolean lowercase true/false), Accept: application/json, text/event-stream (client), Content-Type: application/json | text/event-stream (server), X-Accel-Buffering: no (server SHOULD on SSE), Origin (server MUST validate). Header names case-insensitive; values case-sensitive. Base64 sentinel: =?base64?{Base64(UTF-8)}?= (lowercase markers, applied to Mcp-Name and Mcp-Param-* when non-ASCII/control chars/leading-trailing whitespace or when plain value matches sentinel pattern). Removed: Mcp-Session-Id, Last-Event-ID, HTTP GET/DELETE (respond 405).",
+  "HTTP status codes: 200 (request response), 202 Accepted no body (notification accepted), 400 Bad Request (header mismatch, unsupported version, missing capability, missing _meta, rejected notification), 403 Forbidden (invalid Origin), 404 Not Found + -32601 (unknown method), 405 Method Not Allowed (GET/DELETE).",
+  "SSE: keep-alive comment lines beginning with ':' (e.g. ':\\r\\n') must be ignored by clients; final JSON-RPC response SHOULD terminate a request stream; listen stream stays open.",
+  "Content block type discriminators: \"text\", \"image\", \"audio\", \"resource_link\", \"resource\"; sampling-only (deprecated): \"tool_use\", \"tool_result\". Role: \"user\" | \"assistant\". Annotations.priority range 0..1; lastModified ISO 8601 (e.g. 2025-01-12T15:00:58Z).",
+  "Completion ref types: \"ref/prompt\" (name, title?) and \"ref/resource\" (uri, URI or RFC 6570 template); completion.values max 100 items.",
+  "SubscriptionFilter fields: toolsListChanged, promptsListChanged, resourcesListChanged (booleans), resourceSubscriptions (string[] URIs).",
+  "LoggingLevel enum (deprecated): debug, info, notice, warning, error, critical, alert, emergency (RFC 5424).",
+  "Icon MIME support: MUST image/png, image/jpeg (image/jpg); SHOULD image/svg+xml, image/webp; sizes strings 'WxH' or 'any'; theme 'light'|'dark'; src http(s) or data: URI only.",
+  "ToolAnnotations defaults: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true.",
+  "Tool name SHOULD-grammar: ^[A-Za-z0-9_.-]{1,128}$ (case-sensitive, unique per server). No regex is stated for prompt or resource names in the material.",
+  "x-mcp-header allowed property types: integer, string, boolean (not number); integer range -(2^53-1)..(2^53-1); header name = Mcp-Param-{value}; value must be RFC 9110 token (1*tchar), non-empty, no CR/LF/control chars, case-insensitively unique per inputSchema; property reachable only via 'properties' chain.",
+  "Resource URI schemes named: https://, file://, git://; custom schemes per RFC 3986; XDG MIME e.g. inode/directory allowed for file:// non-regular files.",
+  "JSON Schema: default dialect 2020-12 when $schema absent; explicit $schema allowed (example draft-07: http://json-schema.org/draft-07/schema#); recommended empty-args inputSchema {\"type\":\"object\",\"additionalProperties\":false}.",
+  "stdio framing: newline-delimited JSON-RPC, UTF-8, no embedded newlines; stderr free-form UTF-8 logging.",
+  "Deprecation registry (2026-07-28): Roots, Sampling, Logging, Dynamic Client Registration (earliest removal first revision on/after 2027-07-28); includeContext thisServer/allServers (follows Sampling); HTTP+SSE transport."
+ ],
+ "sdk_implications": [
+  "Type layer: model every Focus-B message exactly as schema.ts (Tool, ToolAnnotations, Icon, Resource, ResourceTemplate, TextResourceContents/BlobResourceContents, ResourceLink, EmbeddedResource, Prompt, PromptArgument, PromptMessage, ContentBlock union, Annotations, CompleteRequestParams with PromptReference/ResourceTemplateReference, SubscriptionFilter, InputRequiredResult/InputRequests/InputResponses, CacheableResult, PaginatedResult). Keep inputSchema/outputSchema as open JSON objects (only require inputSchema.type == 'object'); structuredContent as arbitrary JSON (object/array/scalar/null), not object-only.",
+  "Request pipeline (server): reject requests missing _meta protocolVersion or clientCapabilities with -32602 (HTTP 400); validate protocolVersion against the supported list and return -32022 with data.supported/requested; expose a per-request context object carrying protocolVersion, clientCapabilities, clientInfo, logLevel, progressToken, requestState/inputResponses; never keep per-connection state (no session id, no init handshake).",
+  "Result pipeline (server): auto-inject resultType 'complete' and _meta io.modelcontextprotocol/serverInfo; require handler-supplied or default ttlMs (>=0) and cacheScope for discover/list/read results; enforce uniform cacheScope across pages of a list; never attach ttlMs/cacheScope to input_required results.",
+  "Capability registry (server): derive ServerCapabilities from registered primitives (tools/prompts/resources/completions), expose listChanged/subscribe flags, implement server/discover, and dispatch -32601 for methods whose capability is not advertised.",
+  "Tool registration API: validate tool name against the SHOULD grammar (warn, not fail), enforce uniqueness, keep insertion-order deterministic listing, validate arguments against inputSchema (2020-12, no network $ref, depth/subschema bounds), validate structuredContent against outputSchema, auto-add text serialization of structuredContent, map handler exceptions to isError:true CallToolResult while unknown tool / bad shape stay JSON-RPC -32602; validate x-mcp-header annotations at registration time on the server side too.",
+  "Resource API: URI-keyed static resources plus RFC 6570 templates with matcher/expander; resources/read returns one or more contents; not-found => -32602 (never empty contents); size/mimeType/annotations metadata; file:// path sanitization helper; base64 blob helper.",
+  "Prompt API: arguments are string-valued; required-argument validation => -32602; messages carry single ContentBlock each; completion hooks per prompt argument and per template variable with a 100-item cap and context.arguments pass-through.",
+  "MRTR support: tools/call, prompts/get, resources/read handlers can return InputRequiredResult (elicitation/create; sampling and roots deprecated); server side must check client capabilities before emitting inputRequests (else -32021), provide integrity-protected requestState helper (HMAC/AEAD with principal, TTL, request digest); client side must gather inputResponses, echo requestState verbatim, retry with a new id, and never cache retry results.",
+  "Subscriptions: implement subscriptions/listen as a long-lived request that (a) computes the honored SubscriptionFilter from capabilities, (b) emits notifications/subscriptions/acknowledged first, (c) tags every notification and the final SubscriptionsListenResult with _meta subscriptionId = request id, (d) on stdio ends via notifications/cancelled from the client and server-sent notifications/cancelled + SubscriptionsListenResult on graceful teardown, (e) on HTTP keeps an SSE stream open with comment keep-alives and X-Accel-Buffering: no. Server-side emitters: NotifyToolsListChanged/PromptsListChanged/ResourcesListChanged/ResourceUpdated(uri) fan out only to subscriptions that opted in.",
+  "Client subscription manager: demultiplex by subscriptionId, compare acknowledged filter with requested, re-send listen after stdio restart, treat SubscriptionsListenResult as graceful close and transport drop as reconnect trigger, invalidate caches on list_changed.",
+  "Client cache: per-method+params key (including cursor), honor ttlMs/cacheScope (private caches keyed by auth context), treat absent/negative ttlMs as 0, no background polling by default (jitter/backoff if enabled), drop all pages on invalid cursor, never cache MRTR retries.",
+  "Progress: request-side opt-in via _meta.progressToken (unique across active requests); server-side IProgress helper enforcing monotonic increase and stop-after-complete; deliver only on the originating request's stream; optional timeout reset on progress with hard maximum.",
+  "Cancellation: per-request configurable timeouts; stdio client sends notifications/cancelled; HTTP client cancels by aborting the response stream; server maps stream abort/cancel notification to a cancellation token, suppresses the response, ignores unknown/late cancellations; server must never send notifications/cancelled except for listen teardown on stdio.",
+  "Streamable HTTP client: build MCP-Protocol-Version, Mcp-Method, Mcp-Name (base64 sentinel when needed) and Mcp-Param-* headers from the body using the tool's cached inputSchema; drop tools with invalid x-mcp-header from tools/list results with a logged warning; on -32020 refresh tools/list and retry; Accept both JSON and SSE; re-issue lost in-flight requests with new ids; era detection by inspecting 400 bodies. Streamable HTTP server: Origin validation (403), header/body validation (-32020, 400), 202 for notifications, 404/-32601 for unknown methods, 405 for GET/DELETE, ignore Mcp-Session-Id/Last-Event-ID.",
+  "Logging (deprecated but in-window): optional support gated by request _meta logLevel; server helper that emits notifications/message only on that request's stream and only at/above requested level; invalid level => -32602; recommend stderr/OpenTelemetry in docs.",
+  "Dual-era support (optional): if targeting legacy servers/clients, keep a separate 2025-11-25 code path (initialize handshake, resources/subscribe, -32002, object-only structuredContent, Mcp-Session-Id) selected by era probe; do not mix semantics in one request path.",
+  "Conformance: the official @modelcontextprotocol/conformance suite (server scenarios tools-list, tools-call-*, resources-*, prompts-*, resources-subscribe, tools-call-with-progress; --spec-version 2026-07-28 uses stateless lifecycle) validates every wire message against the schema, so the SDK's wire serialization must match schema.json field names and requiredness exactly."
+ ],
+ "legacy_delta": [
+  "Lifecycle: 2025-11-25/2025-06-18 use initialize + notifications/initialized + ping and a negotiated session; 2026-07-28 removes all three, adds server/discover and requires per-request _meta (protocolVersion, clientCapabilities) plus resultType on every result (changelog Major 2,3,5,8).",
+  "tools/call params: 2025-06-18 params {name, arguments?}; 2025-11-25 CallToolRequestParams extends TaskAugmentedRequestParams (task field); 2026-07-28 extends InputResponseRequestParams (inputResponses?, requestState?) with tasks moved to extension io.modelcontextprotocol/tasks.",
+  "Tool: 2025-06-18/2025-11-25 inputSchema and outputSchema restricted to {type:'object', properties?, required?} ($schema? only in 2025-11-25) and outputSchema root type 'object'; 2026-07-28 allows any 2020-12 keywords, outputSchema any schema, adds x-mcp-header annotation semantics. 2025-11-25 Tool.execution?.taskSupport ('forbidden'|'optional'|'required') is gone in 2026-07-28. 2025-06-18 Tool lacks icons.",
+  "CallToolResult.structuredContent: object-only ({[k]:unknown}) in 2025-06-18 and 2025-11-25; any JSON value in 2026-07-28 (SEP-2106).",
+  "CallToolResult/GetPromptResult/ReadResourceResult may now be InputRequiredResult (MRTR); in legacy versions servers instead sent standalone elicitation/create, sampling/createMessage, roots/list JSON-RPC requests to the client. 2025-11-25 notifications/elicitation/complete and URL-mode elicitationId are removed; -32042 URL_ELICITATION_REQUIRED is retired.",
+  "List results: ListToolsResult/ListPromptsResult/ListResourcesResult/ListResourceTemplatesResult extend only PaginatedResult in legacy; ReadResourceResult extends Result. 2026-07-28 adds required ttlMs and cacheScope (CacheableResult). PaginatedRequest.params was optional in 2025-11-25; now required because _meta is required.",
+  "Resource subscriptions: legacy resources/subscribe {uri} and resources/unsubscribe {uri} requests plus unsolicited list_changed notifications ('may be issued by servers without any previous subscription'); 2026-07-28 replaces them with subscriptions/listen + SubscriptionFilter, notifications/subscriptions/acknowledged, subscriptionId tagging, and list_changed notifications delivered only to opted-in listen streams. ServerCapabilities.resources.subscribe now refers to resourceSubscriptions in listen.",
+  "Resource not found: -32002 in 2025-11-25 and earlier; -32602 in 2026-07-28 (clients SHOULD accept both; servers MUST NOT emit -32002).",
+  "Logging: legacy logging/setLevel request; 2026-07-28 replaces with per-request _meta io.modelcontextprotocol/logLevel and marks the feature deprecated; notifications/message still exists but is request-scoped. notifications/roots/list_changed removed.",
+  "Error codes renumbered relative to the draft: HeaderMismatch -32001 -> -32020, MissingRequiredClientCapability -32003 -> -32021, UnsupportedProtocolVersion -32004 -> -32022; error-code allocation policy new.",
+  "Streamable HTTP: legacy (2025-03-26..2025-11-25) had Mcp-Session-Id, HTTP GET SSE stream, DELETE for session end, server-sent requests on SSE, Last-Event-ID resumability; 2026-07-28 removes all, requires Mcp-Method/Mcp-Name headers and x-mcp-header mirroring (SEP-2243), keeps MCP-Protocol-Version (introduced 2025-06-18; absent header MAY be treated as 2025-03-26 by dual-era servers).",
+  "Cancellation: legacy notifications/cancelled over HTTP too and 'MUST NOT be used for cancelling tasks'; 2026-07-28: HTTP cancels by closing the stream; stdio uses the notification; servers send it only to end listen streams.",
+  "ClientCapabilities: 2026-07-28 deprecates roots and sampling capabilities, drops 2025-11-25 tasks capability (moved to extensions), adds extensions map; ServerCapabilities drops tasks, deprecates logging, adds extensions. 2025-11-25 ClientCapabilities.roots had listChanged?; 2026-07-28 roots is an empty object.",
+  "Tool ordering: deterministic order SHOULD is new in 2026-07-28. Tool name constraints (1-128 chars, allowed charset) appear in 2026-07-28 tools.md; not verified whether 2025-11-25 prose had identical wording (only the schemas, not the 2025-11-25 pages, are in the local material).",
+  "_meta typing: legacy uses {[key:string]:unknown}; 2026-07-28 introduces MetaObject/RequestMetaObject/NotificationMetaObject/ResultMetaObject with reserved io.modelcontextprotocol/* keys and W3C trace keys.",
+  "Schema generation: 2026-07-28 schema.json now emits number (not integer) for minimum/maximum/default fields (PR #2710)."
+ ],
+ "open_questions": [
+  "ServerNotification union in schema.ts includes ProgressNotification but ClientNotification lists only CancelledNotification; the material does not say whether a client may send notifications/progress (e.g. while fulfilling MRTR input) — treat progress as server->client only until clarified.",
+  "subscriptions/listen has no explicit capability gate in schema.ts; the mapping of SubscriptionFilter fields to tools.listChanged / prompts.listChanged / resources.listChanged / resources.subscribe is inferred from capability doc-comments and the acknowledgment rule, not stated as a single normative table.",
+  "Error handling when subscriptions/listen requests only unsupported types (empty honored subset): the material does not say whether the server should still acknowledge with an empty filter, keep the stream open, or return an error.",
+  "Deterministic ordering is a SHOULD for tools only; no equivalent statement for prompts/list, resources/list or resources/templates/list was found in the material.",
+  "No name grammar/length limits are given for prompt names, prompt argument names, resource names or completion argument names; only tool names are constrained (SHOULD).",
+  "Whether servers must validate Mcp-Name against params.uri for resources/read using exact string equality or URI normalization is not stated (only base64-sentinel decoding is required).",
+  "Header requirements for client notification POSTs over Streamable HTTP are explicitly undefined in this revision (streamable-http.md note); notifications/cancelled over HTTP has no defined header contract.",
+  "Whether ttlMs applies per page freshness for resources/read with multiple contents items or whether InputRequiredResult may legally include _meta serverInfo is unstated (serverInfo presumably allowed since it is on ResultMetaObject).",
+  "x-mcp-header prose says integer values MUST be within the IEEE754 safe range but does not state client behavior when an argument violates it at call time (reject call vs omit header); only definition-time rejection is specified.",
+  "The 2025-11-25 and 2025-06-18 markdown pages are not in the local material; legacy-delta items rely on the legacy schema.ts files and the 2026-07-28 changelog, so legacy prose-only requirements (e.g. old tool name rules, session handling details) were not independently verified."
+ ]
+}

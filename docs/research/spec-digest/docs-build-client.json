@@ -1,0 +1,143 @@
+{
+ "source": "docs/2026-07-28/develop/build-client.md (full read, all 2522 lines, offsets 1-700, 700-1400, 1400-2099, 2099-2522) — cross-referenced against 2026-07-28_schema.json and 2025-11-25_schema.ts for the legacy_delta section only",
+ "summary": "build-client.md is a tutorial with 7 per-language tabs (Python, TypeScript, Java/Spring AI, Kotlin, C#, Ruby, Rust), each hand-building an interactive LLM chatbot over MCP. It is NOT normative spec prose: a full-text grep found essentially zero RFC-2119 keywords (one lowercase 'should' about tool-name validation, repeated in 2 tabs). Every tab follows the identical shape: construct a Client with an Implementation identity {name, version} (no ClientCapabilities ever declared); build a stdio transport by dispatching on script extension (.py/.js/.rb/.jar/.csproj) to spawn a child process; connect (which silently performs whatever handshake the SDK does — build-client.md:268 says entering the connection scope 'agrees a protocol version' without naming the method); list_tools with no pagination ever surfaced; call_tool with arguments, returning a CallToolResult whose content is a list of typed blocks (only 'text' is ever handled) and an is_error flag that callers check instead of catching exceptions; feed results back into an LLM (Claude) tool-loop; and close/dispose the connection, in every tab wrapped in try/finally or an async-with equivalent. Streamable HTTP appears exactly once, as a bare config URL in the Java/Spring AI tab, with zero wire detail. The tutorial covers NONE of: ClientCapabilities declaration, InputRequiredResult, elicitation, sampling server-callbacks, subscriptions, roots, or auth — all of which are central, normative 2026-07-28 features per schema.json (InputRequiredResult, resultType, server/discover replacing 'initialize', subscriptions/listen replacing resources/subscribe). This is flagged as a major gap between the assigned tutorial and what a complete PowerShell client SDK needs; those areas require reading other spec pages not assigned to this task.",
+ "methods": [
+  {
+   "name": "Client construction (per-language: Client(...), MCPClient(), McpClient.CreateAsync(), Client(clientInfo=Implementation(...)))",
+   "direction": "client->server",
+   "params": "An Implementation-like identity object with at minimum {name, version} of the client itself, e.g. TS: new Client({name:'mcp-client-cli', version:'1.0.0'}) (line 568); Kotlin: Client(clientInfo = Implementation(name=..., version=...)) (line 1125). No language tab in this doc passes a ClientCapabilities object to the constructor.",
+   "result": "An unconnected Client/session object; no network activity yet.",
+   "notes": "build-client.md never shows declaring ClientCapabilities (elicitation/sampling/roots) at construction time in any language — this is a gap vs. schema.json ClientCapabilities (lines 308-357); a PowerShell SDK must decide its own default-capabilities story since no reference pattern exists here.",
+   "capability_gate": "none shown"
+  },
+  {
+   "name": "Transport selection: stdio child-process spawn (StdioServerParameters/StdioClientTransport/MCP::Client::Stdio/TokioChildProcess)",
+   "direction": "transport",
+   "params": "command (interpreter binary path) + args (script path as single-element array, or full argv for Rust). Per-language dispatch on file extension: .py -> python/python3, .js -> node/process.execPath, .rb -> ruby, .jar -> java -jar, .csproj/dir -> dotnet run --project. Python: StdioServerParameters(command=..., args=[server_script_path]) (build-client.md:137). TS: new StdioClientTransport({command, args:[serverScriptPath]}) (build-client.md:592-595). Kotlin: StdioClientTransport(input=process.inputStream.asSource().buffered(), output=process.outputStream.asSink().buffered()) built manually around a ProcessBuilder (build-client.md:1158-1164). C#: new StdioClientTransport(new(){Name=..., Command=..., Arguments=...}) (build-client.md:1511-1516). Rust: TokioChildProcess::new(command) wrapping tokio::process::Command (build-client.md:2170-2176).",
+   "result": "A transport object, not yet an open connection.",
+   "notes": "Every tab in this file uses stdio only for the actual connection code; Streamable HTTP is mentioned by name/URL config exactly once (Java/Spring AI, build-client.md:1002-1017: 'spring.ai.mcp.client.streamable-http.connections.server1.url=http://localhost:8080') with no wire detail. No tab shows OAuth, custom headers, or reconnection logic for HTTP.",
+   "capability_gate": "none shown"
+  },
+  {
+   "name": "Connect / open session (async with Client(...):, await this.mcp.connect(transport), mcp.connect(transport), await McpClient.CreateAsync(clientTransport), @mcp_client.connect, ().serve(process).await)",
+   "direction": "client->server",
+   "params": "The transport instance from the previous step.",
+   "result": "An open, ready-to-use client/session. build-client.md states (line 268): entering 'async with' 'launches the server and agrees a protocol version with it' — i.e. whatever handshake occurs (server/discover or inline _meta negotiation per 2026-07-28 schema) is fully hidden inside this call in every language shown.",
+   "notes": "No tab exposes protocolVersion, ClientCapabilities, or ServerCapabilities as return/negotiated values the caller can inspect. C# uses 'await using' (line 1518) implying IAsyncDisposable; Kotlin's Client implements a manual close(); TS exposes an explicit async cleanup()/mcp.close() (lines 706-708); Rust exposes cleanup() calling session.cancel().await (lines 2363-2369).",
+   "capability_gate": "none shown"
+  },
+  {
+   "name": "List tools (client.list_tools() / this.mcp.listTools() / mcp.listTools() / mcpClient.ListToolsAsync() / @mcp_client.tools / session.list_all_tools())",
+   "direction": "client->server",
+   "params": "None shown in any tab (no cursor/pagination parameter is ever passed by user code, even though ListToolsRequest/ListToolsResult support pagination per schema.json const 'tools/list' at line 1926 — build-client.md never surfaces pagination).",
+   "result": "A result object exposing a `.tools` list of Tool objects with at least {name, description, input_schema/inputSchema}. Python: tool_list.tools with tool.name/description/input_schema (lines 156-161). TS: toolsResult.tools mapped to {name, description, input_schema: tool.inputSchema} (lines 598-605) — note snake_case vs camelCase field-name divergence between SDKs for the same wire field. Rust: session.list_all_tools() explicitly aggregates across pagination pages (line 2179), unlike the other 6 languages.",
+   "notes": "Tool name format validation is called out explicitly (Python best-practices, build-client.md:381-383, and Ruby:1999-2001): 'Tool names can be validated according to the format specified [here](/specification/2026-07-28/server/tools#tool-names). If a tool name conforms to the specified format, it should not fail validation by an MCP client.' This is the only quasi-normative (RFC-2119-adjacent, using lowercase 'should') statement in the entire document.",
+   "capability_gate": "server must offer tools (implied)"
+  },
+  {
+   "name": "Call tool (client.call_tool(tool_name, tool_args) / this.mcp.callTool({name, arguments}) / mcp.callTool(name=..., arguments=...) / session.call_tool(CallToolRequestParam{name, arguments}))",
+   "direction": "client->server",
+   "params": "name: string (tool name), arguments/tool_args/input: an object/dict of tool input matching the tool's input schema. Rust explicitly requires arguments as a JSON object (arguments: tool_call.fn_arguments.as_object().cloned(), line 2285).",
+   "result": "A CallToolResult-shaped object with `.content` (a list of content blocks, each with a `.type` such as 'text') and an `.is_error`/`is_error` boolean flag. Python (build-client.md:216): 'call_tool returns a CallToolResult. Its content is a list of blocks, which is why we narrow to TextContent before reading .text. A tool that raises does not raise here: it answers with is_error set, and passing that flag on lets Claude read the message and try something else.' TS filters result.content for block.type==='text' (lines 656-659). Ruby digs result.dig('result','content') (line 1802) — note this implies the Ruby SDK's call_tool return shape nests content one level under a 'result' key, differing from the flat shape TS/Python show.",
+   "notes": "MUST/SHOULD: none stated explicitly for call_tool in this doc beyond the is_error convention. Best-practices sections across every language tell the caller to check the is_error/is_error flag rather than expect an exception (Python:367, TS/C#/Ruby/Rust best practices all repeat 'wrap tool calls / check flag / provide meaningful error messages'). No tab demonstrates structuredContent, resource_link content blocks, or progress notifications during a long-running call_tool — build-client.md shows text-only content handling throughout.",
+   "capability_gate": "none shown"
+  },
+  {
+   "name": "Close / cleanup (mcp.close() / await mcp.close() / session.cancel().await / @transport.close / async-with exit / await using disposal)",
+   "direction": "client->server",
+   "params": "None.",
+   "result": "Transport closed, subprocess terminated. build-client.md:268: 'leaving it disconnects and shuts the subprocess down. There is nothing to close by hand' (for the Python async-with pattern specifically); other languages require an explicit call (TS cleanup(), Rust cleanup(), Ruby cleanup, Kotlin close()).",
+   "notes": "Resource-management best practices repeated in every tab: let the context manager/using-block own the connection; ensure cleanup runs even on error (TS main() calls mcpClient.cleanup() in both catch and finally, lines 725-732; Rust runs cleanup unconditionally after the chat loop regardless of its Result, lines 2390-2404).",
+   "capability_gate": "none shown"
+  },
+  {
+   "name": "server/discover (schema-only; NOT demonstrated anywhere in build-client.md)",
+   "direction": "client->server",
+   "params": "Per schema.json line 714-740: request from client asking server to advertise supported protocol versions, capabilities, and other metadata. Params detail not extracted in this pass beyond the const method name 'server/discover'; cited because it is the 2026-07-28 replacement for the old 'initialize' handshake that build-client.md's every 'connect' call implicitly performs without showing.",
+   "result": "DiscoverResult (schema.json ~line 740-812, not read in full in this pass).",
+   "notes": "'Servers MUST implement server/discover. Clients MAY call it but are not required to — version negotiation can also happen inline via per-request _meta' (schema.json:714-719). This MUST/MAY pair is directly relevant to PowerShell client design (does the SDK auto-call server/discover, or negotiate inline?) and build-client.md gives no guidance either way.",
+   "capability_gate": "n/a"
+  },
+  {
+   "name": "elicitation/create, sampling/createMessage, roots/list (schema-only; NOT demonstrated anywhere in build-client.md)",
+   "direction": "notification s->c / server-initiated request embedded via InputRequiredResult.inputRequests",
+   "params": "Not extracted in depth in this pass beyond capability gating: elicitation requires ClientCapabilities.elicitation.form or .url declared (schema.json:311-322); sampling requires ClientCapabilities.sampling, with tools/toolChoice on a CreateMessageRequest requiring ClientCapabilities.sampling.tools else the client MUST return an error (schema.json:643,646); roots/list requires ClientCapabilities.roots.",
+   "result": "ElicitResult / CreateMessageResult / ListRootsResult, delivered back via InputResponses keyed to the original inputRequests map (schema.json:1326-1362).",
+   "notes": "None of build-client.md's 7 language examples register a callback/handler for these server-initiated sub-requests, construct an InputRequiredResult loop, or declare the corresponding ClientCapabilities. This is the single largest gap between the assigned tutorial file and what a complete client SDK must implement for elicitation/sampling/InputRequiredResult — that material is not in this file and must be sourced from other spec pages outside this task's assigned reading.",
+   "capability_gate": "ClientCapabilities.elicitation / .sampling / .roots"
+  }
+ ],
+ "requirements": [
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If a tool name conforms to the tool-name format specified in the server/tools spec section, an MCP client should not fail validation on it.",
+   "cite": "pages/docs__2026-07-28__develop__build-client.md:381-383 (Python Best Practices) and :1999-2001 (Ruby Best Practices), both referencing /specification/2026-07-28/server/tools#tool-names"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Check the is_error field on a CallToolResult rather than expecting a failing tool invocation to raise/throw; a tool that fails answers with is_error set so the flag can be passed on to the LLM to retry.",
+   "cite": "pages/docs__2026-07-28__develop__build-client.md:216 (Python 'Query Processing Logic' explanation) and repeated as a numbered Best Practice at lines 366-369 (Python), 778-782 (TypeScript), 1382-1386 (Kotlin), 1984-1987 (Ruby), 2466-2470 (Rust)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Let the connection's owning scope (async-with block / using-block / try-finally) own the transport lifecycle; keep it open only as long as needed and ensure cleanup runs even when an error occurs.",
+   "cite": "pages/docs__2026-07-28__develop__build-client.md:371-374 (Python) and repeated resource-management best practices per-tab, e.g. Rust lines 2471-2474 ('Always cancel the MCP session during cleanup', 'Ensure cleanup runs even when connection or chat-loop operations fail')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Store API keys/secrets securely (.env, user-secrets, environment variables) rather than hardcoding them, and validate server responses before acting on them.",
+   "cite": "pages/docs__2026-07-28__develop__build-client.md, repeated 'Security' best-practice bullets in every language tab, e.g. lines 376-379 (Python), 784-787 (TypeScript), 1388-1391 (Kotlin), 1994-1997 (Ruby), 2476-2479 (Rust)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST implement server/discover (the 2026-07-28 replacement for the old client-initiated 'initialize' handshake); clients MAY call it but are not required to, since version negotiation can also happen inline via per-request _meta.",
+   "cite": "2026-07-28_schema.json:714-719 (DiscoverRequest description) — cited as essential context because build-client.md's every language 'connect' call performs an undisclosed handshake that this requirement now governs; not itself found in build-client.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every result object (including InputRequiredResult) implementing the 2026-07-28 protocol MUST include the resultType field; a client receiving a result from an earlier-protocol server that omits resultType MUST treat the absence as 'complete'.",
+   "cite": "2026-07-28_schema.json:1316-1319 and :3004-3007 — cited as essential context for building a spec-conformant PowerShell result-parsing type, not present in build-client.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The client MUST return an error if a CreateMessageRequest's tools/toolChoice fields are provided but ClientCapabilities.sampling.tools was not declared.",
+   "cite": "2026-07-28_schema.json:643-646 — cited as essential context for capability-gated sampling support the PowerShell client must enforce; not present in build-client.md"
+  }
+ ],
+ "wire_details": [
+  "This tutorial (build-client.md) operates entirely at the SDK method-call level and documents almost no raw wire details: no JSON-RPC envelope examples, no HTTP headers, no status codes, no MIME types, and no error-code table appear anywhere in its 2522 lines.",
+  "The only implicit wire-adjacent detail is content-block typing: CallToolResult.content items carry a `.type` discriminator, and every tutorial filters for type=='text' (TextContent) before reading `.text` — e.g. Python line 192 (isinstance(block, TextContent)), TS line 657 (block.type === 'text'), Kotlin line 1243 (filterIsInstance<TextContent>()). No tab shows handling of 'image', 'audio', or 'resource_link' content types even though schema.json const values for those exist (lines 47, 1235, 2839).",
+  "Supplementary (from 2026-07-28_schema.json, not from build-client.md itself, cited because they define the wire-level methods the tutorial's SDK calls wrap): tools/list (line 1926), tools/call (line 164), server/discover (line 724) [no 'initialize' method exists in this revision — confirmed absent by grep], elicitation/create (line 812), sampling/createMessage (line 585), subscriptions/listen (line 3367), notifications/subscriptions/acknowledged (line 3326), notifications/tools/list_changed (line 3730), notifications/resources/updated (line 2966), notifications/resources/list_changed (line 2863), notifications/prompts/list_changed (line 2493), notifications/progress (line 2372), notifications/message (line 2026), notifications/cancelled (line 274/367), resources/list (1801), resources/read (2555), resources/templates/list (1712), prompts/list (1623), prompts/get (1033), completion/complete (430), roots/list (1883).",
+  "Error codes referenced in schema.json (supplementary, not in build-client.md): InvalidParamsError code -32602 (line 1389, used e.g. for unknown tool name/invalid arguments, elicitation mode not declared, sampling tool-result mixing), InternalError code -32603 (line 1367). A capability-required error for HTTP: 'For HTTP, the response status code MUST be 400 Bad Request' when a request requires a client capability not declared (schema.json:2091-2092).",
+  "_meta key convention (supplementary, from schema.json): ResultMetaObject defines 'io.modelcontextprotocol/serverInfo' (line 3017) carrying the responding Implementation {name, version}; SubscriptionsListen responses/notifications carry 'io.modelcontextprotocol/subscriptionId' (lines 2210, 3425); ClientCapabilities.extensions and ServerCapabilities.extensions keys must follow the MetaObject `_meta` key naming rules with a mandatory prefix (lines 334, 3135)."
+ ],
+ "sdk_implications": [
+  "A PowerShell MCP client type should mirror the common shape found across all 7 tutorial SDKs: a single stateful Client/Session object constructed from an Implementation identity {Name, Version} (no capabilities are shown being passed at construction in this tutorial — the PowerShell SDK will need to decide its own default ClientCapabilities story since no precedent exists here), opened against a transport, and disposed via .NET's IDisposable/IAsyncDisposable pattern (closest analog to Python's 'async with' / C#'s 'await using' shown at build-client.md:256 and :1518).",
+  "Provide a StdioClientTransport-equivalent (e.g. New-McpStdioTransport) that takes a Command + Arguments list and spawns a child process, matching every tab's per-extension command dispatch pattern (build-client.md:130-137 Python, :579-595 TS, :1147-1156 Kotlin, :1530-1539 C#, :1743-1752 Ruby, :2165-2176 Rust); a PowerShell-native equivalent could dispatch similarly on script extension for parity, though this is inferred, not spec-mandated.",
+  "Streamable HTTP transport has essentially zero worked example in this document (only a config URL string in the Java/Spring AI tab, build-client.md:1002-1017) — the PowerShell SDK's HTTP transport design cannot be derived from build-client.md and must come from the Streamable HTTP transport spec page and schema instead.",
+  "Expose List-McpTool (ListTools) returning objects with Name/Description/InputSchema fields, and Invoke-McpTool (CallTool) taking Name + Arguments (hashtable/PSObject) and returning a CallToolResult with Content (array of typed content blocks, at minimum Text) and an IsError boolean — mirroring the is_error-not-exception convention emphasized in every tab's error-handling best practices.",
+  "The chat-loop / tool-execution-loop pattern (tools -> Anthropic tool schema -> messages.create -> tool_use -> call_tool -> tool_result -> messages.create) is hand-written identically in all 7 languages; PowerShell should consider whether to ship this as a convenience cmdlet (e.g., Invoke-McpChatLoop) since no reference SDK in this doc provides it natively — every tab treats it as application code, not library code.",
+  "Because build-client.md never demonstrates ClientCapabilities declaration, InputRequiredResult handling, elicitation, sampling server-callback registration, subscriptions/listen, or auth, the PowerShell SDK's design for those areas cannot be based on this tutorial and requires reading the dedicated spec pages (client/elicitation.md, client/sampling.md, transports, authorization) plus the full schema.json definitions for ClientCapabilities (schema.json:308-357), InputRequiredResult (schema.json:1304-1362), and SubscriptionsListenRequest/Result (schema.json ~3367-3430) before that portion of the SDK can be planned.",
+  "Cross-language field-name inconsistency observed (input_schema vs inputSchema vs InputSchema; is_error vs is_error vs IsError) confirms the PowerShell SDK should pick PascalCase properties per .NET/PowerShell convention while deserializing from the wire's camelCase JSON, exactly as the C# tab does implicitly via its typed McpClient API (build-client.md:1520-1524)."
+ ],
+ "legacy_delta": [
+  "The tutorial's SDK code (all 7 language tabs) shows NO explicit 'initialize' handshake call — this matches 2026-07-28 schema, which has NO 'initialize' method at all (confirmed by empty grep in 2026-07-28_schema.json vs. 2025-11-25_schema.ts lines 251-301 which define 'initialize' request/result and 'notifications/initialized'). In 2026-07-28 this is replaced by 'server/discover' (const at schema line 724): 'Servers MUST implement server/discover. Clients MAY call it but are not required to — version negotiation can also happen inline via per-request _meta.' build-client.md documents none of this; every language's connect()/Connect()/CreateAsync() call is a black box the tutorial never opens.",
+  "2026-07-28 introduces InputRequiredResult (schema.json:1304-1325) and ResultType ('complete'|'input_required', schema.json:3024-3027): any server result can now defer completion by returning resultType='input_required' plus an inputRequests map (server-initiated sub-requests: sampling/createMessage, elicitation/create, roots/list — schema.json:1326-1362) that the client must answer via inputResponses/requestState and re-issue. This bidirectional-request-embedded-in-result pattern does not exist in 2025-11-25/2025-06-18 (there, sampling/elicitation were direct nested JSON-RPC requests over the same connection) and is completely absent from build-client.md, which shows only single-shot list_tools/call_tool with no callback plumbing for server-initiated sub-requests.",
+  "Resource subscriptions moved from per-resource 'resources/subscribe'/'resources/unsubscribe' (2025-11-25) to a single long-lived 'subscriptions/listen' streaming request (schema.json:3367) with opt-in notification filters (resourcesListChanged, promptsListChanged, resourceSubscriptions) and a mandatory first-message ack via 'notifications/subscriptions/acknowledged' carrying 'io.modelcontextprotocol/subscriptionId'. ServerCapabilities.resources.subscribe (schema.json:3159-3162) is kept only as a boolean feature flag; the old two-call subscribe/unsubscribe methods are gone from the const list. build-client.md has zero coverage of subscriptions in any language.",
+  "ClientCapabilities.elicitation (schema.json:311-322) is now split into 'form' and 'url' elicitation modes (each an opaque JSONObject), and ClientCapabilities.sampling (schema.json:342-355) gained 'context' and 'tools' sub-capabilities (tool use in sampling). None of this exists in build-client.md, which never constructs or declares ClientCapabilities at all — every language SDK's Client constructor in the tutorial takes only a name/version Implementation object, never a capabilities object.",
+  "The Java/Spring AI tab (lines 992-1017) is the only tab that even names Streamable HTTP as a transport ('spring.ai.mcp.client.streamable-http.connections.server1.url=...' and 'STDIO and Streamable HTTP' as supported transport types), with zero request/response/header detail. All other 6 language tabs (Python, TypeScript, Kotlin, C#, Ruby, Rust) show stdio child-process spawning exclusively. No tab shows Streamable HTTP client code, session headers (Mcp-Session-Id), SSE handling, or reconnection."
+ ],
+ "open_questions": [
+  "build-client.md is silent on ClientCapabilities declaration, InputRequiredResult handling, elicitation, sampling callbacks, subscriptions/listen, roots, auth (OAuth/headers), and Streamable HTTP wire mechanics. To plan the full PowerShell client SDK per the FOCUS section, the following spec pages need the same full-read treatment: docs/2026-07-28/client/elicitation.md, docs/2026-07-28/client/sampling.md, docs/2026-07-28/client/roots.md (if present), specification pages for server/discover, subscriptions/listen, transports (stdio + Streamable HTTP), and authorization — none of these were in this task's assigned file.",
+  "Given 2026-07-28 removed the classic 'initialize' handshake in favor of 'server/discover' (MUST-implement on server, MAY-call on client) plus inline per-request _meta negotiation, does the PowerShell SDK's Connect/Open method need to expose the negotiated protocol version and ServerCapabilities to the caller (none of the 7 tutorial languages do), or hide it entirely as every example here does?",
+  "The Ruby example's call_tool result shape (result.dig('result','content'), build-client.md:1802) differs structurally from TS/Python's flat result.content — is this a Ruby-SDK-specific wrapping quirk or a documentation inconsistency? Worth checking the Ruby MCP gem source before mirroring either shape in PowerShell's CallToolResult type.",
+  "Should the PowerShell SDK's high-level chat-loop helper (mirroring process_query/processQuery across all 7 languages) be a first-class API surface, given every single language tab in this tutorial hand-rolls the identical Claude-tool-loop pattern (list_tools -> map to Anthropic tool schema -> messages.create -> for each tool_use block call_tool -> append tool_result -> messages.create again)? None of the SDKs shown provide this as a built-in method; it is entirely user code in every tab."
+ ]
+}

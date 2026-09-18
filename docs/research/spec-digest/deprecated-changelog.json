@@ -1,0 +1,326 @@
+{
+ "source": "specification__2026-07-28__deprecated.md; specification__2026-07-28__changelog.md; community__feature-lifecycle.md; cross-checked against schema.ts (2026-07-28) for exact method names, _meta keys, and error codes.",
+ "summary": "MCP 2026-07-28 is a major, largely stateless redesign vs 2025-11-25. Removed: protocol-level sessions/Mcp-Session-Id, initialize/notifications/initialized handshake, ping, logging/setLevel, notifications/roots/list_changed, resources/subscribe/unsubscribe, HTTP GET SSE endpoint, SSE resumability (Last-Event-ID), notifications/elicitation/complete, elicitationId, tasks/list, tasks/result, blocking server-initiated requests (roots/list, sampling/createMessage, elicitation/create as mid-flight calls). Added: server/discover (servers MUST implement), subscriptions/listen (single long-lived stream replacing subscribe/unsubscribe+GET-SSE, opt-in via toolsListChanged/promptsListChanged/resourcesListChanged/resourceSubscriptions filters, tagged with _meta io.modelcontextprotocol/subscriptionId), MRTR pattern (InputRequiredResult/inputRequests + retry with inputResponses replacing server-initiated calls), required resultType ('complete'|'input_required', missing=complete for compat), CacheableResult (ttlMs+cacheScope) on all list/read results, tasks/get+tasks/update as an official extension (io.modelcontextprotocol/tasks). Every request now must carry _meta io.modelcontextprotocol/protocolVersion + clientCapabilities (clientInfo SHOULD); results SHOULD carry serverInfo. Error codes renumbered into a new allocation policy (-32000..-32019 implementation-defined/grandfathered, -32020..-32099 reserved for MCP): HeaderMismatch -32020, MissingRequiredClientCapability -32021, UnsupportedProtocolVersion -32022; resource-not-found moved -32002->-32602. New HTTP requirements: Mcp-Method/Mcp-Name headers, x-mcp-header annotation. OAuth: DCR deprecated in favor of Client ID Metadata Documents; iss validation (RFC9207) required; credentials keyed by issuer. Feature lifecycle policy (SEP-2596) formalizes Active/Deprecated/Removed states with a 12-month (90-day expedited) minimum deprecation window; Deprecated now: Roots, Sampling, Logging, Dynamic Client Registration (all deprecated 2026-07-28, earliest removal >=2027-07-28), includeContext thisServer/allServers (deprecated 2025-11-25, reclassified), HTTP+SSE transport (deprecated 2025-03-26, reclassified, earliest removal 3mo after SEP-2596 Final). Zero features formally Removed yet. Tier 1 SDKs MUST mark deprecated surface natively and SHOULD emit runtime deprecation warnings.",
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "No required params documented in the read excerpt beyond standard envelope; schema.ts category '`server/discover`' shows DiscoverRequest with method: 'server/discover' (schema.ts line ~666). Purpose: advertise supported protocol versions, capabilities, and identity.",
+   "result": "DiscoverResult extends CacheableResult (schema.ts line 678) — includes ttlMs/cacheScope plus server identity/capabilities/supported-protocol-versions fields (full field list not visible in the grepped excerpt — flagged as open question).",
+   "capability_gate": "None — servers MUST implement it (changelog.md Major #3). Clients MAY call it before any other request, or use it as a stdio backward-compat probe (changelog.md Major #3; schema.ts line 657-661: 'Clients MAY call it but are not required').",
+   "notes": "Source: changelog.md Major change #3, SEP-2575. Since initialize/initialized is removed, server/discover plus per-request _meta protocolVersion/clientCapabilities together replace the old handshake."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server (opens long-lived POST-response stream)",
+   "params": "SubscriptionsListenRequest, method: 'subscriptions/listen' (schema.ts line 1315). Opt-in filter fields, exact names: toolsListChanged, promptsListChanged, resourcesListChanged, resourceSubscriptions (changelog.md Major #4; corroborated by schema.ts doc comments at lines 1249/1263/1746/1888).",
+   "result": "Server acknowledges, then streams notifications on the same response stream, each tagged with _meta key io.modelcontextprotocol/subscriptionId (schema.ts lines 133, 1334); SubscriptionsListenResult type at schema.ts ~1338-1383.",
+   "capability_gate": "Not stated as ClientCapabilities/ServerCapabilities-gated in the read material; gating is via the request's own opt-in filter fields.",
+   "notes": "Replaces HTTP GET SSE endpoint and resources/subscribe/unsubscribe (changelog.md Major #4, SEP-2575). notifications/progress and notifications/message continue on the originating request's own stream, NOT this stream. On stdio, a dedicated notification (schema.ts line 637) terminates a subscriptions/listen stream by referencing its request ID; servers MUST NOT use it to cancel any other request."
+  },
+  {
+   "name": "tasks/get",
+   "direction": "client->server",
+   "params": "Not enumerated in the assigned files; part of extension io.modelcontextprotocol/tasks (changelog.md Major #6), replaces blocking tasks/result with polling.",
+   "result": "Not enumerated in the assigned files.",
+   "capability_gate": "Extension-gated under io.modelcontextprotocol/tasks, not core ClientCapabilities/ServerCapabilities (changelog.md Major #6).",
+   "notes": "tasks/list is REMOVED. Servers may return task handles unsolicited, without per-request opt-in (changelog.md Major #6). Full schema requires the tasks extension spec page, not among the three assigned files — open question."
+  },
+  {
+   "name": "tasks/update",
+   "direction": "client->server",
+   "params": "New method for client-to-server input on a task (changelog.md Major #6); schema not in assigned files.",
+   "result": "Not documented in assigned files.",
+   "capability_gate": "Same io.modelcontextprotocol/tasks extension gate as tasks/get.",
+   "notes": "New in 2026-07-28; no 2025-11-25 equivalent. Flagged as open question requiring the tasks extension page."
+  },
+  {
+   "name": "initialize / notifications/initialized",
+   "direction": "REMOVED (previously client->server request / notification c->s)",
+   "params": "N/A — removed.",
+   "result": "N/A — removed.",
+   "capability_gate": "N/A",
+   "notes": "Removed per changelog.md Major #2 (SEP-2575). Replaced by mandatory per-request _meta keys io.modelcontextprotocol/protocolVersion (schema.ts line 76) and io.modelcontextprotocol/clientCapabilities (schema.ts line 98); clientInfo SHOULD be sent (schema.ts line 90); serverInfo SHOULD be returned (schema.ts line 157). Mismatch -> UnsupportedProtocolVersionError."
+  },
+  {
+   "name": "ping",
+   "direction": "REMOVED (was bidirectional request)",
+   "params": "N/A",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "Removed per changelog.md Major #5, SEP-2575."
+  },
+  {
+   "name": "logging/setLevel",
+   "direction": "REMOVED (was client->server request)",
+   "params": "N/A",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "Removed per changelog.md Major #5. Replaced by per-request _meta key io.modelcontextprotocol/logLevel (schema.ts line 110, type LoggingLevel). Servers MUST NOT emit notifications/message for requests that lacked this field."
+  },
+  {
+   "name": "notifications/roots/list_changed",
+   "direction": "REMOVED",
+   "params": "N/A",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "Removed per changelog.md Major #5, alongside deprecation of the whole Roots feature (SEP-2577)."
+  },
+  {
+   "name": "resources/subscribe, resources/unsubscribe",
+   "direction": "REMOVED (were client->server requests)",
+   "params": "N/A",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "Removed, replaced by subscriptions/listen's resourceSubscriptions opt-in filter (changelog.md Major #4)."
+  },
+  {
+   "name": "notifications/elicitation/complete",
+   "direction": "REMOVED (was notification s->c)",
+   "params": "N/A",
+   "result": "N/A",
+   "capability_gate": "N/A",
+   "notes": "Removed along with the elicitationId field of URL-mode elicitation requests, both introduced only in 2025-11-25 (changelog.md Minor #11). Superseded by MRTR retry semantics; servers correlate via their own id in requestState."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST implement server/discover to advertise supported protocol versions, capabilities, and identity.",
+   "cite": "changelog.md, Major change #3"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients MAY call server/discover before any other request for up-front version selection, or use it as a backward-compatibility probe on STDIO.",
+   "cite": "changelog.md, Major change #3"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD identify themselves on each request via _meta['io.modelcontextprotocol/clientInfo'].",
+   "cite": "changelog.md, Major change #2; schema.ts line 90"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD identify themselves in each result's _meta via 'io.modelcontextprotocol/serverInfo'.",
+   "cite": "changelog.md, Major change #2; schema.ts line 157"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every request carries protocol version and client capabilities in _meta ('io.modelcontextprotocol/protocolVersion', 'io.modelcontextprotocol/clientCapabilities'); a mismatch returns UnsupportedProtocolVersionError.",
+   "cite": "changelog.md, Major change #2; schema.ts lines 74-98"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients opt in to specific subscriptions/listen notification types via filter fields (toolsListChanged, promptsListChanged, resourcesListChanged, resourceSubscriptions); request-scoped notifications (notifications/progress, notifications/message) continue on the originating request's own response stream, not the subscriptions/listen stream.",
+   "cite": "changelog.md, Major change #4"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT emit notifications/message for requests that did not include 'io.modelcontextprotocol/logLevel' in _meta.",
+   "cite": "changelog.md, Major change #5"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The stdio notification used to terminate a subscriptions/listen stream (referencing that request's ID) MUST NOT be used to cancel any other request.",
+   "cite": "schema.ts line 637 (doc comment)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST treat results from earlier-protocol servers that omit the required resultType field as 'complete'.",
+   "cite": "changelog.md, Major change #8; schema.ts line 232"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On a broken response stream, the client MUST re-issue the in-flight request as a new request with a new request ID (SSE resumability/Last-Event-ID removed).",
+   "cite": "changelog.md, Major change #9"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD return tools from tools/list in a deterministic order to enable client-side caching and improve LLM prompt cache hit rates.",
+   "cite": "changelog.md, Minor change #3"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "Standard MCP request headers Mcp-Method and Mcp-Name are required on Streamable HTTP POST requests; custom headers may be supplied via tool-parameter annotation x-mcp-header.",
+   "cite": "changelog.md, Minor change #4 (SEP-2243); schema.ts line 1990"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Results from tools/list, prompts/list, resources/list, resources/read, and resources/templates/list MUST include ttlMs and cacheScope fields via the CacheableResult interface.",
+   "cite": "changelog.md, Minor change #5 (SEP-2549); schema.ts line 1081 and usages at lines 1133,1170,1229"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Authorization servers SHOULD include the iss parameter in authorization responses per RFC 9207.",
+   "cite": "changelog.md, Minor change #7 (SEP-2468)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST validate a present iss parameter against the recorded issuer before redeeming the authorization code.",
+   "cite": "changelog.md, Minor change #7 (SEP-2468)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST specify an appropriate application_type during Dynamic Client Registration to avoid OpenID Connect redirect URI conflicts.",
+   "cite": "changelog.md, Minor change #8 (SEP-837)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST key persisted OAuth client credentials by the issuer identifier.",
+   "cite": "changelog.md, Minor change #9 (SEP-2352)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT reuse persisted client credentials with a different authorization server.",
+   "cite": "changelog.md, Minor change #9 (SEP-2352)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST re-register (via DCR or CIMD) when the authorization server changes.",
+   "cite": "changelog.md, Minor change #9 (SEP-2352)"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "New implementations SHOULD NOT adopt a Deprecated feature (Roots, Sampling, Logging, Dynamic Client Registration, includeContext thisServer/allServers, HTTP+SSE transport).",
+   "cite": "deprecated.md, lines 14-16; feature-lifecycle.md Feature States table"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Existing implementations SHOULD migrate off a Deprecated feature before its earliest removal date.",
+   "cite": "deprecated.md lines 14-16; feature-lifecycle.md Feature States table"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "A Deprecated feature MAY be restored to Active by a superseding SEP; if deprecated again, the minimum window restarts from the new deprecation's revision.",
+   "cite": "feature-lifecycle.md, 'Feature States', lines 35-40"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "A deprecation SEP MUST specify a minimum deprecation window of at least twelve months, measured from the release of the revision in which the feature is first marked Deprecated (not from the SEP's Final date); earliest removal is the first Current revision released on/after the window elapses.",
+   "cite": "feature-lifecycle.md, 'Deprecating a Feature' item 4, lines 68-74"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Tier 1 SDKs must mark the corresponding API surface deprecated using the language's native mechanism in their next release after the deprecating revision becomes Current, referencing the deprecation SEP and earliest removal date where the mechanism permits.",
+   "cite": "feature-lifecycle.md, 'Tier 1 SDK Obligations', lines 108-112"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Tier 1 SDKs should emit a runtime warning when a deprecated feature is exercised (e.g. Python DeprecationWarning, Node.js process.emitWarning, or a configurable logger); no PowerShell-specific mechanism is named in the spec.",
+   "cite": "feature-lifecycle.md, 'Tier 1 SDK Obligations', lines 113-116"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "The twelve-month floor MAY be shortened for an active security risk (published advisory or documented in-the-wild exploit with no in-place mitigation), but the shortened window MUST still provide at least ninety days between Deprecated and earliest removal, and requires Core Maintainer approval.",
+   "cite": "feature-lifecycle.md, 'Expedited Removal', lines 135-143"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Removal from the specification does not oblige an SDK to drop a feature from releases; that timeline is governed by the SDK's own revision-support policy.",
+   "cite": "feature-lifecycle.md, 'SDKs' subsection, lines 44-46"
+  }
+ ],
+ "wire_details": [
+  "_meta key 'io.modelcontextprotocol/protocolVersion' (string) — required on every request (schema.ts line 76).",
+  "_meta key 'io.modelcontextprotocol/clientCapabilities' (ClientCapabilities) — required on every request (schema.ts line 98).",
+  "_meta key 'io.modelcontextprotocol/clientInfo' (Implementation, optional) — SHOULD be sent by clients on each request (schema.ts line 90).",
+  "_meta key 'io.modelcontextprotocol/serverInfo' (Implementation, optional) — SHOULD be sent by servers in each result's _meta (schema.ts line 157).",
+  "_meta key 'io.modelcontextprotocol/logLevel' (LoggingLevel, optional) — per-request log-level opt-in, replaces logging/setLevel (schema.ts line 110).",
+  "_meta key 'io.modelcontextprotocol/subscriptionId' (RequestId, optional on notifications) — tags notifications delivered on a subscriptions/listen stream with the JSON-RPC ID of the subscriptions/listen request that opened it (schema.ts lines 130-133, 1331-1334).",
+  "_meta keys for OpenTelemetry trace context propagation: 'traceparent', 'tracestate', 'baggage' (changelog.md Minor change #2, SEP-414).",
+  "HTTP headers required on Streamable HTTP POST requests: 'Mcp-Method', 'Mcp-Name' (changelog.md Minor change #4, SEP-2243).",
+  "Tool-parameter schema annotation 'x-mcp-header' — maps a tool parameter to a custom outgoing HTTP header (changelog.md Minor change #4; schema.ts line 1990).",
+  "'Mcp-Session-Id' header — REMOVED from Streamable HTTP transport along with protocol-level sessions (changelog.md Major change #1).",
+  "'Last-Event-ID' header and SSE event IDs — REMOVED (no resumability/redelivery) (changelog.md Major change #9).",
+  "Error code -32602 (Invalid Params, standard JSON-RPC) now used for 'resource not found', replacing the old dedicated code -32002 (changelog.md Minor change #6).",
+  "Error code allocation policy: -32000 to -32019 = implementation-defined, existing SDK usage grandfathered; -32020 to -32099 = reserved for the MCP specification (changelog.md Minor change #12).",
+  "HeaderMismatchError: JSON-RPC code renumbered -32001 -> -32020 (changelog.md Minor change #12; schema.ts HeaderMismatchError interface ~line 463).",
+  "MissingRequiredClientCapabilityError: code renumbered -32003 -> -32021; used when a request needs a client capability not declared in clientCapabilities; HTTP response status code must correspond appropriately per schema.ts prose (changelog.md Minor #12; schema.ts lines 348, 505-513).",
+  "UnsupportedProtocolVersionError: code renumbered -32004 -> -32022; returned on a protocol-version mismatch from the per-request _meta protocolVersion field (changelog.md Major #2, Minor #12; schema.ts lines 74, 479-503).",
+  "resultType enum values: 'complete' (ordinary results) and 'input_required' (MRTR interim results); required field on Result going forward, with omission-means-'complete' compatibility rule for older servers (changelog.md Major #8; schema.ts lines 213, 232-234).",
+  "CacheableResult interface fields: 'ttlMs' (number, freshness hint in milliseconds) and 'cacheScope' (enum: 'public' | 'private') — required on results of tools/list, prompts/list, resources/list, resources/read, resources/templates/list, and also used by DiscoverResult (changelog.md Minor #5; schema.ts line 1081, usages at 678, 1133, 1170, 1229).",
+  "Method name 'server/discover' — new RPC (schema.ts DiscoverRequest/DiscoverResult, lines ~657-978).",
+  "Method name 'subscriptions/listen' — new RPC opening a long-lived POST-response stream (SubscriptionsListenRequest schema.ts line 1315; SubscriptionsListenResult ~lines 1338-1383).",
+  "subscriptions/listen opt-in filter field names (exact, case-sensitive): 'toolsListChanged', 'promptsListChanged', 'resourcesListChanged', 'resourceSubscriptions' (changelog.md Major #4; schema.ts doc comments at lines 1249, 1263, 1746, 1888).",
+  "io.modelcontextprotocol/tasks — extension namespace replacing core-protocol experimental tasks; methods tasks/get and tasks/update; tasks/list and tasks/result REMOVED (changelog.md Major #6).",
+  "InputRequiredResult interface: carries 'inputRequests' field on the way out, answered via 'inputResponses' on the retried original request; may carry only 'requestState' with no inputRequests ('load shedding' example) (changelog.md Major #7; schema.ts lines 572-602).",
+  "'requestState' field — server's own correlation identifier across MRTR retries, replacing the removed 'elicitationId' (changelog.md Minor #11).",
+  "JSON Schema 2020-12: inputSchema/outputSchema loosened to allow any 2020-12 keyword; structuredContent loosened to allow any JSON value; adds $ref resolution requirements and composition-keyword resource bounds (changelog.md Minor #10, SEP-2106); exact keyword/bound list not present in changelog text — flagged as open question.",
+  "ClientCapabilities and ServerCapabilities gain a new 'extensions' field for optional extensions beyond core protocol (changelog.md Minor #1).",
+  "schema.ts deprecation marker convention: '@deprecated' JSDoc tag referencing the deprecation SEP and the revision the deprecation takes effect (feature-lifecycle.md 'Deprecating a Feature', lines 78-80) — the exact tag an SDK generator/linter should scan for.",
+  "Deprecated-feature earliest-removal dates (exact, from deprecated.md table): Roots, Sampling, Logging, Dynamic Client Registration — 'First revision released on or after 2027-07-28'; includeContext thisServer/allServers — 'Follows Sampling (SEP-2577)'; HTTP+SSE transport — 'Three months after SEP-2596 reaches Final'.",
+  "Deprecation-in-revision dates (exact, from deprecated.md table): Roots/Sampling/Logging/DCR = 2026-07-28; includeContext values = 2025-11-25 (reclassified 2026-07-28); HTTP+SSE transport = 2025-03-26 (reclassified 2026-07-28)."
+ ],
+ "sdk_implications": [
+  "The PowerShell SDK must not implement initialize/notifications/initialized as a handshake; connection setup becomes stateless. Every outgoing request (client) must attach _meta['io.modelcontextprotocol/protocolVersion'] and _meta['io.modelcontextprotocol/clientCapabilities'], and should attach 'io.modelcontextprotocol/clientInfo'. Server-side request handling must read these per-request instead of a cached session-negotiated capability set, since there is no Mcp-Session-Id/session object to hang state on.",
+  "Because list endpoints no longer vary per-connection, the SDK's list-result caching can be a single shared cache keyed by ttlMs/cacheScope from CacheableResult rather than per-connection/per-session cache; implement cacheScope 'public' vs 'private' handling so a shared/intermediary cache never reuses 'private' results across identities.",
+  "server/discover must be implemented on the server side unconditionally (spec MUST) as a mandatory dispatch route, distinct from optional/opt-in RPCs.",
+  "Do not implement Set-McpLogLevel-style global state via logging/setLevel; expose a parameter on each outgoing request cmdlet to set _meta['io.modelcontextprotocol/logLevel'], and on the server side gate notifications/message emission strictly per-request on that field's presence.",
+  "subscriptions/listen requires the SDK's transport layer to support a long-lived POST with a streaming response distinct from ordinary request/response streams; the stream reader must route notifications/progress and notifications/message to the originating request's response stream, and only listChanged/resource-changed notifications (tagged with matching io.modelcontextprotocol/subscriptionId) to the subscriptions/listen stream, to avoid dropping or misrouting notifications.",
+  "On stream failure, do not attempt resumption via Last-Event-ID (removed); client retry logic must generate a new JSON-RPC request id and resend the full request — no per-stream cursor/offset state should be persisted across a broken connection.",
+  "All Result-producing code paths (server side) must set resultType: 'complete' by default; handlers returning InputRequiredResult must supply inputRequests; client-side result deserialization must treat a missing resultType (from an older/non-compliant server) as 'complete', implemented explicitly rather than left to strict schema validation.",
+  "Implement MRTR client-side retry: on InputRequiredResult, collect responses for inputRequests, then reissue the ORIGINAL request with an added inputResponses field — a materially different control-flow shape than the old bidirectional roots/list, sampling/createMessage, elicitation/create pattern, which should not be built as SDK-native server-initiated calls.",
+  "Do not build new SDK-native support for Roots, Sampling, or Logging as first-class features; if included for back-compat with older servers/clients, mark the corresponding PowerShell classes/cmdlets with a deprecation notice (custom attribute plus Write-Warning at invocation, since PowerShell has no spec-named convention) and document earliest removal (first revision on/after 2027-07-28).",
+  "Do not implement Dynamic Client Registration (RFC7591) as the primary/only client-registration path; implement Client ID Metadata Documents as preferred, keep DCR only as a documented-deprecated fallback.",
+  "OAuth code must key stored client credentials by issuer identifier, reject reuse across authorization servers, force re-registration on issuer change, validate a returned 'iss' against the recorded issuer before code exchange, and set an appropriate 'application_type' during any DCR call.",
+  "Error-handling code must use the renumbered codes exactly: HeaderMismatchError -32020, MissingRequiredClientCapabilityError -32021, UnsupportedProtocolVersionError -32022, and -32602 (not -32002) for resource-not-found; any hardcoded old codes must be corrected.",
+  "HTTP transport implementation must send/require 'Mcp-Method' and 'Mcp-Name' headers on POST, and support mapping tool-parameter schema entries annotated 'x-mcp-header' to outgoing custom headers.",
+  "No Mcp-Session-Id header should be implemented; cross-call state a server needs must be modeled as explicit opaque handles passed as ordinary tool arguments — the SDK's tool-parameter typing should support this generically rather than via a session object.",
+  "tools/list server-side implementation should return a deterministic order (SHOULD) — e.g. by registration order or name — rather than relying on .NET/PowerShell hashtable/dictionary enumeration order, which is not guaranteed stable.",
+  "The SDK's method/type registry should carry per-feature lifecycle metadata (Active/Deprecated/Removed, deprecation SEP id, earliest removal date) so a build/lint step can emit PowerShell's deprecation signal; feature-lifecycle.md names Java/.NET/TypeScript/Go conventions but not PowerShell, so the team must choose one (e.g. custom attribute + Write-Warning).",
+  "tasks/get, tasks/update, and io.modelcontextprotocol/tasks are not part of the core protocol; implement as an optional/pluggable extension module, matching the spec's own extension separation via the new ClientCapabilities/ServerCapabilities.extensions field, rather than baking into the core client/server surface.",
+  "The JSON Schema validation layer must accept any JSON Schema 2020-12 keyword in inputSchema/outputSchema and any JSON value in structuredContent, with $ref resolution support, rather than a fixed narrow keyword subset."
+ ],
+ "legacy_delta": [
+  "2025-11-25 had protocol-level sessions (Mcp-Session-Id) and an initialize/notifications/initialized handshake; both removed in 2026-07-28 (changelog.md Major #1, #2).",
+  "2025-11-25 had resources/subscribe, resources/unsubscribe, and an HTTP GET SSE stream for server-initiated notifications; 2026-07-28 replaces all with subscriptions/listen (changelog.md Major #4).",
+  "2025-11-25 had ping, logging/setLevel, notifications/roots/list_changed as live methods; all removed in 2026-07-28, log level now set per-request via _meta (changelog.md Major #5).",
+  "2025-11-25 introduced experimental tasks with tasks/result (blocking) and tasks/list; 2026-07-28 moves tasks to an official extension io.modelcontextprotocol/tasks with tasks/get (polling) + tasks/update, removes tasks/list, allows unsolicited task handles (changelog.md Major #6).",
+  "2025-11-25 used server-initiated requests (roots/list, sampling/createMessage, elicitation/create) sent mid-flight; 2026-07-28 replaces this with the MRTR pattern: InputRequiredResult + retry with inputResponses (changelog.md Major #7).",
+  "2025-11-25 results did not require resultType; 2026-07-28 makes resultType required ('complete'|'input_required'), with the compat rule that an absent field from an older server MUST be treated as 'complete' (changelog.md Major #8).",
+  "2025-11-25 supported SSE resumability via Last-Event-ID and event IDs; 2026-07-28 removes this — a broken stream requires the client to reissue the request with a new request ID (changelog.md Major #9).",
+  "2025-11-25 introduced notifications/elicitation/complete and elicitationId for URL-mode elicitation; both removed in 2026-07-28 since MRTR retry supersedes them; servers now use requestState for their own correlation id (changelog.md Minor #11).",
+  "Resource-not-found error code changes from -32002 to -32602 (Invalid Params) between the two revisions (changelog.md Minor #6).",
+  "Error code renumbering: HeaderMismatch -32001->-32020, MissingRequiredClientCapability -32003->-32021, UnsupportedProtocolVersion -32004->-32022, under a new error-code allocation policy splitting -32000..-32019 (implementation-defined, grandfathered) from -32020..-32099 (reserved for MCP spec) (changelog.md Minor #12).",
+  "includeContext values 'thisServer'/'allServers' were informally 'soft-deprecated' (no formal registry) since 2025-11-25; 2026-07-28 formally reclassifies them as Deprecated under the new lifecycle policy via SEP-2596 (deprecated.md row; changelog.md Deprecated #3).",
+  "HTTP+SSE transport was deprecated informally since protocol version 2025-03-26; 2026-07-28 formally reclassifies it as Deprecated under the lifecycle policy, with earliest removal 'three months after SEP-2596 reaches Final' rather than the standard 12-month window (deprecated.md row; changelog.md Deprecated #2).",
+  "Roots, Sampling, Logging, and Dynamic Client Registration are newly Deprecated in 2026-07-28 (did not exist as deprecated states before) (deprecated.md; changelog.md Deprecated #1, #4).",
+  "The 12-month minimum deprecation window and the three-state (Active/Deprecated/Removed) feature lifecycle policy itself is new in 2026-07-28 via SEP-2596 (feature-lifecycle.md; changelog.md Governance #1)."
+ ],
+ "open_questions": [
+  "Exact field-by-field schema of DiscoverResult beyond CacheableResult inheritance (supported protocol versions list format, capabilities field name/shape, identity field name) was only partially visible in the grep excerpt (schema.ts ~lines 640-720); needs a full targeted read of that schema.ts range, not covered by the three assigned files.",
+  "Exact request/result schema for tasks/get and tasks/update (fields, error modes, how unsolicited task handles are represented in an ordinary result) is not in any of the three assigned files; needs the tasks extension spec page (not provided in this task's file list).",
+  "Exact SubscriptionsListenResult/acknowledgement schema (what the initial ack payload contains before notifications start streaming) needs a full read of schema.ts lines ~1338-1420, only partially captured here.",
+  "The specific new JSON Schema 2020-12 keywords and the 'composition-keyword resource bounds' introduced by SEP-2106 (changelog.md Minor #10) are not enumerated in the changelog text — needs the dedicated schema/tools spec page.",
+  "Whether PowerShell has an established community convention for marking a cmdlet/parameter deprecated (equivalent to Python's DeprecationWarning) is outside the spec's scope (feature-lifecycle.md only names Java/.NET/TypeScript/Go) and must be decided by SDK design, not derived from the spec.",
+  "Full list of 'Other schema changes' beyond the single numeric-type fix noted (changelog.md 'Other schema changes' #1) may exist in the linked GitHub compare view (2025-11-25...2026-07-28), which was not fetched (github.com HTML is blocked per environment rules).",
+  "deprecated.md states 'No features have been removed under this policy yet' as of 2026-07-28 — confirms zero Removed-state features exist in this revision, but SDK planning should still build the Removed-state handling path for future revisions."
+ ]
+}

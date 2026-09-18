@@ -1,0 +1,314 @@
+{
+ "source": "Repository/module engineering for a PowerShell MCP SDK. Spec inputs: pages/specification__2026-07-28__basic__transports__stdio.md, pages/specification__2026-07-28__basic__transports__index.md, pages/specification__2026-07-28__basic__transports__streamable-http.md, conformance_README.md, conformance_SDK_INTEGRATION.md, pages/community__sdk-tiers.md. Upstream facts verified via raw.githubusercontent.com on 2026-09-16: MicrosoftDocs/PowerShell-Docs PowerShell-Support-Lifecycle.md, What-s-New-in-PowerShell-75.md / -76.md, about_Classes.md (7.4), about_Using.md; PowerShell/PowerShell CHANGELOG/7.4|7.5|7.6.md, tools/install-powershell.ps1|.sh; pester/Pester src/Pester.psd1 (6.2.0) and pester/docs migrations/v5-to-v6.mdx; PowerShell/PSScriptAnalyzer CHANGELOG (1.25.0); PowerShell/PSResourceGet psd1 (1.3.0, Publish-PSResource/Compress-PSResource); PowerShell/platyPS README (Microsoft.PowerShell.PlatyPS). Everything else is PowerShell/.NET expert knowledge and is flagged 'verify' where uncertain.",
+ "summary": "Build the SDK as a script-only (no compiled DLL) PowerShell module with an explicit manifest (PowerShellVersion 7.4, CompatiblePSEditions Core, explicit FunctionsToExport, PSData tags/URIs/Prerelease), sources in src/{Enums,Classes,Private,Public} compiled by ModuleBuilder into one psm1 via an Invoke-Build script; publish to PSGallery with the in-box Publish-PSResource using a NuGet API key from GitHub secrets on tag push. Minimum version decision: PowerShell 7.4 today (LTS, .NET 8, [NoRunspaceAffinity], PSResourceGet in-box, Pester 6 floor), with a planned bump to 7.6 LTS (.NET 10, EOS 14-Nov-2028) after 7.4/7.5 reach end of support on 10-Nov-2026; Windows PowerShell 5.1 is excluded (Windows-only, .NET Framework, best-effort support, no System.Text.Json, wrong console encoding defaults, no MCP clients on macOS/Linux). Type model: PowerShell classes only inside the engine (ordered files, exported via type accelerators, [NoRunspaceAffinity]); public surface is functions with approved verbs and 'Mcp' noun prefix returning PSCustomObjects with PSTypeName plus ps1xml formats; wire JSON is built from ordered hashtables/System.Text.Json, never by serializing classes, so optional fields are omitted rather than null. Testing: Pester 6 (v5 syntax still valid) with New-PesterConfiguration, JaCoCo coverage, NUnit/JUnit results, integration tests that spawn `pwsh -NoProfile -NonInteractive -File` and the official conformance harness (client mode over the appended URL; server mode over Streamable HTTP only). CI matrix windows/ubuntu/macos x pwsh 7.4/7.6 (7.5 until EOS) with pinned pwsh installs. The CLI entry point is a user-owned server.ps1 launched by clients as `pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <abs path>`, with the transport bound to raw UTF-8 (no BOM) stdio streams and all diagnostics on stderr.",
+ "methods": [
+  {
+   "name": "stdio transport process contract (not an RPC method; the shell-level 'method' an MCP client invokes)",
+   "direction": "client->server",
+   "params": "Process launch: command = absolute path to pwsh (Windows: C:\\Program Files\\PowerShell\\7\\pwsh.exe; macOS Homebrew: /opt/homebrew/bin/pwsh or /usr/local/bin/pwsh; Linux: /usr/bin/pwsh or /snap/bin/pwsh); args = ['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','<abs>/server.ps1', ...script params]; env inherited; stdin = newline-delimited JSON-RPC requests/notifications only (stdio.md 'Sending Messages').",
+   "result": "stdout = newline-delimited JSON-RPC responses and notifications only, never requests (stdio.md 'Receiving Messages'); stderr = free-form UTF-8 logs (stdio.md, MAY); process exits promptly on stdin EOF (stdio.md 'Shutdown', SHOULD); exit code 0 on clean EOF, non-zero on fatal startup error (SDK convention, not spec).",
+   "capability_gate": "none (transport-level)",
+   "notes": "Newline framing reused verbatim for custom byte-stream transports (transports index 'Custom Transports', SHOULD)."
+  },
+  {
+   "name": "conformance client harness contract",
+   "direction": "client->server",
+   "params": "Harness runs `--command \"pwsh -NoProfile -NonInteractive -File tests/conformance/client.ps1\"` and appends the server URL as the LAST argument; env MCP_CONFORMANCE_SCENARIO (string), MCP_CONFORMANCE_CONTEXT (JSON object, e.g. OAuth creds), MCP_CONFORMANCE_PROTOCOL_VERSION (set when --spec-version passed).",
+   "result": "results/<scenario>-<timestamp>/{checks.json,stdout.txt,stderr.txt}; synthetic checks wire-schema-valid and wire-schema-harness-error; exit code per expected-failures table (fail+baselined=0, fail+unbaselined=1, pass+baselined=1 stale, pass=0).",
+   "capability_gate": "n/a",
+   "notes": "conformance_README.md 'Client Testing', 'Test Results', 'Wire-schema checks'; conformance_SDK_INTEGRATION.md 'Exit Code Behavior'. Suites: all, core, extensions, backcompat, auth, metadata, draft, sep-835."
+  },
+  {
+   "name": "conformance server harness contract",
+   "direction": "client->server",
+   "params": "`--url http://localhost:<port>/mcp` against an ALREADY RUNNING server; suites active (default), all, draft, pending; --spec-version 2026-07-28; --expected-failures conformance-baseline.yml (YAML with server:/client: lists).",
+   "result": "results/server-<scenario>-<timestamp>/checks.json",
+   "capability_gate": "n/a",
+   "notes": "Server mode only exercises Streamable HTTP (URL-based); stdio servers must be covered by the SDK's own integration tests. GitHub Action modelcontextprotocol/conformance@v0.1.10 with inputs mode,url,command,expected-failures,suite,scenario,timeout(30000),verbose,node-version(20) (SDK_INTEGRATION.md 'Action Inputs'; pin a newer tag if available, verify)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Write nothing to stdout except valid MCP messages; each message one line, no embedded newlines; server never writes JSON-RPC requests to stdout. In pwsh terms: no Write-Host/Write-Output/Out-Default/progress/warning output may reach the host while the stdio transport owns stdout; the launcher must use -NoProfile so no profile (oh-my-posh, banners) prints to stdout.",
+   "cite": "pages/specification__2026-07-28__basic__transports__stdio.md, intro bullets + 'Receiving Messages'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Client SDK (Connect-McpServer over stdio) writes only requests/notifications to the child's stdin, never responses; must correlate subscription notifications by _meta 'io.modelcontextprotocol/subscriptionId'.",
+   "cite": "stdio.md 'Sending Messages', 'Receiving Messages'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "JSON-RPC messages are UTF-8: open stdin/stdout via [Console]::OpenStandardInput()/OpenStandardOutput() wrapped in StreamReader/StreamWriter with [System.Text.UTF8Encoding]::new($false) (no BOM); never rely on [Console]::InputEncoding/OutputEncoding defaults (OEM code page on Windows).",
+   "cite": "pages/specification__2026-07-28__basic__transports__index.md 'Messages' (UTF-8 MUST); encoding behaviour = .NET Console knowledge, verify on Windows"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Exit promptly when stdin returns EOF (ReadLine returns $null); treat this as the primary graceful shutdown; the launcher script must return so pwsh exits with code 0.",
+   "cite": "stdio.md 'Shutdown'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Client shutdown order: close child stdin (Process.StandardInput.Close()), WaitForExit(timeout), then Kill(entireProcessTree:$true) (.NET Core 3.0+ overload). On unexpected exit, restart the child and re-establish subscriptions/listen streams.",
+   "cite": "stdio.md 'Shutdown', 'Unexpected Termination'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send any further messages for a cancelled request; stop work as soon as practical (SHOULD).",
+   "cite": "stdio.md 'Cancellation'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Log anything to stderr; clients SHOULD NOT treat stderr as an error signal. SDK routes Write-Verbose/Warning/Debug/Information and unhandled exceptions to stderr (and optionally to notifications/message).",
+   "cite": "stdio.md intro bullets"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Any custom byte-stream transport (Unix domain socket, TCP, named pipe) reuses the newline-delimited framing and message rules of stdio.",
+   "cite": "transports index 'Custom Transports'; stdio.md intro"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Manifest: PowerShellVersion = '7.4', CompatiblePSEditions = @('Core'), RootModule = 'Mcp.psm1', explicit FunctionsToExport list (no wildcards), CmdletsToExport/AliasesToExport/VariablesToExport = @() unless used; GUID fixed forever; ModuleVersion 3-part SemVer core; PrivateData.PSData = @{Tags; LicenseUri; ProjectUri; IconUri; ReleaseNotes; Prerelease; RequireLicenseAcceptance=$false; ExternalModuleDependencies=@()}. PSGallery rejects/flags wildcard exports (PSScriptAnalyzer PSUseToExportFieldsInManifest) and needs PSData for gallery metadata.",
+   "cite": "Expert knowledge (New-ModuleManifest / Test-ModuleManifest / Gallery publish validation); verify exact Gallery validation messages"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Choose PowerShell 7.4 as floor now: 7.2 LTS reached end of support 08-Nov-2024, 7.3 on 08-May-2024; 7.4 LTS (16-Nov-2023, .NET 8) and 7.5 (23-Jan-2025, .NET 9) both end 10-Nov-2026; 7.6 LTS (18-Mar-2026, .NET 10) ends 14-Nov-2028. Plan the floor bump to 7.6 in the release after 10-Nov-2026 (major or documented minor per breaking-change policy).",
+   "cite": "MicrosoftDocs/PowerShell-Docs PowerShell-Support-Lifecycle.md table (verified 2026-09-16)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Support Windows PowerShell 5.1: it is Windows-only, .NET Framework 4.x, supported only on a best-effort basis with no feature development, lacks System.Text.Json/$IsWindows/-AsHashtable/ternary/null-coalescing/pipeline-chain operators, default file encoding is ANSI/UTF-16, and MCP clients on macOS/Linux cannot spawn it. CompatiblePSEditions='Core' + PowerShellVersion='7.4' make Import-Module fail fast with a clear message on 5.1.",
+   "cite": "PowerShell-Support-Lifecycle.md line 45 ('Support for Windows PowerShell 5.1 ... best-effort'); rest expert knowledge"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Compile src/{Enums,Classes,Private,Public} into a single psm1 with ModuleBuilder (Build-Module -SourcePath src/Mcp.psd1 -OutputDirectory ../output -SemVer $ver, config in src/build.psd1: SourceDirectories, PublicFilter, CopyPaths (en-US, *.ps1xml, bin), Prefix/Suffix). Reasons: classes across dot-sourced files are invisible to each other at parse time; import time drops (one file vs N dot-sources scanned by AMSI/Defender); FunctionsToExport is regenerated from Public/.",
+   "cite": "Expert knowledge; PoshCode/ModuleBuilder README (verify current parameter names, module is 3.x)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Order class files deterministically (numeric prefix 001-Enums.ps1, 010-JsonRpc.ps1, 020-Session.ps1 ...): a derived class or a class used as a property/parameter type must be defined earlier in the concatenated psm1, and enums before classes.",
+   "cite": "Expert knowledge (parser resolves class types in definition order); verify with a build smoke test"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Export engine classes that users legitimately need by name through the TypeAccelerators workaround in a Suffix file ([psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')::Add(name,type)) and remove them in $ExecutionContext.SessionState.Module.OnRemove; guard Add with Get to survive Import-Module -Force. Do not require callers to use `using module` for normal use.",
+   "cite": "about_Classes.md 'Limitations' -> 'PowerShell classes defined in a module aren't automatically imported. Workaround: Add the defined types to the list of type accelerators in the root module.'"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Mark engine classes that may be touched from other runspaces/thread jobs with [NoRunspaceAffinity()] (7.4+); otherwise method calls marshal back to the creating runspace and can deadlock or corrupt state.",
+   "cite": "about_Classes.md 'Limitations': 'By default, PowerShell classes aren't safe to use in parallel execution across runspaces ... Workaround: Add the NoRunspaceAffinity attribute'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Public API = advanced functions with approved verbs (Get-Verb) and noun prefix 'Mcp' (New-McpServer, Register-McpTool, Register-McpResource, Register-McpPrompt, Start-McpServer, Connect-McpServer, Disconnect-McpServer, Get-McpTool, Invoke-McpTool, Get-McpResource, Read-McpResource, Get-McpPrompt, Send-McpNotification, Get-McpLauncherCommand). Never use unapproved verbs (PSSA PSUseApprovedVerbs); return PSCustomObjects with PSTypeName 'Mcp.<Noun>' and ship Mcp.Format.ps1xml / Mcp.Types.ps1xml via FormatsToProcess/TypesToProcess.",
+   "cite": "Expert knowledge; PSScriptAnalyzer rule PSUseApprovedVerbs; Get-Verb"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Never serialize class instances or PSCustomObjects straight to the wire with ConvertTo-Json: it emits null for unset optional properties (spec optional fields must be omitted; wire-schema-valid check validates every message against the JSON schema), needs -Depth (default 2, max 100), and converts date-like strings on the way in (ConvertFrom-Json). Build wire objects as [ordered] hashtables that omit absent keys, or use System.Text.Json (JsonNode/JsonSerializer with DefaultIgnoreCondition=WhenWritingNull) shipped in-box (8.0 on 7.4, 9.0 on 7.5, 10.0 on 7.6); never bundle a System.Text.Json.dll (assembly conflict with the host).",
+   "cite": "conformance_README.md 'Wire-schema checks'; ConvertTo-Json/ConvertFrom-Json behaviour = expert knowledge (verify null-handling against 2026-07-28_schema.json)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Define a -ProgressAction parameter on any public function: it is an automatic common parameter since 7.4 and collides.",
+   "cite": "Expert knowledge (PowerShell 7.4 release notes); verify"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Parameter design: [CmdletBinding()] everywhere, [OutputType()] declared, ValueFromPipeline on the primary object parameter (Get-McpTool | Invoke-McpTool), ValueFromPipelineByPropertyName for Name/Uri, -Session parameter defaulting to a module-scoped default session, SupportsShouldProcess on Start-/Stop-/Remove-/Publish- style functions (PSSA PSUseShouldProcessForStateChangingFunctions), -PassThru on registration functions, singular nouns, -Path/-LiteralPath pairs, ValidateNotNullOrEmpty, ArgumentCompleter for tool/resource names.",
+   "cite": "Expert knowledge (Cmdlet Development Guidelines); PSScriptAnalyzer rules"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Use comment-based help in every public function as the source of truth (works without a build step) and generate MAML (en-US/Mcp-help.xml) plus an about_Mcp.help.txt with Microsoft.PowerShell.PlatyPS at build time for Gallery/Update-Help consumers; PSSA PSProvideCommentHelp enforces presence.",
+   "cite": "PowerShell/platyPS README ('Microsoft.PowerShell.PlatyPS ... current supported version'); verify cmdlet names New-MarkdownCommandHelp / Export-MamlCommandHelp / Update-MarkdownCommandHelp / Test-MarkdownCommandHelp"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Run PSScriptAnalyzer (1.25.0 current) in CI with a checked-in PSScriptAnalyzerSettings.psd1 and -EnableExit; PSGallery also runs PSSA on publish and surfaces findings.",
+   "cite": "PowerShell/PSScriptAnalyzer CHANGELOG (1.25.0 verified); Gallery behaviour expert knowledge"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Add custom PSSA rules (CustomRulePath, functions taking [System.Management.Automation.Language.ScriptBlockAst] and emitting Microsoft.Windows.PowerShell.ScriptAnalyzer.Generic.DiagnosticRecord) that forbid Write-Host, [Console]::Write*, Write-Output/Out-* and $Host.UI in src/Private/Transport* and src/Classes, so nothing but the transport writer touches stdout.",
+   "cite": "Expert knowledge of PSSA custom rule contract; verify DiagnosticRecord constructor signature"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Testing on Pester 6.x (current 6.2.0; targets Windows PowerShell 5.1 and PowerShell 7.4+; v5 `Should -Be` syntax still valid). Breaking vs v5 to honour: discovery/run per file, hidden files discovered, empty/$null -ForEach throws, duplicate setup/teardown blocks throw, `<...>` in test names evaluated as expressions, Assert-MockCalled/Assert-VerifiableMock replaced by Should -Invoke / Should -InvokeVerifiable.",
+   "cite": "pester/Pester src/Pester.psd1 (ModuleVersion 6.2.0); pester/docs migrations/v5-to-v6.mdx 'Breaking changes'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Drive Pester through New-PesterConfiguration: Run.Path, Run.PassThru, Run.Exit, Output.Verbosity='Detailed', TestResult.Enabled/OutputFormat ('NUnitXml' or 'JUnitXml')/OutputPath, CodeCoverage.Enabled/Path (built psm1)/OutputFormat 'JaCoCo'/OutputPath/CoveragePercentTarget/UseBreakpoints=$false (profiler-based); map coverage back to src with ModuleBuilder Convert-CodeCoverage; upload JaCoCo XML to codecov/codecov-action and results via actions/upload-artifact.",
+   "cite": "Expert knowledge (Pester 5.x/6 configuration object); verify exact option names on 6.2"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Unit tests import the BUILT module (output/Mcp/<ver>/Mcp.psd1) and use InModuleScope Mcp / Mock -ModuleName Mcp for privates; use TestDrive:/$TestDrive for files (TestRegistry: is Windows-only); integration tests spawn the real launcher via System.Diagnostics.Process (UseShellExecute=$false, RedirectStandardInput/Output/Error, StandardInputEncoding/StandardOutputEncoding=UTF8 no BOM, CreateNoWindow) and assert framing, EOF shutdown, stderr separation, and exit codes.",
+   "cite": "Expert knowledge"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Wire the official conformance harness into CI: client mode with --command 'pwsh -NoProfile -NonInteractive -File tests/conformance/client.ps1' (URL appended as last arg; read MCP_CONFORMANCE_SCENARIO / MCP_CONFORMANCE_CONTEXT / MCP_CONFORMANCE_PROTOCOL_VERSION), server mode by starting the Streamable HTTP server first and passing --url; keep conformance-baseline.yml (server:/client: lists) as expected failures. Tier 1 needs 100% and Tier 2 80% of applicable required tests; failing for 4 weeks relegates.",
+   "cite": "conformance_SDK_INTEGRATION.md 'Client Testing', 'Server Testing', 'Expected Failures'; community__sdk-tiers.md 'Tier Requirements', 'Tier Relegation'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Meet the tier documentation requirements from day one: published dependency-update policy, published roadmap, breaking-change policy ('Clear Versioning'), issue labels bug/enhancement/question, needs confirmation/needs repro/ready for work/good first issue/help wanted, P0-P3, and a stable release >= 1.0.0 without prerelease tag before claiming Tier 2.",
+   "cite": "community__sdk-tiers.md 'Tier Requirements', 'Issue Triage Labels'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "CI matrix: os in [windows-latest, ubuntu-latest, macos-latest] x pwsh in [7.4.x, 7.6.x] (+7.5.x until 10-Nov-2026); install pinned versions rather than trusting the runner image (download github.com/PowerShell/PowerShell/releases/download/v<ver>/powershell-<ver>-{win-x64.zip,linux-x64.tar.gz,osx-arm64.tar.gz} and prepend to $GITHUB_PATH, or `dotnet tool install --global PowerShell --version <ver>` after actions/setup-dotnet with the matching runtime 8.0/9.0/10.0); then use `shell: pwsh` steps. Add one Windows PowerShell 5.1 job asserting Import-Module fails with the expected message. Pin all actions by commit SHA.",
+   "cite": "Expert knowledge; tools/install-powershell.ps1 exposes only -Preview/-Daily/-Destination/-AddToPath (verified) so it cannot pin a version"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Release: SemVer; git tag v<Major.Minor.Patch>[-<pre>]; CHANGELOG.md in Keep-a-Changelog form copied into PSData.ReleaseNotes; release.yml on tag push in a protected 'psgallery' environment runs build+tests then Publish-PSResource -Path output/Mcp/<ver> -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY (secret) and attaches the .nupkg from Compress-PSResource to the GitHub Release. Gallery versions are immutable (unlist only) so never republish a version; SDK version is independent of protocol revision 2026-07-28 (document supported revisions in README and DiscoverResult).",
+   "cite": "PowerShell/PSResourceGet psd1 CmdletsToExport includes Publish-PSResource and Compress-PSResource (verified); parameter names -ApiKey/-DestinationPath/-SkipDependenciesCheck/-SkipModuleManifestValidate = expert knowledge, verify"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "Code-sign: Set-AuthenticodeSignature exists only on Windows in pwsh 7; sign on the windows-latest release job (Azure Trusted Signing or a stored PFX) and produce a catalog with New-FileCatalog; not required by PSGallery.",
+   "cite": "Expert knowledge; verify Set-AuthenticodeSignature availability on non-Windows (it is absent)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Dependency policy: zero runtime RequiredModules (only in-box modules: Microsoft.PowerShell.Utility, Microsoft.PowerShell.ThreadJob/ThreadJob if used); build/test dependencies pinned with version ranges in build.ps1 -Bootstrap via Install-PSResource (Pester '[6.2.0,7.0)', PSScriptAnalyzer '[1.25.0,2.0)', ModuleBuilder, Microsoft.PowerShell.PlatyPS, InvokeBuild); monthly manual review since Dependabot/Renovate do not track PSGallery (verify). Document this as the published dependency policy required for Tier 1/2.",
+   "cite": "community__sdk-tiers.md 'Dependency Policy'; PowerShell 7.6 What's New 'Breaking Changes' (ThreadJob module renamed Microsoft.PowerShell.ThreadJob)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Launcher contract for MCP clients: `pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <abs>/server.ps1 [params]`. -NoProfile prevents profile output on stdout; -NonInteractive turns prompts into errors instead of hangs; -ExecutionPolicy Bypass is needed on Windows clients whose default policy is Restricted (ignored on Linux/macOS, overridden by MachinePolicy GPO); -File (not -Command) avoids shell quoting differences and propagates the script's exit code. Provide Get-McpLauncherCommand to emit the client JSON snippet with absolute pwsh and script paths (GUI clients on macOS often have a minimal PATH).",
+   "cite": "Expert knowledge (about_pwsh, about_Execution_Policies); 7.6 What's New: 'Fix the dot-sourcing behavior of pwsh -file for advanced-function scripts (#27762)' -> verify launcher with [CmdletBinding()] param() on 7.4/7.5"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Inside the launcher/engine set $ErrorActionPreference='Stop', $ProgressPreference='SilentlyContinue', $PSStyle.OutputRendering='PlainText' (7.2+) for stderr logs, $InformationPreference as configured, and catch-all trap writing to [Console]::Error; also `#Requires -Version 7.4` and `#Requires -Modules @{ModuleName='Mcp';ModuleVersion='x.y.z'}` at the top of server.ps1.",
+   "cite": "Expert knowledge"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Cross-platform hygiene: .gitattributes `* text=auto eol=lf`, .editorconfig (utf-8, no BOM, LF, 4 spaces); use $IsWindows/$IsLinux/$IsMacOS, Join-Path/[System.IO.Path]::Combine, [System.IO.Path]::GetTempPath() instead of $env:TEMP, case-sensitive file names on Linux, $HOME not $env:USERPROFILE, avoid Windows-only cmdlets (Get-CimInstance, registry provider, Set-AuthenticodeSignature) in src/.",
+   "cite": "Expert knowledge; 7.6 What's New: Join-Path -ChildPath now string[] (breaking, verified)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Run handlers on the single engine pipeline thread by default (scriptblocks supplied by users are bound to the caller's runspace and cannot be invoked from other runspaces without detaching via $sb.Ast.GetScriptBlock(), which loses closures); offer parallel execution only as an explicit opt-in built on a runspace pool with [NoRunspaceAffinity] state and ForEach-Object -Parallel semantics.",
+   "cite": "about_Classes.md 'Limitations' (runspace affinity); scriptblock affinity = expert knowledge"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "Ship no compiled assembly in v1. If perf later demands C#, prefer a prebuilt net8.0 DLL under lib/ referenced by RequiredAssemblies (built by a dotnet job in CI) over Add-Type at import (Roslyn compile costs 1-3 s per session and locks reload); assemblies can never be unloaded from a session.",
+   "cite": "Expert knowledge"
+  }
+ ],
+ "wire_details": [
+  "pwsh CLI switches for launch: -NoLogo, -NoProfile, -NonInteractive, -ExecutionPolicy Bypass (Windows-only effect), -File <path> [args] (everything after -File is script args), -Command (avoid), -InputFormat Text|XML, -OutputFormat Text|XML, -WorkingDirectory <dir> (7.x), -ConfigurationFile, -SettingsFile, -MTA/-STA (Windows).",
+  "pwsh install locations: Windows MSI 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' (Store/MSIX differs), macOS Homebrew cask 'powershell' -> /opt/homebrew/bin/pwsh (arm64) or /usr/local/bin/pwsh (x64), Linux /usr/bin/pwsh (apt/rpm) or /snap/bin/pwsh; GitHub release asset names powershell-<ver>-win-x64.zip, powershell-<ver>-linux-x64.tar.gz, powershell-<ver>-osx-arm64.tar.gz / osx-x64.tar.gz.",
+  "Support lifecycle (verified): 7.6 LTS 18-Mar-2026 -> 14-Nov-2028 (.NET 10.0, current 7.6.6 per docs, 7.6.4 in CHANGELOG); 7.5 23-Jan-2025 -> 10-Nov-2026 (.NET 9.0, 7.5.11); 7.4 LTS 16-Nov-2023 -> 10-Nov-2026 (.NET 8.0, 7.4.20); 7.7 preview on .NET 11 (global.json sdk 11.0.100-rc.1); 7.2 LTS EOS 08-Nov-2024; 7.3 EOS 08-May-2024.",
+  "stdio streams from PowerShell: [Console]::OpenStandardInput() / OpenStandardOutput() / OpenStandardError() -> System.IO.Stream; [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::new($false), $false) ; [System.IO.StreamWriter]::new($stream, [System.Text.UTF8Encoding]::new($false)) with .AutoFlush=$true and .NewLine=\"`n\" (write \"`n\" explicitly, never [Environment]::NewLine which is \"`r`n\" on Windows); ReadLine() accepts \\n and \\r\\n; ReadLineAsync() returns Task[string] that can be polled with .Wait(ms) to keep the loop cancellable without extra runspaces.",
+  "Console encoding knobs: [Console]::InputEncoding / [Console]::OutputEncoding (process-wide; on Windows default is OEM code page unless system UTF-8 enabled; setting them can throw IOException without an attached console -> try/catch); $OutputEncoding (only affects piping to native commands, default UTF-8 in 7.x); $PSDefaultParameterValues['*:Encoding']='utf8NoBOM' for file cmdlets; Out-File/Set-Content default utf8NoBOM in 7.x.",
+  "Child process (client side): System.Diagnostics.ProcessStartInfo { FileName=(Get-Command pwsh).Source; ArgumentList.Add(...) per arg; UseShellExecute=$false; RedirectStandardInput/Output/Error=$true; StandardInputEncoding/StandardOutputEncoding/StandardErrorEncoding=[System.Text.UTF8Encoding]::new($false); CreateNoWindow=$true; WorkingDirectory }; Process.Start(); StandardInput.Close() for EOF; WaitForExit([int]ms); Kill([bool]entireProcessTree=$true); ExitCode; Exited event with EnableRaisingEvents. $PSNativeCommandArgumentPassing ('Standard' on non-Windows, 'Windows' on Windows, 7.3+) matters only if you launch via & pwsh instead of Process.",
+  "Manifest keys (New-ModuleManifest / Test-ModuleManifest): RootModule, ModuleVersion (System.Version, use 3 parts), GUID, Author, CompanyName, Copyright, Description, PowerShellVersion='7.4', CompatiblePSEditions=@('Core'), RequiredModules=@(), RequiredAssemblies=@(), TypesToProcess=@('Mcp.Types.ps1xml'), FormatsToProcess=@('Mcp.Format.ps1xml'), NestedModules=@(), FunctionsToExport=@(...explicit), CmdletsToExport=@(), VariablesToExport=@(), AliasesToExport=@(), FileList (optional), HelpInfoURI (optional, needs HelpInfo.xml hosting for Update-Help), PrivateData=@{PSData=@{Tags=@('MCP','ModelContextProtocol','JSON-RPC','AI','LLM','PSEdition_Core','Windows','Linux','MacOS'); LicenseUri; ProjectUri; IconUri; ReleaseNotes; Prerelease='preview1'; RequireLicenseAcceptance=$false; ExternalModuleDependencies=@()}}. Special gallery tags: PSEdition_Core, PSEdition_Desktop, Windows, Linux, MacOS drive the compatibility badges.",
+  "PSResourceGet (Microsoft.PowerShell.PSResourceGet, in-box since 7.4; master psd1 = 1.3.0-preview1): Install-PSResource -Name -Version '[6.2.0,7.0)' -Repository PSGallery -TrustRepository -Scope CurrentUser; Publish-PSResource -Path <module folder> -Repository PSGallery -ApiKey <key> [-DestinationPath <dir keeps nupkg>] [-SkipDependenciesCheck] [-SkipModuleManifestValidate]; Compress-PSResource -Path -DestinationPath (1.1+, verify); Set-PSResourceRepository -Name PSGallery -Trusted. Legacy PowerShellGet 2.x: Publish-Module -Path -NuGetApiKey -Repository PSGallery; Prerelease string constraint in PowerShellGet v2 is alphanumeric only (no '.', '-'), keep e.g. 'preview1','rc1' (verify PSResourceGet accepts hyphens).",
+  "ModuleBuilder: Build-Module [-SourcePath src/Mcp.psd1|src/build.psd1] [-OutputDirectory ../output] [-SemVer 1.2.3-preview1] [-VersionedOutputDirectory] [-Prefix/-Suffix] [-SourceDirectories @('Enums','Classes','Private','Public')] [-PublicFilter 'Public/*.ps1'] [-CopyPaths @('en-US','*.ps1xml','bin')]; Convert-CodeCoverage / Convert-LineNumber map built-psm1 line numbers back to source (verify names on current 3.x).",
+  "Invoke-Build: Mcp.build.ps1 with tasks Clean, Build, Analyze, Test, Coverage, Help, Package, Publish; invoked by build.ps1 -Task <name> -Bootstrap; alternative psake (Invoke-psake) is older and less maintained.",
+  "Pester 6.2.0 (PowerShellVersion floor 5.1, C# on .NET 8/net462): New-PesterConfiguration; Invoke-Pester -Configuration $cfg; Run.Path/PassThru/Exit/Container; Output.Verbosity None|Normal|Detailed|Diagnostic; TestResult.Enabled/OutputFormat NUnitXml|NUnit3|JUnitXml/OutputPath; CodeCoverage.Enabled/Path/OutputFormat JaCoCo|CoverageGutters/OutputPath/CoveragePercentTarget/UseBreakpoints; Should -Invoke / Should -InvokeVerifiable (replace Assert-MockCalled/Assert-VerifiableMock); TestDrive: PSDrive and $TestDrive; Mock -ModuleName; InModuleScope; BeforeAll/BeforeEach/AfterEach/AfterAll; -ForEach/-TestCases; -Skip/-Tag; new optional Should-* assertions (Should-Be etc.).",
+  "PSScriptAnalyzer 1.25.0: Invoke-ScriptAnalyzer -Path src -Recurse -Settings ./PSScriptAnalyzerSettings.psd1 -EnableExit -ReportSummary; settings keys Severity, IncludeDefaultRules, IncludeRules, ExcludeRules, CustomRulePath, RecurseCustomRulePath, Rules=@{PSPlaceOpenBrace, PSPlaceCloseBrace, PSUseConsistentIndentation(IndentationSize,PipelineIndentation,Kind), PSUseConsistentWhitespace, PSAlignAssignmentStatement, PSUseCorrectCasing, PSAvoidUsingCmdletAliases(allowlist), PSUseCompatibleSyntax(TargetVersions), PSUseCompatibleCommands(TargetProfiles), PSUseCompatibleTypes}; relevant built-ins: PSUseApprovedVerbs, PSUseToExportFieldsInManifest, PSAvoidUsingWriteHost, PSProvideCommentHelp, PSUseShouldProcessForStateChangingFunctions, PSAvoidGlobalVars, PSUseSingularNouns, PSReviewUnusedParameter, PSUseBOMForUnicodeEncodedFile (exclude: we use UTF-8 no BOM), PSAvoidUsingPositionalParameters. Custom rule signature: function Measure-X { param([System.Management.Automation.Language.ScriptBlockAst]$ScriptBlockAst) ... [Microsoft.Windows.PowerShell.ScriptAnalyzer.Generic.DiagnosticRecord]@{Message;Extent;RuleName;Severity} }.",
+  "PlatyPS: current module Microsoft.PowerShell.PlatyPS (Install-PSResource -Name Microsoft.PowerShell.PlatyPS); cmdlets (verify) New-MarkdownCommandHelp, Update-MarkdownCommandHelp, Import-MarkdownCommandHelp, Export-MamlCommandHelp, Export-MarkdownCommandHelp, Test-MarkdownCommandHelp, New-MarkdownModuleFile; legacy platyPS 0.14: New-MarkdownHelp, Update-MarkdownHelp, New-ExternalHelp. Output: en-US/Mcp-help.xml (MAML) + en-US/about_Mcp.help.txt.",
+  "Class facts (about_Classes 7.4 'Limitations'): classes cannot be unloaded/reloaded in a session (Import-Module -Force creates a NEW type; old instances fail -is checks); not auto-imported (need `using module <name-or-path>` as the first statement, or the TypeAccelerators workaround); hidden/static only on members; no PSReference members; constructor chaining not implemented (use hidden Init()); constructor params take no attributes/defaults; [NoRunspaceAffinity()] attribute (7.4+) for cross-runspace safety. `using module` imports only classes/enums from the ROOT module, not from nested modules or dot-sourced files (about_Using).",
+  "JSON cmdlets: ConvertTo-Json -Depth (default 2, max 100) -Compress -EnumsAsStrings -AsArray -EscapeHandling Default|EscapeNonAscii|EscapeHtml; 7.5+: BigInteger serialized as number; experimental PSSerializeJSONLongEnumAsNumber. ConvertFrom-Json -AsHashtable -Depth (default 1024) -NoEnumerate; 7.5+: -DateKind Default|Local|Utc|Offset|String (String stops auto DateTime conversion). Test-Json -Schema/-SchemaFile/-Path/-LiteralPath; 7.5+: -IgnoreComments, -AllowTrailingCommas; 7.4+ backed by JsonSchema.Net (draft 2020-12 support to verify).",
+  "PowerShell 7.6 breaking changes (verified): ThreadJob module renamed Microsoft.PowerShell.ThreadJob (use Microsoft.PowerShell.ThreadJob\\Start-ThreadJob if module-qualified); WildcardPattern.Escape lone-backtick fix; Join-Path -ChildPath is string[]; trailing space removed from event source name; pwsh -file dot-sourcing fix for advanced-function scripts (#27762).",
+  "GitHub Actions: runs-on windows-latest / ubuntu-latest / macos-latest (arm64); step `shell: pwsh` resolves pwsh from PATH; prepend a pinned install dir via `echo \"$dir\" >> $GITHUB_PATH`; secrets.PSGALLERY_API_KEY in an environment with required reviewers; actions/checkout, actions/upload-artifact, codecov/codecov-action (JaCoCo), dorny/test-reporter (NUnit/JUnit), modelcontextprotocol/conformance@v0.1.10 (inputs mode,url,command,expected-failures,suite,scenario,timeout,verbose,node-version).",
+  "Conformance CLI: npx @modelcontextprotocol/conformance {client --command <cmd> --scenario <name>|--suite all|core|extensions|backcompat|auth|metadata|draft|sep-835 [--spec-version 2026-07-28] [--force] [--requirements <rev>] [--expected-failures <yaml>] [--timeout 30000] [--verbose] | server --url <url> [--scenario|--suite active|all|draft|pending] [--requirements] [--expected-failures] | list}; env to client: MCP_CONFORMANCE_SCENARIO, MCP_CONFORMANCE_CONTEXT (JSON), MCP_CONFORMANCE_PROTOCOL_VERSION; results dir results/<scenario>-<ts>/checks.json, stdout.txt, stderr.txt.",
+  "Exit codes: stdio server exits 0 on stdin EOF; pwsh -File returns the script's `exit <n>`; uncaught terminating error under -File yields exit code 1 and the error rendered on stderr (ConciseView)."
+ ],
+ "sdk_implications": [
+  "Repository layout: LICENSE (MIT, exists), README.md, CHANGELOG.md, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, ROADMAP.md, DEPENDENCY_POLICY.md (tier requirement), build.ps1 (bootstrap + Invoke-Build entry), Mcp.build.ps1, requirements.psd1 (pinned build deps), PSScriptAnalyzerSettings.psd1, conformance-baseline.yml, .editorconfig, .gitattributes, .github/{workflows/ci.yml,release.yml,conformance.yml; ISSUE_TEMPLATE; dependabot.yml for actions only; CODEOWNERS}, src/{Mcp.psd1, build.psd1, Enums/, Classes/ (numbered), Private/, Public/ (one function per file, file name = function name), Types/, Formats/, en-US/, bin/ (Get-McpLauncherCommand output template)}, tests/{Unit,Integration,Conformance/{client.ps1,server.ps1}}, docs/ (markdown help source), examples/ (echo server.ps1, client.ps1), output/ (gitignored).",
+  "Type model decision: three layers. (1) Engine (Classes/): McpJsonRpcMessage, McpSession, McpServer, McpClient, McpTransport (abstract base with Stdio/StreamableHttp/InMemory subclasses), McpRouter, all [NoRunspaceAffinity()], exposed via type accelerators from a Suffix file; (2) user-facing registration via functions taking hashtables/scriptblocks (Register-McpTool -Name -Description -InputSchema [hashtable|string json] -Handler {param($Arguments,$Context)}), never requiring users to write `using module`; (3) results as PSCustomObject with PSTypeName ('Mcp.Tool','Mcp.Resource','Mcp.Prompt','Mcp.ToolResult','Mcp.Session') + ps1xml views. Rationale: classes cannot reload (breaks iterative dev and Pester -Force reimports), do not cross module boundaries by name, and serialize poorly (Export-Clixml/remoting yield Deserialized.* PSObjects).",
+  "Wire (de)serialization layer is a Private/Json*.ps1 pair built on System.Text.Json (in-box): parse with [System.Text.Json.JsonDocument]/JsonNode to preserve id types (int vs string), big integers, and raw strings (no DateTime coercion), serialize from [ordered] hashtables omitting absent keys; fall back to ConvertFrom-Json -AsHashtable -DateKind String only on 7.5+ if STJ path is disabled. Must not ship System.Text.Json.dll.",
+  "Transport implementation for stdio must bypass the PowerShell host entirely: obtain [Console]::OpenStandardOutput() once at Start-McpServer, keep it private to the transport, and swap [Console]::SetOut([Console]::Error) so any stray Console.Out writes go to stderr (verify whether ConsoleHost honours SetOut when redirected). Provide an in-memory transport (paired streams) so unit tests never spawn processes.",
+  "Handler execution: run user scriptblocks on the engine thread via $sb.InvokeWithContext or & with splatted arguments and capture all six streams (`*>&1` plus explicit -WarningVariable/-InformationVariable) so Write-Warning/Write-Verbose from handlers become notifications/message or stderr lines instead of host output; Write-Host inside handlers cannot be intercepted on the default host -> document as unsupported and flag with a custom PSSA rule shipped in examples.",
+  "Blocking-read design: single event loop, reader.ReadLineAsync() polled with Task.Wait(100) so the loop can observe a CancellationTokenSource, process timers, and detect EOF; no ThreadJob dependency in the core (module rename in 7.6 shows why). If parallel handlers are added later, use a RunspacePool and pass only [NoRunspaceAffinity] state plus detached scriptblocks.",
+  "Launcher/entry point: ship examples/server.ps1 template (`#Requires -Version 7.4`, `#Requires -Modules Mcp`, [CmdletBinding()] param(), Import-Module Mcp, register primitives, Start-McpServer -Transport Stdio) and Get-McpLauncherCommand -ScriptPath -AsJson producing {\"command\":\"<abs pwsh>\",\"args\":[\"-NoLogo\",\"-NoProfile\",\"-NonInteractive\",\"-ExecutionPolicy\",\"Bypass\",\"-File\",\"<abs script>\"]} for Claude Desktop/Inspector configs. Also support `Start-McpServer -Definition ./server.psd1` so a data-only definition can be launched without custom code. Do not rely on module-relative bin/ paths (versioned install folders move).",
+  "Windows specifics: default Restricted execution policy on client SKUs (hence -ExecutionPolicy Bypass in the launcher and docs), OEM code page console encodings, CRLF newlines from [Environment]::NewLine, pwsh.exe startup ~250-500 ms + module import (keep import under ~300 ms: single psm1, lazy type/format loading, no Add-Type), long paths, Defender/AMSI scanning of every dot-sourced file. macOS/Linux specifics: GUI clients launch with minimal PATH (absolute pwsh path), case-sensitive paths, SIGTERM handling by the .NET runtime (pwsh exits; verify graceful shutdown hook via PosixSignalRegistration cannot run PS code on a foreign thread), Homebrew arm64 vs x64 path.",
+  "Help strategy: comment-based help mandatory in src (PSSA PSProvideCommentHelp), docs/ markdown generated and diffed in CI (Test-MarkdownCommandHelp / Update-MarkdownCommandHelp), MAML exported at Package time into output/Mcp/<ver>/en-US so Get-Help -Full works offline after Install-PSResource; about_Mcp, about_Mcp_Transports, about_Mcp_Conformance topics.",
+  "CI pipeline (ci.yml): jobs lint (ubuntu, PSSA with -EnableExit), test (matrix os x pwsh version; build once per job, run Pester with NUnit + JaCoCo, upload artifacts, codecov), ps51-guard (windows-latest, `powershell.exe -NoProfile -Command 'Import-Module ./output/Mcp'` must fail with the PowerShellVersion message), conformance (ubuntu, node 20: client suite via pwsh launcher; server suite by starting the Streamable HTTP example on :3001 and curl health-check loop), package (Compress-PSResource, upload nupkg). release.yml on tags v*: reuse ci via workflow_call, then Publish-PSResource in environment 'psgallery' with secret PSGALLERY_API_KEY, then gh release create with nupkg and CHANGELOG section.",
+  "Versioning policy to publish: SemVer 2 on ModuleVersion+Prerelease; 0.x while protocol coverage incomplete; 1.0.0 when conformance 'active' suite passes 100% with an empty baseline; breaking-change policy: public function signatures and PSTypeName shapes are API; engine classes are internal (documented as not API even though accelerators expose them); minimum PowerShell version bump = major version, except when the dropped version is out of Microsoft support (documented exception, e.g. 7.4/7.5 after 10-Nov-2026 may be dropped in a minor).",
+  "Test taxonomy: tests/Unit (pure functions, JSON layer, router, in-memory transport; Mock for I/O), tests/Integration (real pwsh child processes over stdio; Streamable HTTP via System.Net.HttpListener or Kestrel-free HttpListener on localhost; shutdown/EOF/kill-tree semantics; encoding round-trip with non-ASCII and emoji; 1 MB messages), tests/Conformance (harness driven). Use $TestDrive for temp files, never $env:TEMP.",
+  "Module import must be side-effect free: no writes to stdout/stderr, no Console encoding changes, no global variables (PSAvoidGlobalVars); encoding/console setup happens only inside Start-McpServer -Transport Stdio and is restored in finally.",
+  "Gallery naming: verify availability of the module name before first publish (Find-PSResource -Name Mcp); consider 'ModelContextProtocol' or 'Mcp.Sdk' fallback while keeping noun prefix Mcp; reserve the name early with 0.1.0-preview1.",
+  "Ship a PSSA settings file that turns on formatting rules (OTBS braces, 4-space indent, consistent whitespace, correct casing) so `Invoke-Formatter -Settings` is the single formatter (VS Code PowerShell extension honours it), and exclude PSUseBOMForUnicodeEncodedFile because sources are UTF-8 without BOM (pwsh reads them correctly; 5.1 is out of scope)."
+ ],
+ "legacy_delta": [
+  "Windows PowerShell 5.1 vs 7.4+: Windows-only; .NET Framework 4.x (no in-box System.Text.Json, no Process.Kill(entireProcessTree), no PosixSignalRegistration); no $IsWindows/$IsLinux/$IsMacOS; ConvertFrom-Json lacks -AsHashtable/-Depth/-DateKind and mangles large ints; ConvertTo-Json output differs (indentation, escaping); default encodings ANSI (Out-File UTF-16LE, Set-Content ANSI, source files without BOM read as ANSI); no ternary, ??, ??=, &&, ||, ForEach-Object -Parallel, Start-ThreadJob in-box, [NoRunspaceAffinity]; classes buggier; PSResourceGet not in-box (PowerShellGet 1.0.0.1 only); Pester 6 still supports it but the SDK does not; support is best-effort/security-only (Lifecycle doc line 45). Manifest PowerShellVersion='7.4' + CompatiblePSEditions='Core' makes 5.1 refuse import.",
+  "7.2 (LTS, EOS 08-Nov-2024, .NET 6) / 7.3 (EOS 08-May-2024, .NET 7): unsupported by Microsoft and dropped by Pester 6 ('early/unsupported 7 removed', v5-to-v6 guide); 7.3 introduced $PSNativeCommandArgumentPassing and PSNativeCommandErrorActionPreference; 7.2 introduced $PSStyle. Not worth targeting.",
+  "7.4 (LTS, .NET 8, EOS 10-Nov-2026): baseline for this SDK. Adds [NoRunspaceAffinity()] class attribute, -ProgressAction common parameter (do not redefine), Microsoft.PowerShell.PSResourceGet 1.0.x in-box, Test-Json rebased on JsonSchema.Net (verify draft 2020-12), PSNativeCommandErrorActionPreference stabilized, System.Text.Json 8.0 (JsonNode, JsonSerializerOptions.TypeInfoResolver), ThreadJob module named 'ThreadJob'.",
+  "7.5 (.NET 9, EOS 10-Nov-2026, current 7.5.11): ConvertTo-Json serializes BigInteger as number; ConvertFrom-Json -DateKind; Test-Json -IgnoreComments/-AllowTrailingCommas; experimental PSSerializeJSONLongEnumAsNumber and PSRedirectToVariable; System.Text.Json 9.0. Short-lived: drops out of support the same day as 7.4.",
+  "7.6 (LTS, .NET 10, GA 18-Mar-2026, EOS 14-Nov-2028, current 7.6.6): ThreadJob module renamed Microsoft.PowerShell.ThreadJob (Start-ThreadJob unchanged; module-qualified calls break); Join-Path -ChildPath string[]; WildcardPattern.Escape backtick fix; event-source name trailing space removed; pwsh -file dot-sourcing fix for advanced-function scripts (#27762) which may change how a [CmdletBinding()] launcher script behaves vs 7.4/7.5; PSRP session-key exchange deprecated; System.Text.Json 10.0; PSResourceGet 1.1.x+ in-box (verify). Intended long-term floor for the SDK.",
+  "7.7 preview (.NET 11 RC): not a target; include in an allowed-failure CI lane only.",
+  "Pester 5.x vs 6.x: v6 keeps v5 syntax; drops PowerShell 3/4/6/7.0-7.3; per-file discovery; hidden files discovered; empty -ForEach throws; duplicate setup/teardown throws; `<...>` templates in names are expressions; Assert-MockCalled/Assert-VerifiableMock removed (Should -Invoke / Should -InvokeVerifiable); optional new Should-* assertion family. Pin '[6.2.0,7.0)' and write v5-compatible syntax so a Pester 5.7 fallback remains possible.",
+  "PowerShellGet 2.x vs PSResourceGet: Publish-Module -NuGetApiKey vs Publish-PSResource -ApiKey; Install-Module vs Install-PSResource (-TrustRepository, NuGet version ranges '[a,b)'); PowerShellGet v2 Prerelease label limited to alphanumerics; PSResourceGet is in-box on all targeted versions so build scripts should not depend on PowerShellGet.",
+  "platyPS 0.14 vs Microsoft.PowerShell.PlatyPS 1.x: different cmdlet names (New-MarkdownHelp/New-ExternalHelp vs New-MarkdownCommandHelp/Export-MamlCommandHelp) and a new markdown schema; the new module is the supported one (platyPS README)."
+ ],
+ "open_questions": [
+  "CRITICAL: Under `pwsh -File server.ps1` with redirected stdin, does ConsoleHost pre-read stdin (to feed $input) and compete with [Console]::OpenStandardInput()/[Console]::In readers? Practical evidence (LSP/MCP servers written in PowerShell) suggests reads are lazy, but verify on 7.4/7.5/7.6 on all three OSes, including whether -InputFormat or -NonInteractive changes it and whether the host's Console.In reader is created with OEM encoding before the script can set [Console]::InputEncoding.",
+  "Where do Warning/Verbose/Debug/Information/Progress records go when ConsoleHost stdout is a pipe: stderr or stdout? If any reach stdout, the engine must capture handler streams exhaustively and/or run handlers in a runspace with a custom PSHost whose UI writes to stderr. Also verify whether [Console]::SetOut() redirects ConsoleHost's own writes when redirected.",
+  "Does setting [Console]::OutputEncoding/InputEncoding throw on Windows when the process has no attached console (spawned with CreateNoWindow/DETACHED_PROCESS)? Determine whether the SDK should only use its own StreamReader/StreamWriter and never touch Console encodings.",
+  "Impact of the 7.6 fix 'dot-sourcing behavior of pwsh -file for advanced-function scripts (#27762)' on a launcher with [CmdletBinding()] param(): confirm identical behaviour (exit code, $MyInvocation, module scope) on 7.4/7.5/7.6.",
+  "Exact behaviour of ConvertTo-Json/ConvertFrom-Json for JSON-RPC ids (Int64 vs Double vs string), for integers beyond 2^53, for -DateKind absence on 7.4, and whether explicit null on optional fields fails the conformance wire-schema-valid check; decide STJ vs cmdlets per version.",
+  "Does Test-Json on 7.4+ validate JSON Schema draft 2020-12 (the dialect MCP tool inputSchema/outputSchema use) or only draft-07/2019-09? If not, the SDK needs its own validation or must skip server-side argument validation.",
+  "Type accelerator export: are dotted names ('Mcp.Server') legal accelerator keys, and does Import-Module -Force reliably re-register without 'already exists' errors? Also confirm OnRemove cleanup timing.",
+  "Which PowerShell versions are preinstalled on windows-latest/ubuntu-latest/macos-latest images in 2026-09, and does prepending a pinned extracted pwsh to GITHUB_PATH make `shell: pwsh` steps use it? Alternatively confirm `dotnet tool install --global PowerShell --version 7.4.x/7.6.x` availability on NuGet and its runtime requirements.",
+  "Exact current parameter surface of Publish-PSResource/Compress-PSResource (ApiKey, DestinationPath, SkipDependenciesCheck, SkipModuleManifestValidate, NupkgPath, ModulePrefix) in the in-box PSResourceGet versions of 7.4 (1.0.x) vs 7.6, and whether PSGallery supports any OIDC/trusted-publishing alternative to long-lived API keys.",
+  "Whether PSResourceGet/PSGallery accept SemVer prerelease labels with dots or hyphens (e.g. 'preview.1'), or only the PowerShellGet-era alphanumeric labels.",
+  "Availability of the module name 'Mcp' on PowerShell Gallery (powershellgallery.com blocked here); evaluate 'ModelContextProtocol' as fallback name while keeping the 'Mcp' noun prefix.",
+  "Current version/parameters of ModuleBuilder (Build-Module, Convert-CodeCoverage) and Microsoft.PowerShell.PlatyPS cmdlet names; PSSA 1.25 compatibility-rule profile names covering 7.4+ (shipped profiles may stop at 7.0).",
+  "Pester 6.2 CodeCoverage on a single built psm1: does UseBreakpoints=$false profiler mode work on all three OSes, and does Convert-CodeCoverage still map JaCoCo lines back to src files for Codecov file-level reporting?",
+  "Graceful SIGTERM/CTRL_CLOSE handling: can the server register PosixSignalRegistration or AppDomain.ProcessExit handlers from PowerShell to flush in-flight responses, given delegates from scriptblocks execute on threads without a runspace? Decide whether to rely on stdin-EOF-only shutdown (spec's only portable signal).",
+  "Process-tree kill on Windows from the client SDK: confirm Process.Kill($true) terminates grandchildren spawned by tool handlers, or whether a Job Object via P/Invoke is required (stdio.md 'Shutdown' mentions Job Objects)."
+ ]
+}

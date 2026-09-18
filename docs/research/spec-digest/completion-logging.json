@@ -1,0 +1,220 @@
+{
+ "source": "MCP spec 2026-07-28: pages/specification__2026-07-28__server__utilities__completion.md (full, 217 lines) and pages/specification__2026-07-28__server__utilities__logging.md (full, 135 lines); cross-checked against schema.ts (CompleteRequest, CompleteRequestParams, CompleteResult, CompleteResultResponse, PromptReference, ResourceTemplateReference, Result, ResultType, BaseMetadata, LoggingMessageNotification, LoggingMessageNotificationParams, LoggingLevel, MetaObject key io.modelcontextprotocol/logLevel, ServerCapabilities.logging/completions) and pages/specification__2026-07-28__deprecated.md (Logging row); legacy delta cross-checked against 2025-11-25_schema.ts (logging/setLevel, SetLevelRequestParams).",
+ "summary": "Completion (server/utilities/completion.md): completion/complete (client->server), gated by server ServerCapabilities.completions (JSONObject). params: ref = PromptReference{type:\"ref/prompt\",name,title?} | ResourceTemplateReference{type:\"ref/resource\",uri (uri-template)}; argument{name,value}; context?{arguments?:{[k:string]:string}}. Every request's _meta MUST include io.modelcontextprotocol/protocolVersion, clientInfo, clientCapabilities. Result = CompleteResult extends Result: resultType (2026-07-28 servers MUST include it, \"complete\" for normal completion; absent field from older server MUST be treated as \"complete\"), completion{values:string[] max 100 items, total?, hasMore?}. Errors SHOULD be -32601/-32602/-32603. Security MUSTs: validate inputs, rate-limit, control access to sensitive suggestions, prevent completion-based info disclosure. Logging (server/utilities/logging.md, DEPRECATED per SEP-2577 as of 2026-07-28): notifications/message (server->client), gated by ServerCapabilities.logging; params{level:LoggingLevel(8 RFC5424 values debug..emergency), logger?, data:unknown}. Major delta: logging/setLevel RPC REMOVED; replaced by per-request _meta key io.modelcontextprotocol/logLevel. Server MUST NOT emit notifications/message for a request lacking that key; when present MAY emit at/above that level, strictly on that request's own response stream before its final response, and MUST NOT deliver on subscriptions/listen or any other stream. Security MUST NOTs: no credentials/secrets/PII/attack-aiding internal details in log data. Feature retained >=12 months post-2026-07-28; new implementations SHOULD NOT adopt; migrate to stderr (stdio) or OpenTelemetry.",
+ "methods": [
+  {
+   "name": "completion/complete",
+   "direction": "client->server",
+   "capability_gate": "Server MUST declare ServerCapabilities.completions (JSONObject, e.g. {}) to support this method (completion.md L35-45; schema.ts L815). No documented client-side capability requirement.",
+   "params": "CompleteRequestParams (schema.ts ~L2590-2618): ref: PromptReference{type:\"ref/prompt\", name:string (required, BaseMetadata), title?:string} | ResourceTemplateReference{type:\"ref/resource\", uri:string (format uri-template, may be literal URI or template e.g. file:///{path})}. argument (required): {name:string, value:string}. context (optional): {arguments?: {[key:string]:string} — previously-resolved argument name->value map for multi-arg prompts/templates}. Per completion.md Note (L14-21), every request's _meta MUST also include io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities (omitted from page JSON examples only for brevity).",
+   "result": "CompleteResult extends Result (schema.ts L2644-2661): _meta?:ResultMetaObject; resultType:ResultType (schema.ts L216: \"complete\"|\"input_required\"|string) — 2026-07-28 servers MUST include this field (value \"complete\" for normal completion, per example L81); a client receiving a result from an older server lacking resultType MUST treat it as \"complete\" (schema.ts L226-233). completion (required object): values:string[] REQUIRED, @maxItems 100 (MUST NOT exceed 100, schema.ts L2646-2650, completion.md L148); total?:number (may exceed values.length); hasMore?:boolean.",
+   "notes": "Only two ref types exist: ref/prompt and ref/resource. Error handling, server SHOULD (completion.md L187-194): method not found/capability not supported -> -32601; invalid prompt name -> -32602; missing required arguments -> -32602; internal errors -> -32603 (all SHOULD). Implementation considerations (SHOULD/MAY, L196-207): servers SHOULD sort by relevance, fuzzy-match, rate-limit, validate inputs; clients SHOULD debounce, cache, handle partial results gracefully. Security (MUST, L211-216): validate all completion inputs; implement appropriate rate limiting; control access to sensitive suggestions; prevent completion-based information disclosure."
+  },
+  {
+   "name": "notifications/message",
+   "direction": "server->client notification",
+   "capability_gate": "Server MUST declare ServerCapabilities.logging (JSONObject, e.g. {}) to emit this notification (logging.md L32-42; schema.ts L808). Entire feature DEPRECATED as of 2026-07-28 (SEP-2577); new implementations SHOULD NOT adopt.",
+   "params": "LoggingMessageNotificationParams extends NotificationParams (schema.ts L2031-2044): level:LoggingLevel (required); logger?:string (optional logger name); data:unknown (required, any JSON-serializable value/object).",
+   "result": "N/A — notification, no response.",
+   "notes": "Envelope: {jsonrpc:\"2.0\", method:\"notifications/message\", params:{level,logger?,data}} (logging.md L82-98). Emission rules are MUST-level and request-scoped (logging.md L62-74, schema.ts L100-111): server MUST NOT emit for a request whose _meta lacks io.modelcontextprotocol/logLevel; when present, server MAY send notifications/message at/above the requested level ONLY on the response stream of that specific request, before its final response; server MUST NOT deliver it on a subscriptions/listen stream or on any other stream."
+  },
+  {
+   "name": "logging/setLevel",
+   "direction": "client->server (REMOVED in 2026-07-28)",
+   "capability_gate": "Present only in 2025-11-25/2025-06-18 schemas; zero occurrences in 2026-07-28 schema.ts. An SDK targeting 2026-07-28 MUST NOT implement this as a live RPC; retained here only for dual-era support planning.",
+   "params": "(legacy only, 2025-11-25_schema.ts) {level: LoggingLevel}",
+   "result": "(legacy only) EmptyResult",
+   "notes": "Superseded by the per-request io.modelcontextprotocol/logLevel _meta field (see notifications/message row)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that support completions MUST declare the completions capability.",
+   "cite": "completion.md L35-45; schema.ts L815"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every completion/complete request MUST include _meta fields io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities.",
+   "cite": "completion.md L14-21"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "completion.values MUST NOT exceed 100 items.",
+   "cite": "schema.ts L2646-2650; completion.md L148"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implementations MUST validate all completion inputs.",
+   "cite": "completion.md L211-213"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implementations MUST implement appropriate rate limiting for completions.",
+   "cite": "completion.md L211-214"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implementations MUST control access to sensitive completion suggestions.",
+   "cite": "completion.md L211-215"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implementations MUST prevent completion-based information disclosure.",
+   "cite": "completion.md L211-216"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD return -32601 (method not found/capability not supported), -32602 (invalid prompt name; missing required arguments), -32603 (internal error) as appropriate.",
+   "cite": "completion.md L187-194"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD sort suggestions by relevance, implement fuzzy matching, rate limit requests, validate all inputs.",
+   "cite": "completion.md L196-202"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD debounce rapid completion requests, cache results, handle missing/partial results gracefully.",
+   "cite": "completion.md L204-207"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD include previously-resolved argument values in context.arguments for multi-argument prompts/templates.",
+   "cite": "completion.md L91"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that emit log message notifications MUST declare the logging capability.",
+   "cite": "logging.md L32-42; schema.ts L808"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Server MUST NOT emit notifications/message for a request that does not include io.modelcontextprotocol/logLevel in that request's _meta.",
+   "cite": "logging.md L64-66; schema.ts L100-104"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "When io.modelcontextprotocol/logLevel is present, server MAY send notifications/message at/above the requested level on that request's response stream, before the final response.",
+   "cite": "logging.md L68-70"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Server MUST NOT deliver notifications/message on a subscriptions/listen stream or on any stream other than the response stream of the request that set the level.",
+   "cite": "logging.md L70-74"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "If io.modelcontextprotocol/logLevel is not a recognized level, server SHOULD reject the request with -32602; internal errors -> -32603.",
+   "cite": "logging.md L100-107"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD rate limit log messages, include relevant context in data, use consistent logger names, remove sensitive information.",
+   "cite": "logging.md L111-115"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients MAY present log messages in UI, implement filtering/search, display severity visually, persist messages.",
+   "cite": "logging.md L117-121"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Log messages MUST NOT contain credentials/secrets, PII, or internal system details that could aid attacks.",
+   "cite": "logging.md L125-128"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementations SHOULD rate limit messages, validate all data fields, control log access, monitor for sensitive content.",
+   "cite": "logging.md L130-133"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "New implementations SHOULD NOT adopt the deprecated Logging feature.",
+   "cite": "logging.md L9-19"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Existing implementations SHOULD migrate to stderr logging (stdio) or OpenTelemetry.",
+   "cite": "logging.md L9-19; deprecated.md Logging row"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "2026-07-28 servers MUST include resultType on every Result, including CompleteResult.",
+   "cite": "schema.ts L223-234"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Client MUST treat an absent resultType (from an older server) as \"complete\".",
+   "cite": "schema.ts L230-233"
+  }
+ ],
+ "wire_details": [
+  "Method: completion/complete (client->server request).",
+  "Method: notifications/message (server->client notification; deprecated SEP-2577).",
+  "Method (REMOVED in 2026-07-28, legacy only): logging/setLevel.",
+  "ServerCapabilities keys: completions (JSONObject, e.g. {}), logging (JSONObject, e.g. {}).",
+  "Ref discriminator values: \"ref/prompt\" (PromptReference{type,name,title?}), \"ref/resource\" (ResourceTemplateReference{type,uri}).",
+  "_meta key: io.modelcontextprotocol/logLevel (optional, request-scoped, type LoggingLevel) — per-request logging opt-in, replaces logging/setLevel.",
+  "_meta keys required on every request: io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities.",
+  "_meta key for subscription-delivered notifications (NOT applicable to notifications/message, which must never use a subscription stream): io.modelcontextprotocol/subscriptionId.",
+  "LoggingLevel enum exact values: debug, info, notice, warning, error, critical, alert, emergency (RFC 5424).",
+  "ResultType type: \"complete\" | \"input_required\" | string (open union); CompleteResult uses \"complete\".",
+  "CompleteResult.completion.values: string[], hard max 100 items (@maxItems 100).",
+  "CompleteResult.completion.total: optional number, may exceed values.length.",
+  "CompleteResult.completion.hasMore: optional boolean.",
+  "JSON-RPC error codes: -32601 (method not found/capability not supported, completion), -32602 (invalid params: invalid prompt name / missing required arguments for completion; invalid/unrecognized logLevel for logging), -32603 (internal error, both).",
+  "No HTTP-specific status codes, MIME types, or transport-layer headers documented on either page — both are transport-agnostic message-level specs; no header requirements found in the read material."
+ ],
+ "sdk_implications": [
+  "Model CompletionReference as a discriminated union on `type` with exactly two literal tags (\"ref/prompt\", \"ref/resource\"); reject any other value client- and server-side.",
+  "Implement completion/complete client call requiring/checking server-advertised `completions` capability before calling (or at least surface the server's -32601 cleanly).",
+  "Enforce the 100-item cap on completion.values server-side before serialization; truncate and set hasMore=$true (optionally total) rather than emit more than 100.",
+  "Build a shared request-envelope helper that stamps every outgoing request's _meta with io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities, rather than re-deriving per call site.",
+  "All Result-derived response types (including CompleteResult) must serialize `resultType`; default to \"complete\" for standard completion responses; on deserialize, coerce a missing resultType (older server) to \"complete\".",
+  "Do NOT implement logging/setLevel as a stateful RPC for 2026-07-28; if dual-protocol support is required, gate it behind negotiated protocolVersion < 2026-07-28.",
+  "Implement server-side logging emission as strictly per-request-stream-scoped: read io.modelcontextprotocol/logLevel off the current in-flight request's _meta, and only if present allow the handler to write notifications/message frames onto THAT request's own response stream (never a global broadcast bus, never the subscriptions/listen channel).",
+  "Validate LoggingLevel against the fixed 8-value set (debug/info/notice/warning/error/critical/alert/emergency); reject unrecognized values and (server-side) prefer emitting -32602 per SHOULD guidance.",
+  "Because Logging is deprecated (>=12 months retained from 2026-07-28), surface a deprecation warning (e.g., Write-Warning) when a consumer opts into the logging capability, pointing at stderr/OpenTelemetry as the SHOULD alternative, without removing the feature.",
+  "Type LoggingMessageNotificationParams.data as an arbitrary JSON-serializable value (object/array/string), not a fixed schema; provide an injectable sanitizer hook so consumers can strip credentials/secrets/PII/internal details before emission (MUST NOT list).",
+  "Expose rate-limiting as pluggable middleware for both completion/complete (server MUST) and log emission (SHOULD both sides) rather than a hardcoded policy, since the spec mandates the outcome but not the mechanism."
+ ],
+ "legacy_delta": [
+  "logging/setLevel RPC REMOVED in 2026-07-28: 2025-11-25_schema.ts defines method \"logging/setLevel\" with SetLevelRequestParams{level:LoggingLevel} and doc comment 'If no logging/setLevel request has been sent from the client, the server MAY decide which messages to send automatically'; grep of 2026-07-28 schema.ts for 'SetLevelRequest|logging/setLevel' returns zero matches (only a reference comment noting it is replaced).",
+  "2026-07-28 replaces the persistent/global setLevel model with per-request opt-in via _meta key io.modelcontextprotocol/logLevel (schema.ts comment: 'Replaces the former logging/setLevel RPC'). Delivery becomes strictly request-scoped: MUST NOT emit without the field; MUST NOT deliver on subscriptions/listen or any stream other than the triggering request's own response stream (logging.md L65-74) — materially different from the prior persistent/global channel where, once armed via setLevel, the server could push notifications/message at any time on any channel.",
+  "Whole Logging feature (capability, notifications/message, LoggingLevel, logLevel meta key) newly marked @deprecated as of 2026-07-28 per SEP-2577 (schema.ts L2049-2051, L2069-2071; logging.md L9-19); feature-lifecycle policy keeps it in spec >=12 months post-2026-07-28 (deprecated.md: removal-eligible 'First revision released on or after 2027-07-28'). New implementations SHOULD NOT adopt; existing SHOULD migrate to stderr (stdio transport) or OpenTelemetry.",
+  "CompleteResult gains a MUST-include `resultType` field in 2026-07-28 (inherited from the generic Result base, schema.ts L223-235), shown in the completion.md example (\"resultType\":\"complete\"). Backward-compat rule: client receiving a result without resultType (older server) MUST treat it as \"complete\".",
+  "completion.md's Note asserts every 2026-07-28 request MUST carry _meta keys io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities — a per-request re-statement of identity/version/capabilities not present in the same mandatory form in prior revisions (there, negotiation happened once at initialize). This delta is asserted only by the completion page's note; the underlying basic/index#meta page itself was not read in this task, so the precise scope needs direct verification (see open_questions)."
+ ],
+ "open_questions": [
+  "Exact field name(s) inside ResultMetaObject carrying server-identification info (grep hit around schema.ts L136-150 was truncated mid-sentence: 'Servers SHOULD include this field on every response...') — needs a direct read of schema.ts L136-160 plus the basic/index page to confirm the precise _meta key (likely io.modelcontextprotocol/serverInfo or similar) before finalizing SDK response envelope types.",
+  "The basic/index page's _meta section (referenced by completion.md's Note) was not read in this task; the exact required shape/types of io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities, and whether they are MUST on literally every request method or only some, should be verified directly rather than inferred solely from the completion page's note.",
+  "Whether ServerCapabilities.logging / completions (typed as plain JSONObject) can carry any documented optional sub-fields beyond an empty baseline example was not fully cross-checked against 2026-07-28_schema.json; schema.ts shows no named properties for either.",
+  "CompleteRequestParams.context.arguments is typed {[key:string]:string} (string-only values) in schema.ts; not cross-checked against 2026-07-28_schema.json for stricter/looser validation — confirm before codegen of strict PowerShell parameter validation.",
+  "No explicit spec text found establishing whether completion/complete for a ref/resource requires the server to also advertise a resources/resource-templates capability; this cross-dependency (or its absence) should be confirmed against the resources page before an SDK adds any client-side pre-check/warning."
+ ]
+}

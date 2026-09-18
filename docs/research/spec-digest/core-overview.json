@@ -1,0 +1,430 @@
+{
+ "source": "pages/specification__2026-07-28__index.md; pages/specification__2026-07-28__architecture__index.md; pages/specification__2026-07-28__basic__index.md (all read in full); cross-checked against schema.ts lines 1-1110 and 1320-1400 (JSON-RPC types, MetaObject family, error constants/interfaces, ResultType, Icon/Icons/Implementation, CacheableResult, PaginatedResult, DiscoverRequest/Result, ClientCapabilities/ServerCapabilities), 2025-11-25_schema.ts lines 40-220, 2025-06-18_schema.ts (grep only), and grep of basic__versioning.md / changelog.md for legacy interop constants.",
+ "summary": "Revision 2026-07-28 makes MCP a stateless, per-request-negotiated protocol over JSON-RPC 2.0. Every request MUST carry `_meta[\"io.modelcontextprotocol/protocolVersion\"]` (string) and `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` (ClientCapabilities); `clientInfo` (Implementation) and `logLevel` (LoggingLevel) are optional; missing required fields -> `-32602` and HTTP 400. Servers MUST NOT infer capabilities/version/identity from earlier requests on the same connection; cross-request state MUST be referenced by an explicit client-passed identifier. Requests need a non-null string|integer `id` unique among in-flight requests of the sender; notifications have no id and get no response. Every result MUST include `resultType` (\"complete\" | \"input_required\" | extension-defined values advertised via capabilities); unknown values are invalid; absent (legacy server) = \"complete\". Servers SHOULD add `_meta[\"io.modelcontextprotocol/serverInfo\"]` to every result. Error codes: standard JSON-RPC (-32700, -32600..-32603); `-32000..-32019` legacy (no new allocation, no assumed meaning except -32002 accepted from legacy servers); `-32020..-32099` spec-only: `-32020` HeaderMismatch, `-32021` MissingRequiredClientCapability (data.requiredCapabilities), `-32022` UnsupportedProtocolVersion (data.supported[], data.requested); each MUST be HTTP 400. `-32002` and `-32042` MUST NOT be emitted. `_meta` key grammar: optional reverse-DNS prefix ending in `/` (second label `modelcontextprotocol` or `mcp` reserved), name `[A-Za-z0-9]` at ends with `-_.` inside; reserved keys: progressToken, protocolVersion, clientInfo, clientCapabilities, logLevel, subscriptionId, serverInfo, traceparent/tracestate/baggage (W3C formats). Subscription-stream notifications MUST carry `subscriptionId`. JSON Schema: default 2020-12, MUST support it, `$schema` may override, unsupported dialect -> error, never auto-fetch network `$ref`, SHOULD bound composition depth. Icons: `src` required (https or data: only), MUST render png/jpeg, SHOULD svg/webp, fetch without credentials, verify magic bytes.",
+ "methods": [
+  {
+   "name": "<any JSON-RPC request> (generic shape)",
+   "direction": "client->server",
+   "params": "jsonrpc: \"2.0\" (required, JSONRPC_VERSION); id: string | number (required; MUST NOT be null; MUST NOT collide with any other in-flight request id of the same sender); method: string (required); params?: object; params._meta: RequestMetaObject (REQUIRED per schema.ts RequestParams line 179-181, because it must hold the two required keys) with: \"io.modelcontextprotocol/protocolVersion\": string (required); \"io.modelcontextprotocol/clientCapabilities\": ClientCapabilities (required; {} = no optional capabilities); \"io.modelcontextprotocol/clientInfo\"?: Implementation; \"io.modelcontextprotocol/logLevel\"?: LoggingLevel (deprecated as of 2026-07-28, SEP-2577, retained >=12 months); progressToken?: string | number; plus any other keys obeying the _meta grammar. Optional MRTR fields on any client request (schema.ts InputResponseRequestParams 600-609): inputResponses?: InputResponses, requestState?: string.",
+   "result": "JSONRPCResultResponse: jsonrpc: \"2.0\"; id: RequestId (same as request); result: Result where result.resultType: ResultType (REQUIRED for 2026-07-28 servers; \"complete\" | \"input_required\" | extension string), result._meta?: ResultMetaObject with \"io.modelcontextprotocol/serverInfo\"?: Implementation, plus [key: string]: unknown. EmptyResult = Result (only resultType/_meta). PaginatedResult adds nextCursor?: string. CacheableResult adds ttlMs: number (>=0, required on cacheable results) and cacheScope: \"public\" | \"private\" (required). InputRequiredResult (resultType \"input_required\") has inputRequests?: {[key]: CreateMessageRequest|ListRootsRequest|ElicitRequest}, requestState?: string; at least one MUST be present. OR JSONRPCErrorResponse: jsonrpc; id?: RequestId (omitted only when id unreadable due to malformed request); error: {code: integer (required), message: string (required, SHOULD be one concise sentence), data?: unknown}.",
+   "capability_gate": "None for the envelope. Server MUST NOT use a client capability not present in _meta clientCapabilities of THIS request (else -32021). Method gated behind an undeclared SERVER capability -> -32601 (schema.ts MethodNotFoundError 343-359). resultType values from extensions valid only when that extension is advertised via capabilities.",
+   "notes": "basic__index.md 'Messages' + 'General fields: _meta'. On HTTP the protocolVersion _meta value MUST match the MCP-Protocol-Version header else 400 (schema.ts RequestMetaObject 69-76; HeaderMismatch -32020). Client MUST treat any unrecognized resultType as invalid; MUST treat absent resultType as \"complete\" (legacy servers)."
+  },
+  {
+   "name": "<any JSON-RPC notification> (generic shape)",
+   "direction": "notification c->s and notification s->c",
+   "params": "jsonrpc: \"2.0\"; method: string; params?: object; params._meta?: NotificationMetaObject with \"io.modelcontextprotocol/subscriptionId\"?: RequestId (MUST be present on every notification delivered via a subscriptions/listen stream; value = JSON-RPC id of the subscriptions/listen request; absent otherwise, e.g. progress notifications for an in-flight request). MUST NOT include an id.",
+   "result": "None. Receiver MUST NOT send a response.",
+   "capability_gate": "Per-notification (see subscriptions/progress/cancellation/logging pages).",
+   "notes": "basic__index.md 'Notifications'; schema.ts NotificationMetaObject 120-134."
+  },
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "params: RequestParams (only _meta with the required per-request fields).",
+   "result": "DiscoverResult extends CacheableResult: supportedVersions: string[] (required); capabilities: ServerCapabilities (required); instructions?: string; ttlMs: number; cacheScope: \"public\"|\"private\"; resultType; _meta.",
+   "capability_gate": "Servers MUST implement server/discover; clients MAY call it (schema.ts 653-668). No capability required.",
+   "notes": "Referenced by architecture__index.md 'Capability Negotiation' as the up-front discovery mechanism; full normative text on the server/discover page (not in focus set). ServerCapabilities fields (schema.ts 793-883): experimental?, logging? (deprecated), completions?, prompts?{listChanged?}, resources?{subscribe?,listChanged?}, tools?{listChanged?}, extensions?{[id]: JSONObject}. ClientCapabilities (716-786): experimental?, roots? (deprecated), sampling?{context?,tools?} (deprecated), elicitation?{form?,url?}, extensions?{[id]: JSONObject}. extensions keys MUST follow _meta key grammar with mandatory prefix."
+  },
+  {
+   "name": "subscriptions/listen (envelope aspects only)",
+   "direction": "client->server (long-lived request)",
+   "params": "See subscriptions page (not in focus). Envelope: ordinary request; its JSON-RPC id becomes the subscriptionId.",
+   "result": "SubscriptionsListenResult: resultType; _meta: SubscriptionsListenResultMetaObject with REQUIRED \"io.modelcontextprotocol/subscriptionId\": RequestId (equals response id); body otherwise empty. Sent only on graceful teardown.",
+   "capability_gate": "Per subscriptions page.",
+   "notes": "basic__index.md 'Statelessness': long-lived requests remain request/response; state scoped to the request, not the connection. schema.ts 1320-1352."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "params": "notifications: SubscriptionFilter (subset of requested types server will honor); _meta[\"io.modelcontextprotocol/subscriptionId\"] REQUIRED (first message carrying that id).",
+   "result": "n/a",
+   "capability_gate": "Follows a subscriptions/listen request.",
+   "notes": "Architecture page sequence diagram; schema.ts 1370-1400. Server MUST NOT send any notification on the subscription before this ack; ordering defined per subscription id, not per channel (stdio may interleave)."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification s->c (also c->s)",
+   "params": "progressToken: string|number (required, echoes request _meta.progressToken); progress: number (required); total?: number; message?: string.",
+   "result": "n/a",
+   "capability_gate": "Opt-in via request _meta.progressToken; receiver not obligated to send.",
+   "notes": "Reserved _meta key progressToken defined in basic__index.md table; schema.ts 1009-1043. Details on progress page (not in focus)."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (s->c only on stdio to end a subscriptions/listen stream)",
+   "params": "requestId: RequestId (required; MUST correspond to a request the client previously issued); reason?: string.",
+   "result": "n/a",
+   "capability_gate": "None.",
+   "notes": "schema.ts 620-651: server MUST NOT use it to cancel any request other than a subscriptions/listen stream. Details on cancellation page (not in focus)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "All implementations MUST support the base protocol, versioning, and the message patterns; other components MAY be implemented.",
+   "cite": "basic__index.md 'Overview'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "All messages MUST follow JSON-RPC 2.0.",
+   "cite": "basic__index.md 'Messages'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Requests MUST include a string or integer ID; the ID MUST NOT be null.",
+   "cite": "basic__index.md 'Requests'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "A request ID MUST NOT match the ID of any other request the sender has issued and not yet received a response for.",
+   "cite": "basic__index.md 'Requests'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Result responses MUST include the same ID as the request and MUST include a `result` field; `result` MAY be any JSON object structure.",
+   "cite": "basic__index.md 'Result Responses'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every `result` MUST include a `resultType` field (servers implementing 2026-07-28).",
+   "cite": "basic__index.md 'Result Responses'; schema.ts Result 223-236"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "The set of supported ResultType values MUST be created from the core set (\"complete\", \"input_required\") plus values of supported extensions advertised via capabilities; extensions MAY add values.",
+   "cite": "basic__index.md 'ResultType'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A resultType value unrecognized by the client MUST be considered invalid.",
+   "cite": "basic__index.md 'ResultType'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST treat an absent `resultType` (server on earlier protocol version) as \"complete\".",
+   "cite": "basic__index.md 'ResultType'; schema.ts 229-232"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Error responses MUST include the same ID as the request (except when the ID could not be read from a malformed request); MUST include `error` with `code` and `message`; codes MUST be integers; MAY include `data` of any type.",
+   "cite": "basic__index.md 'Error Responses'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Error `message` SHOULD be limited to a concise single sentence.",
+   "cite": "schema.ts Error 247"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "New error codes MUST NOT be allocated in -32000..-32019; new implementations SHOULD NOT use codes from that sub-range at all; receivers MUST NOT assume any specific meaning for them (apart from -32002).",
+   "cite": "basic__index.md 'Error Codes'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Implementations MUST NOT emit any code in -32020..-32099 not defined by the spec, and MUST use defined codes only with their specified meanings.",
+   "cite": "basic__index.md 'Error Codes'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Implementations of 2026-07-28 MUST NOT emit -32002 (resource not found; replaced by -32602) or -32042 (URL elicitation required).",
+   "cite": "basic__index.md 'Error Codes'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD still accept -32002 from servers implementing earlier versions.",
+   "cite": "basic__index.md 'Error Codes'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "New non-spec error codes SHOULD be allocated outside the JSON-RPC reserved range -32768..-32000.",
+   "cite": "basic__index.md 'Error Codes'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Local-only errors surfaced in JSON-RPC-shaped structures (e.g. SDK request timeout) should be distinguishable from peer errors; no spec code is assigned to them.",
+   "cite": "basic__index.md 'Error Codes' (non-capitalized 'should')"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Receiver of a notification MUST NOT send a response; notifications MUST NOT include an ID.",
+   "cite": "basic__index.md 'Notifications'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT rely on prior requests over the same connection to establish context (capabilities, protocol version, client identity); every request supplies this in `_meta`.",
+   "cite": "basic__index.md 'Statelessness'; schema.ts 96"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD be prepared to handle requests associated with multiple tasks, threads, or conversations.",
+   "cite": "basic__index.md 'Statelessness'"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Servers SHOULD NOT require that a client reuse the same connection or process for related operations.",
+   "cite": "basic__index.md 'Statelessness'"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "Clients SHOULD NOT use an individual task, thread, or conversation as the lifetime boundary for the stdio process.",
+   "cite": "basic__index.md 'Statelessness'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "State spanning multiple requests (long-running tasks, application handles) MUST be referenced by an explicit identifier the client passes on each request.",
+   "cite": "basic__index.md 'Statelessness'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "HTTP-transport implementations SHOULD conform to the Authorization spec; STDIO implementations SHOULD NOT follow it and instead retrieve credentials from the environment; custom auth strategies MAY be negotiated.",
+   "cite": "basic__index.md 'Auth'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Clients and servers MUST support JSON Schema 2020-12 for schemas without `$schema`; schemas MAY specify another dialect via `$schema`; implementations MUST support at least 2020-12 and SHOULD document other supported dialects; 2020-12 is RECOMMENDED.",
+   "cite": "basic__index.md 'Schema Dialect' / 'Implementation Requirements'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "MUST validate schemas according to their declared or default dialect; MUST handle unsupported dialects gracefully by returning an appropriate error indicating the dialect is not supported; schemas MUST be valid per their dialect.",
+   "cite": "basic__index.md 'Implementation Requirements' / 'Schema Validation'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "MUST NOT automatically dereference `$ref` values that resolve to a network URI.",
+   "cite": "basic__index.md '$ref Resolution'"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "MAY offer an opt-in mode fetching non-local `$ref`s, but it MUST be disabled by default and SHOULD enforce a host allowlist or at minimum reject loopback, link-local and private addresses, apply timeouts and size limits, and log dereferenced URIs.",
+   "cite": "basic__index.md '$ref Resolution'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Schemas failing validation due to an unresolved external `$ref` SHOULD be rejected rather than treated as permissive.",
+   "cite": "basic__index.md '$ref Resolution'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "SHOULD apply bounds on composition keywords (anyOf/oneOf/allOf/if-then-else) and $defs: max schema depth, cap on subschema count, or per-validation time budget.",
+   "cite": "basic__index.md 'Composition-Keyword Resource Use'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Implementations MUST NOT make assumptions about values at reserved `_meta` keys.",
+   "cite": "basic__index.md '_meta'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "`_meta` key prefix, if present, MUST be dot-separated labels followed by `/`; labels MUST start with a letter and end with a letter or digit, interior letters/digits/hyphens; SHOULD use reverse-DNS; any prefix whose second label is `modelcontextprotocol` or `mcp` is reserved.",
+   "cite": "basic__index.md '_meta' Key name format"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "`_meta` key name, unless empty, MUST begin and end with `[a-z0-9A-Z]`; MAY contain `-`, `_`, `.` and alphanumerics in between.",
+   "cite": "basic__index.md '_meta' Name"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every client request MUST include `_meta[\"io.modelcontextprotocol/protocolVersion\"]` (string) and `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` (ClientCapabilities).",
+   "cite": "basic__index.md 'Per-request protocol fields'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A request missing any required `_meta` field is malformed; server MUST reject with -32602 Invalid params; on HTTP status MUST be 400 Bad Request.",
+   "cite": "basic__index.md 'Per-request protocol fields'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD include `io.modelcontextprotocol/clientInfo` on every request unless configured not to.",
+   "cite": "basic__index.md 'Per-request protocol fields'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Server MUST NOT rely on capabilities the client has not declared; if a required capability is missing it MUST return MissingRequiredClientCapabilityError (-32021) with `data.requiredCapabilities` listing the missing ones; HTTP status MUST be 400.",
+   "cite": "basic__index.md 'Per-request protocol fields'; schema.ts 503-526"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On HTTP, `_meta` protocolVersion MUST match the `MCP-Protocol-Version` header, otherwise the server MUST return 400; if the version is unsupported the server MUST return UnsupportedProtocolVersionError (-32022) with data.supported[] and data.requested; HTTP 400.",
+   "cite": "schema.ts RequestMetaObject 69-76, 472-501"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "HeaderMismatchError (-32020) when HTTP header values do not match body values or required headers are missing/malformed; HTTP status MUST be 400.",
+   "cite": "schema.ts 427-470"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD include `_meta[\"io.modelcontextprotocol/serverInfo\"]` (Implementation) in every result unless configured not to.",
+   "cite": "basic__index.md 'Per-response protocol fields'"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "clientInfo/serverInfo are self-reported and unverified; implementations SHOULD NOT use them to change behavior or for security decisions.",
+   "cite": "basic__index.md Note under per-response fields; schema.ts 85-88, 152-155"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On notifications delivered via a subscriptions/listen stream, the server MUST include `_meta[\"io.modelcontextprotocol/subscriptionId\"]`.",
+   "cite": "basic__index.md '_meta'; schema.ts 120-134"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "If `io.modelcontextprotocol/logLevel` is absent from a request, the server MUST NOT send notifications/message for that request.",
+   "cite": "schema.ts 100-105; changelog item 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "When present, `traceparent`, `tracestate`, `baggage` in `_meta` MUST follow W3C Trace Context / W3C Baggage formats (exception to the prefix rule).",
+   "cite": "basic__index.md 'OpenTelemetry trace context'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that render icons MUST support image/png and image/jpeg (and image/jpg); SHOULD support image/svg+xml and image/webp.",
+   "cite": "basic__index.md 'icons'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Icon consumers MUST take security precautions: treat metadata/bytes as untrusted; ensure URI is https or data:; MUST reject unsafe schemes and redirects (javascript:, file:, ftp:, ws:, local app schemes); disallow scheme changes and cross-origin redirects; be resilient to oversized images/frames (MAY set size limits); fetch without credentials (no cookies/Authorization); verify same origin as server; MAY disallow types or sanitize; validate MIME via magic bytes, reject mismatch/unknown; maintain strict allowlist.",
+   "cite": "basic__index.md 'icons' Security considerations"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Hosts must obtain explicit user consent before exposing user data to servers and before invoking any tool; must not transmit resource data elsewhere without consent; tool annotations from untrusted servers are untrusted.",
+   "cite": "index.md 'Security and Trust & Safety' (lowercase 'must', non-BCP14)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementors SHOULD build consent/authorization flows, document security implications, implement access controls, follow security best practices, consider privacy.",
+   "cite": "index.md 'Implementation Guidelines'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implemented server features must be advertised in server capabilities; both parties must respect declared capabilities; tool invocation requires the server to declare tools capability.",
+   "cite": "architecture__index.md 'Capability Negotiation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST implement server/discover; clients MAY call it.",
+   "cite": "schema.ts 653-668 (referenced from architecture page)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "InputRequiredResult MUST contain at least one of inputRequests or requestState; client must treat requestState as opaque.",
+   "cite": "schema.ts 571-595 (referenced from basic page ResultType)"
+  }
+ ],
+ "wire_details": [
+  "JSONRPC_VERSION = \"2.0\"; LATEST_PROTOCOL_VERSION = \"2026-07-28\" (schema.ts 30-32)",
+  "Standard error codes: PARSE_ERROR -32700, INVALID_REQUEST -32600, METHOD_NOT_FOUND -32601, INVALID_PARAMS -32602, INTERNAL_ERROR -32603",
+  "MCP error codes: HEADER_MISMATCH -32020 (HeaderMismatchError, no data schema), MISSING_REQUIRED_CLIENT_CAPABILITY -32021 (data.requiredCapabilities: ClientCapabilities), UNSUPPORTED_PROTOCOL_VERSION -32022 (data.supported: string[], data.requested: string); each MUST be HTTP 400 Bad Request",
+  "Range partition: -32000..-32019 legacy/implementation-defined (never allocate new); -32020..-32099 spec-reserved, allocated sequentially from -32020; retired never-reuse: -32002 (resource not found, now -32602), -32042 (URL elicitation required, 2025-11-25 only)",
+  "-32602 usage contexts (schema.ts 361-391): unknown tool/invalid tool args, unknown prompt/missing args, invalid/expired cursor, invalid log level, undeclared elicitation mode, sampling tool-result mix; also missing required _meta fields",
+  "-32601 usage: unknown method OR method gated behind an unadvertised server capability (e.g. prompts/list without prompts capability)",
+  "Reserved _meta keys: progressToken; io.modelcontextprotocol/protocolVersion; io.modelcontextprotocol/clientInfo; io.modelcontextprotocol/clientCapabilities; io.modelcontextprotocol/logLevel; io.modelcontextprotocol/subscriptionId; io.modelcontextprotocol/serverInfo; traceparent; tracestate; baggage",
+  "_meta key grammar regex (derived): prefix `([A-Za-z]([A-Za-z0-9-]*[A-Za-z0-9])?)(\\.[A-Za-z]([A-Za-z0-9-]*[A-Za-z0-9])?)*/` optional; name `` (empty) or `[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?`; reserved if second label == modelcontextprotocol|mcp (e.g. io.modelcontextprotocol/, dev.mcp/, org.modelcontextprotocol.api/, com.mcp.tools/); com.example.mcp/ not reserved",
+  "ResultType values: \"complete\", \"input_required\"; extension values allowed only when extension advertised",
+  "HTTP header referenced: MCP-Protocol-Version (must equal _meta protocolVersion; mismatch -> 400 / -32020)",
+  "Implementation: name: string (req), version: string (req), title?, description?, websiteUrl? (uri), icons?: Icon[]",
+  "Icon: src: string (uri, https or data: only) required; mimeType?: string; sizes?: string[] (\"WxH\" e.g. \"48x48\", or \"any\"); theme?: \"light\"|\"dark\"",
+  "Icon MIME types: MUST image/png, image/jpeg, image/jpg; SHOULD image/svg+xml, image/webp",
+  "CacheableResult: ttlMs: number (>=0; 0 = immediately stale), cacheScope: \"public\"|\"private\" (private caches MUST NOT be shared across authorization contexts)",
+  "PaginatedRequestParams.cursor?: string; PaginatedResult.nextCursor?: string",
+  "JSON Schema: default dialect https://json-schema.org/draft/2020-12/schema when $schema absent; example explicit dialect \"http://json-schema.org/draft-07/schema#\"",
+  "Method names appearing in focus pages: server/discover, subscriptions/listen, notifications/subscriptions/acknowledged, notifications/progress, notifications/cancelled, notifications/message, sampling/createMessage (as InputRequest inside InputRequiredResult), tools/call (example)",
+  "Trace context example value: traceparent \"00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01\""
+ ],
+ "sdk_implications": [
+  "Message model: classes/records for JSONRPCRequest (id string|int, non-null), JSONRPCNotification (no id), JSONRPCResultResponse, JSONRPCErrorResponse (id optional). Serializer must emit `jsonrpc:\"2.0\"` and reject null ids; parser must classify by presence of id/method/result/error and produce -32600/-32700 for malformed input (with id omitted when unreadable).",
+  "Request-id allocator must guarantee uniqueness among the sender's in-flight requests (monotonic counter is sufficient); track pending responses per id, including long-lived subscriptions/listen requests.",
+  "Client-side request builder must inject `_meta[\"io.modelcontextprotocol/protocolVersion\"]` and `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` on EVERY request (never rely on a prior initialize), and by default `clientInfo`; expose an opt-out for clientInfo; optional `logLevel` and `progressToken` injection; validate user-supplied _meta keys against the key grammar and forbid reserved prefixes for non-protocol keys.",
+  "Server-side request pipeline must, per request and without connection state: validate presence/type of the two required _meta keys (-32602, HTTP 400), check protocol version support (-32022 with data.supported/requested, HTTP 400), on HTTP compare against MCP-Protocol-Version header (-32020/400), and expose a helper that throws -32021 with data.requiredCapabilities when a handler needs an undeclared client capability. Handler context object must carry the per-request ClientCapabilities, protocol version, clientInfo, logLevel — no session object.",
+  "Server result builder must always set `resultType` (default \"complete\") and, unless configured off, `_meta[\"io.modelcontextprotocol/serverInfo\"]`; support InputRequiredResult (resultType \"input_required\", inputRequests/requestState, at least one present).",
+  "Client result parser: map resultType; treat absent as \"complete\" (legacy); throw on unrecognized value unless it belongs to an extension the client negotiated; surface CacheableResult (ttlMs/cacheScope) and PaginatedResult (nextCursor) fields generically.",
+  "Error type hierarchy: McpError with code/message/data; typed constants for -32700,-32600,-32601,-32602,-32603,-32020,-32021,-32022; guard that forbids emitting -32002/-32042 and any undefined -32020..-32099 code; local errors (timeouts, transport failures) must use a distinct class or code outside -32768..-32000 and never masquerade as peer errors; accept -32002 from legacy servers when in dual-era client mode.",
+  "Notification dispatch: emit no response; for server-side subscription streams stamp `_meta[\"io.modelcontextprotocol/subscriptionId\"]` = listen request id on every notification and send notifications/subscriptions/acknowledged first; client must route notifications by subscriptionId.",
+  "Statelessness: no in-memory 'session' keyed by connection; any cross-request state (tasks, handles) keyed by explicit identifiers passed in params; stdio server must accept interleaved unrelated requests on one process; stdio client must not spawn one process per conversation.",
+  "JSON Schema validation component: 2020-12 validator required (PowerShell has none built-in; SDK needs a bundled/ported validator or an optional dependency); honor `$schema` for other dialects or return a clear 'dialect not supported' error; never fetch network `$ref` by default; optional opt-in fetcher with allowlist/private-address rejection/timeouts/size limits/logging; enforce depth/subschema/time bounds; reject schemas with unresolved external $ref.",
+  "Icon handling (client side): Icon/Implementation types; loader that only accepts https:/data: URIs, blocks redirects to other origins or unsafe schemes, fetches without credentials, checks magic bytes against allowlist (png, jpeg mandatory; svg, webp optional), applies size limits.",
+  "Implementation info type with name/version required, optional title/description/websiteUrl/icons; used both in outgoing _meta (client) and result _meta (server).",
+  "Capability types: ClientCapabilities {experimental, roots(deprecated), sampling{context,tools}(deprecated), elicitation{form,url}, extensions{}} and ServerCapabilities {experimental, logging(deprecated), completions, prompts{listChanged}, resources{subscribe,listChanged}, tools{listChanged}, extensions{}}; extension keys validated with mandatory prefix grammar; server must return -32601 for methods whose capability it did not advertise.",
+  "OpenTelemetry pass-through: preserve traceparent/tracestate/baggage keys verbatim on _meta; optional validation of W3C format.",
+  "Deprecation tracking: logLevel _meta key, roots/sampling client capabilities and logging server capability are deprecated as of 2026-07-28 (SEP-2577) but must still be supported for >=12 months."
+ ],
+ "legacy_delta": [
+  "2025-11-25 / 2025-06-18: stateful `initialize` / `notifications/initialized` handshake negotiated version and capabilities once per session; 2026-07-28 removes it and requires `_meta` protocolVersion + clientCapabilities on every request (changelog item 2, SEP-2575). Dual-era servers must answer `initialize` with legacy semantics scoped to that stdio process/HTTP session; dual-era clients probe with a modern request and fall back to `initialize` on a non-modern error / 4xx without recognized modern error body (basic__versioning.md 131-180).",
+  "`_meta` in 2025-11-25 schema was optional on RequestParams (`_meta?: {progressToken?, [key]: unknown}`); in 2026-07-28 RequestParams._meta is required (RequestMetaObject) because it carries required keys. Notification/Result _meta remain optional (except SubscriptionsListenResult).",
+  "`resultType` did not exist before 2026-07-28; clients MUST treat absent as \"complete\". Legacy servers never send \"input_required\"; server-initiated requests (sampling/createMessage, elicitation/create, roots/list as JSON-RPC requests s->c) are replaced by MRTR InputRequiredResult (changelog item 7).",
+  "Error codes: 2025-11-25 defined URL_ELICITATION_REQUIRED -32042 (URLElicitationRequiredError with data.elicitations) — MUST NOT be emitted in 2026-07-28 but a dual-era client talking to a 2025-11-25 server must recognize it. -32002 resource-not-found used by 2025-11-25 and 2025-06-18 servers is replaced by -32602; clients SHOULD still accept -32002. Codes -32020..-32022 and the range policy are new in 2026-07-28; 2025-11-25 schema comment merely said 'Implementation-specific [-32000,-32099]'.",
+  "2025-11-25 reserved `_meta` key `io.modelcontextprotocol/related-task` (tasks) existed; new reserved keys in 2026-07-28: protocolVersion, clientInfo, clientCapabilities, logLevel, subscriptionId, serverInfo, plus formal OpenTelemetry keys (traceparent/tracestate/baggage, changelog minor item 2).",
+  "`ping`, `logging/setLevel`, `notifications/roots/list_changed` removed in 2026-07-28 (changelog item 5); log level now via `_meta[\"io.modelcontextprotocol/logLevel\"]`; a dual-era SDK must still implement them for legacy sessions.",
+  "Implementation type: 2025-06-18 had no icons (Implementation extends BaseMetadata only); 2025-11-25 added Icon/Icons, description, websiteUrl; 2026-07-28 unchanged in shape.",
+  "Server capability discovery moved from InitializeResult (protocolVersion, capabilities, serverInfo, instructions) to `server/discover` DiscoverResult (supportedVersions[], capabilities, instructions, ttlMs, cacheScope); serverInfo now travels in result _meta.",
+  "Client capabilities roots and sampling, and server capability logging, are deprecated in 2026-07-28 (SEP-2577) but were first-class in 2025-11-25 / 2025-06-18.",
+  "HTTP: 2025-11-25 used MCP-Protocol-Version header plus Mcp-Session-Id sessions; 2026-07-28 keeps MCP-Protocol-Version (must match _meta) and defines HeaderMismatch -32020; session semantics are covered on the transport page (not in this focus set)."
+ ],
+ "open_questions": [
+  "The basic page says 'error responses MUST include the same ID... except where the ID could not be read'; whether a server may respond with `id: null` (JSON-RPC style) vs omitting `id` is not stated — schema.ts makes `id` optional (omit), no null allowed for requests; SDK should omit.",
+  "The 'Required' column marks protocolVersion and clientCapabilities required on 'every request' — whether this applies to legacy `initialize` in dual-era mode is defined on the versioning page, not here.",
+  "Exact HTTP error-body expectations for -32602 on missing _meta fields (JSON-RPC error body vs plain 400) are stated only as 'status MUST be 400'; body format presumably per streamable-http page.",
+  "Which HTTP status applies when a client receives -32021/-32022 over stdio is moot; over HTTP 400 — but whether the client should retry automatically with a version from data.supported is only 'should choose ... and retry' in schema.ts (non-normative casing).",
+  "Whether `_meta` keys with an EMPTY name (grammar allows 'unless empty') are actually usable (e.g. key `io.modelcontextprotocol/`) is unclear; SDK should reject empty names conservatively or allow per grammar — needs decision.",
+  "The spec lists icon `mimeType` as advisory and requires magic-byte detection, but provides no normative list beyond png/jpeg/svg/webp; SDK allowlist policy for gif etc. is implementation choice.",
+  "The three MCP error codes' `message` texts are not standardized (examples referenced via includeCode not in local material).",
+  "Logging `_meta` logLevel is deprecated in schema.ts (SEP-2577) while the basic page still lists it as an active reserved key without deprecation note; the replacement mechanism (if any) is not visible in the focus pages — check logging page / deprecated.md.",
+  "No explicit MUST on how a server should handle a request whose `_meta` contains reserved-prefix keys it does not understand (ignore vs reject); only 'MUST NOT make assumptions about values'. SDK should ignore unknown keys."
+ ]
+}

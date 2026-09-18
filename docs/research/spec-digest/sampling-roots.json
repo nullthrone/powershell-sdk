@@ -1,0 +1,292 @@
+{
+ "source": "pages/specification__2026-07-28__client__sampling.md; pages/specification__2026-07-28__client__roots.md; schema.ts (CreateMessageRequestParams, CreateMessageRequest, CreateMessageResult, SamplingMessage, SamplingMessageContentBlock, ToolChoice, ModelPreferences, ModelHint, ToolUseContent, ToolResultContent, ClientCapabilities, ListRootsRequest, ListRootsResult, Root)",
+ "summary": "Sampling (sampling/createMessage) and Roots (roots/list) are both DEPRECATED as of 2026-07-28 (SEP-2577): SHOULD NOT be adopted by new implementations, remain spec'd 12+ months. Both are now delivered exclusively via the MRTR pattern: server embeds the request in InputRequiredResult.inputRequests, client answers via inputResponses on a retry of its original request (no more standalone bidirectional RPC). Sampling: CreateMessageRequestParams requires messages[] and maxTokens; optional modelPreferences/systemPrompt/includeContext/temperature/stopSequences/metadata/tools/toolChoice. Result: role, content, model, stopReason. New in this revision: `tools`/`toolChoice` gated by ClientCapabilities.sampling.tools (MUST error if used without declaration); ToolUseContent/ToolResultContent content blocks; strict message-shape rules (tool_result messages must contain ONLY tool results; every ToolUseContent-bearing assistant message MUST be followed by an all-ToolResultContent user message with matching toolUseId). includeContext 'thisServer'/'allServers' newly deprecated (SEP-2596), gated by sampling.context capability, default/preferred value 'none'. Roots: roots/list has no params beyond optional _meta; result is Root[] with uri (MUST be file://) and optional name. ClientCapabilities.roots is now just `{}` — no listChanged field, and no notifications/roots/list_changed notification exists in this schema (removed vs. earlier revisions). Both capabilities declared per-request in _meta.io.modelcontextprotocol/clientCapabilities. Strong human-in-the-loop SHOULD requirements for sampling (review/approve/edit prompts and responses).",
+ "legacy_delta": [
+  "Sampling and Roots are both marked @deprecated as of 2026-07-28 (SEP-2577) in schema.ts (every related interface carries this JSDoc tag); under the feature lifecycle policy they remain in the spec for at least 12 months post-release before becoming eligible for removal (pages/.../sampling.md L9-19, roots.md L9-19).",
+  "In prior revisions (2025-11-25/2025-06-18) sampling/createMessage and roots/list were ordinary client-directed requests over the base JSON-RPC transport; in 2026-07-28 they are delivered exclusively as an InputRequiredResult.inputRequests entry inside the MRTR (multi-round trip request) pattern, and the client's answer is returned via inputResponses on a RETRY of the original client->server request (sampling.md L115-162, L150-151; roots.md L59-81). SDKs targeting 2026-07-28 MUST implement this via MRTR, not via a standalone bidirectional request/response.",
+  "roots.md and schema.ts show NO roots/list_changed notification and NO ClientCapabilities.roots.listChanged sub-field in this revision: ClientCapabilities.roots is now typed as an empty object `{}` (schema.ts L716-732). Earlier revisions had `listChanged?: boolean` under roots capability and a notifications/roots/list_changed notification; both are gone from 2026-07-28's roots page and schema — SDKs must not implement list-changed notifications for roots under this revision.",
+  "Sampling gained a new `sampling.tools` client capability sub-object and `tools`/`toolChoice` request params, plus ToolUseContent/ToolResultContent message content types, tool-result message-content constraints, and tool-use/tool-result balance rules — none of these existed in 2025-11-25 sampling.",
+  "`includeContext` values `thisServer` and `allServers` are newly deprecated in this revision under SEP-2596, gated behind a new `sampling.context` client capability sub-object; servers SHOULD omit includeContext or use only `\"none\"` unless the client declares `sampling.context` (sampling.md L85-109, L99-109, L621-628; schema.ts L2118-2124).",
+  "Capability declaration location changed: clients declare `sampling`/`roots` under `_meta.io.modelcontextprotocol/clientCapabilities` on each request (sampling.md L56-97; roots.md L42-53; schema.ts L98), not via a one-time initialize handshake capabilities object as in pre-MRTR revisions."
+ ],
+ "methods": [
+  {
+   "name": "sampling/createMessage",
+   "direction": "server->client (embedded as an inputRequest inside InputRequiredResult.inputRequests per the MRTR pattern; the client's answer rides back as an entry in inputResponses on the client's retry of its original request)",
+   "params": "CreateMessageRequestParams (schema.ts L2104-2152): messages: SamplingMessage[] (REQUIRED) — each has role: 'user'|'assistant' (REQUIRED), content: SamplingMessageContentBlock | SamplingMessageContentBlock[] (REQUIRED), _meta?: MetaObject. modelPreferences?: ModelPreferences (advisory, client MAY ignore). systemPrompt?: string (client MAY modify or ignore). includeContext?: 'none'|'thisServer'|'allServers', default 'none'; 'thisServer'/'allServers' DEPRECATED (SEP-2596). temperature?: number (client MAY modify/ignore; valid range provider-dependent). maxTokens: number REQUIRED (client MUST respect as an upper bound; MAY sample fewer tokens). stopSequences?: string[] (client MAY modify/ignore). metadata?: JSONObject, provider-specific passthrough (client MAY modify/ignore). tools?: Tool[] — client MUST return an error if provided without ClientCapabilities.sampling.tools declared. toolChoice?: ToolChoice { mode?: 'auto'|'required'|'none', default 'auto' } — same MUST-error-if-undeclared-capability rule as tools.",
+   "result": "CreateMessageResult extends SamplingMessage (schema.ts L2210-2228): role: 'user'|'assistant' (in practice 'assistant'), content: single SamplingMessageContentBlock or array thereof (block types: TextContent {type:'text',text}, ImageContent {type:'image',data (base64),mimeType}, AudioContent {type:'audio',data (base64),mimeType}, ToolUseContent {type:'tool_use',id,name,input:object,_meta?}, ToolResultContent {type:'tool_result',toolUseId,content:ContentBlock[],structuredContent?,isError?,_meta?}). model: string REQUIRED (name of model that generated the message). stopReason?: 'endTurn'|'stopSequence'|'maxTokens'|'toolUse'|string (open string; spec's 4 values are non-exhaustive, implementations MAY define their own). _meta?: MetaObject (inherited from SamplingMessage).",
+   "notes": "DEPRECATED as of 2026-07-28 (SEP-2577); new implementations SHOULD NOT adopt, existing ones SHOULD migrate to direct LLM provider API integration (sampling.md L9-19). Gated by ClientCapabilities.sampling (any non-null object, e.g. {}) declared per-request under _meta.io.modelcontextprotocol/clientCapabilities. If tools/toolChoice supplied, client MUST error unless ClientCapabilities.sampling.tools declared (schema.ts L2143,L2148). Message-list SHOULD NOT be retained by the client between separate requests (sampling.md L526-527). Human-in-the-loop: client SHOULD present a UI for reviewing/approving/editing the request and reviewing the result before it's returned/sent onward (Warning block sampling.md L37-46; also 'The client should also inform the user before beginning sampling... and decide whether to approve it' / 'should inform the user before returning the sampled message' schema.ts L2174,L2192-2193)."
+  },
+  {
+   "name": "roots/list",
+   "direction": "server->client (embedded as an inputRequest inside InputRequiredResult.inputRequests per MRTR; client's answer rides back as an inputResponses entry on the retried client->server request)",
+   "params": "ListRootsRequest (schema.ts L2718-2723): method: 'roots/list' (fixed), params?: { _meta?: MetaObject } — both request and params are otherwise EMPTY (no filtering/pagination fields exist).",
+   "result": "ListRootsResult (schema.ts L2742-2744): roots: Root[] REQUIRED. Root (schema.ts L2758-2775): uri: string REQUIRED, format uri, MUST start with 'file://' ('this restriction may be relaxed in future versions' — current spec requires file:// only). name?: string (optional human-readable display name). _meta?: MetaObject. No `description`, no other fields exist on Root — do not invent any.",
+   "notes": "DEPRECATED as of 2026-07-28 (SEP-2577); existing implementations SHOULD migrate to passing directories/files via tool parameters, resource URIs, or server configuration (roots.md L9-19). Gated by ClientCapabilities.roots ({} — an empty-but-present object) declared per-request under _meta.io.modelcontextprotocol/clientCapabilities (roots.md L42-53; schema.ts L716-732). Roots are informational guidance only, NOT an access-control mechanism; the protocol does NOT enforce that servers stay within roots (roots.md L21-26). No list_changed notification exists in this revision's schema/page for roots (see legacy_delta) — SDKs must not add one."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "New implementations SHOULD NOT adopt the Sampling feature; existing implementations SHOULD migrate to integrating directly with LLM provider APIs.",
+   "cite": "sampling.md L9-19 (Warning)"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "New implementations SHOULD NOT adopt the Roots feature; existing implementations SHOULD migrate to passing directories/files via tool parameters, resource URIs, or server configuration.",
+   "cite": "roots.md L9-19 (Warning)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "There SHOULD always be a human in the loop with the ability to deny sampling requests.",
+   "cite": "sampling.md L37-39"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Applications SHOULD provide UI to review sampling requests, allow users to view/edit prompts before sending, and present generated responses for review before delivery.",
+   "cite": "sampling.md L41-46"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST declare support for tool use via the `sampling.tools` capability to receive tool-enabled sampling requests.",
+   "cite": "sampling.md L52"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send tool-enabled sampling requests to clients that have not declared support for tool use via `sampling.tools`.",
+   "cite": "sampling.md L52"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that support sampling MUST declare the `sampling` capability in `_meta.io.modelcontextprotocol/clientCapabilities` on each request.",
+   "cite": "sampling.md L56-58"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The client MUST return an error if `tools` or `toolChoice` is provided in CreateMessageRequestParams but ClientCapabilities.sampling.tools is not declared.",
+   "cite": "schema.ts L2143, L2148"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD avoid using the deprecated `includeContext` values `thisServer`/`allServers` (e.g. omit the field, since default is 'none').",
+   "cite": "sampling.md L99-106"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Servers SHOULD NOT use `includeContext: 'thisServer'|'allServers'` unless the client declares the `sampling.context` capability.",
+   "cite": "sampling.md L106-108; schema.ts L2118-2120"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "When a user message contains tool results (type 'tool_result'), it MUST contain ONLY tool results; mixing tool results with other content types (text/image/audio) in the same message is not allowed.",
+   "cite": "sampling.md L378-382"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every assistant message containing ToolUseContent blocks MUST be followed by a user message consisting entirely of ToolResultContent blocks, each tool use (id: $id) matched by a tool result (toolUseId: $id), before any other message.",
+   "cite": "sampling.md L436-444"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST ensure that when replying to stopReason:'toolUse', each ToolUseContent item is answered with a ToolResultContent item with matching toolUseId, and the user message contains only tool results.",
+   "cite": "sampling.md L680"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Sampling messages MUST contain a `role` field ('user' or 'assistant') and a `content` field.",
+   "cite": "sampling.md L523-524"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "The list of messages in a sampling request SHOULD NOT be retained by the client between separate requests.",
+   "cite": "sampling.md L526-527"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients MAY map model hints to equivalent models from different providers; hints are advisory and clients make the final model selection.",
+   "cite": "sampling.md L586-587"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If multiple `hints` are specified, the client MUST evaluate them in order (first match taken).",
+   "cite": "schema.ts L2512-2513"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "The client SHOULD prioritize hints over numeric priorities, but MAY use priorities to disambiguate.",
+   "cite": "schema.ts L2515-2516"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "The client MAY modify or ignore `systemPrompt` without communicating this to the server.",
+   "cite": "sampling.md L609-611; schema.ts L2111"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "The client MAY modify or ignore `includeContext` without communicating this to the server.",
+   "cite": "sampling.md L624-627"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The client MUST respect the `maxTokens` parameter (as an upper bound; MAY sample fewer tokens than requested).",
+   "cite": "sampling.md L638; schema.ts L2131-2134"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "The client MAY modify or ignore `temperature`, `stopSequences`, and `metadata`.",
+   "cite": "sampling.md L640-642"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY provide their own arbitrary `stopReason` values beyond the four specified ('endTurn','stopSequence','maxTokens','toolUse') since it is an open string on the client's result.",
+   "cite": "sampling.md L659; schema.ts L2219-2227"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD implement user approval controls for sampling.",
+   "cite": "sampling.md L672"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Both parties SHOULD validate message content in sampling.",
+   "cite": "sampling.md L673"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD respect model preference hints.",
+   "cite": "sampling.md L674"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD implement rate limiting for sampling.",
+   "cite": "sampling.md L675"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Both parties MUST handle sensitive data appropriately in sampling.",
+   "cite": "sampling.md L676"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Both parties SHOULD implement iteration limits for tool loops.",
+   "cite": "sampling.md L681"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If an error occurs or the user declines the sampling request, the client does not need to replay the initial call with an error message, since the server is not blocked waiting on the InputRequiredResult response.",
+   "cite": "sampling.md L667-668"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that support roots MUST declare the `roots` capability in `_meta.io.modelcontextprotocol/clientCapabilities` on each request.",
+   "cite": "roots.md L42-44"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "A Root's `uri` MUST be a `file://` URI in the current specification.",
+   "cite": "roots.md L102-103; schema.ts L2760-2763"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST only expose roots with appropriate permissions, validate all root URIs to prevent path traversal, implement proper access controls, and monitor root accessibility.",
+   "cite": "roots.md L139-143"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD handle cases where roots become unavailable, respect root boundaries during operations, and validate all paths against provided roots.",
+   "cite": "roots.md L145-148"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD prompt users for consent before exposing roots to servers, provide clear UI for root management, validate root accessibility before exposing, and monitor for root changes.",
+   "cite": "roots.md L152-156"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD check for the roots capability before usage, respect root boundaries, and cache root information appropriately.",
+   "cite": "roots.md L158-161"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If an error occurs, the client does not need to replay the initial call with an error message, since the server is not blocked waiting on the InputRequiredResult response (roots).",
+   "cite": "roots.md L134-135"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Implementations wrapping providers that support disabling parallel tool use MAY expose this as an extension; it is not part of core MCP.",
+   "cite": "sampling.md L488"
+  }
+ ],
+ "wire_details": [
+  "Capability announcement key: `_meta.io.modelcontextprotocol/clientCapabilities` object attached to each client->server request; nested keys `sampling` ({} or {tools?:{}, context?:{}}) and `roots` ({}) (sampling.md L56-97; roots.md L42-53; schema.ts L98, L716-786).",
+  "Method name constants: `sampling/createMessage` (schema.ts L2186), `roots/list` (schema.ts L2719).",
+  "Both methods are delivered as an entry of `InputRequiredResult.inputRequests` (server->client) and answered via `inputResponses` on the client's retry of its original request — this is the MRTR (multi-round-trip request) pattern documented at /specification/2026-07-28/basic/patterns/mrtr#inputrequests (referenced sampling.md L117, roots.md L62); the retried request also carries `requestState` per the roots.md sequence diagram (roots.md L93).",
+  "SamplingMessageContentBlock discriminated union `type` values: 'text' | 'image' | 'audio' | 'tool_use' | 'tool_result' (schema.ts L2258-2263).",
+  "TextContent: {type:'text', text}. ImageContent: {type:'image', data (base64), mimeType}. AudioContent: {type:'audio', data (base64), mimeType}. Example MIME types shown: image/jpeg, audio/wav (sampling.md L533-558).",
+  "ToolUseContent: {type:'tool_use', id, name, input: object, _meta?} (schema.ts L2406-2431).",
+  "ToolResultContent: {type:'tool_result', toolUseId, content: ContentBlock[], structuredContent?: unknown, isError?: boolean (default false), _meta?} (schema.ts L2445-2483).",
+  "ToolChoice.mode enum: 'auto' (default) | 'required' | 'none' (schema.ts L2163-2171; sampling.md L472-478).",
+  "CreateMessageResult.stopReason enum (non-exhaustive/open string): 'endTurn' | 'stopSequence' | 'maxTokens' | 'toolUse' | arbitrary provider string (schema.ts L2227; sampling.md L659-663).",
+  "Root.uri must have scheme 'file://' (schema.ts L2760-2766; roots.md L102-103).",
+  "No pagination cursor exists for roots/list (unlike list-oriented methods elsewhere in MCP) — ListRootsRequest.params only carries optional _meta (schema.ts L2718-2723).",
+  "No `notifications/roots/list_changed` message and no `listChanged` boolean field on ClientCapabilities.roots exist in this schema (schema.ts L716-732) — confirm absence explicitly for SDK planning.",
+  "Error handling for both features: no explicit JSON-RPC error code is defined on this page for sampling/roots-specific failures; the pages state the client need not replay/error the original call on decline/failure because the server isn't blocked awaiting InputRequiredResult (sampling.md L667-668; roots.md L134-135) — implies error signaling, if any, occurs via the general MRTR/JSON-RPC error mechanics documented elsewhere, not a sampling/roots-specific code."
+ ],
+ "sdk_implications": [
+  "PowerShell SDK must model sampling/createMessage and roots/list NOT as simple bidirectional RPC calls but as entries produced by the server inside InputRequiredResult.inputRequests, with a corresponding client-side dispatcher that resolves each inputRequest (invoking user-registered sampling/roots handlers) and packs results into inputResponses on a retry of the original outbound request — requires implementing the MRTR retry loop as a prerequisite before Sampling/Roots can work at all.",
+  "Client-side sampling handler API must accept CreateMessageRequestParams (messages, modelPreferences, systemPrompt, includeContext, temperature, maxTokens (required), stopSequences, metadata, tools, toolChoice) and return CreateMessageResult (role, content [single-or-array], model, stopReason). SDK must enforce maxTokens as a MUST-respect ceiling (allow sampling fewer) and treat temperature/stopSequences/metadata as best-effort/ignorable.",
+  "SDK must expose two client capability flags distinctly: `sampling` (base) and `sampling.tools` (tool-enabled). Server-side sampling client (used by MCP servers written in this SDK) MUST throw/error before sending a request with `tools`/`toolChoice` populated unless the negotiated ClientCapabilities show `sampling.tools` declared — this validation belongs in the server-side sampling request builder, not just documentation.",
+  "SDK should implement a validator for the message-content invariant: any content block array containing a `tool_result` must contain ONLY tool_result blocks (reject mixed arrays), and enforce the tool-use/tool-result pairing rule (every assistant message with ToolUseContent[] must be immediately followed by a user message wholly of ToolResultContent[] with matching toolUseId sets) — implement as pre-send/pre-parse validation on both client and server sides.",
+  "SDK's PowerShell type system needs discriminated-union classes/records for SamplingMessageContentBlock (TextContent/ImageContent/AudioContent/ToolUseContent/ToolResultContent) with a `type` tag property, mirroring ContentBlock reuse in ToolResultContent.content (which allows resource_link/embedded resource types beyond the 5 sampling block types — must reuse the general ContentBlock type there, not restrict to SamplingMessageContentBlock).",
+  "stopReason must be typed as an open/extensible string (e.g., PowerShell string, not a closed enum) with the 4 known well-known constants documented but not exhaustively validated — same treatment recommended for ToolChoice.mode's closed 3-value enum (auto/required/none) which IS exhaustive per spec.",
+  "Roots: SDK's client-side root-list handler returns Root[] where uri MUST validate as a `file://`-scheme URI; SDK should provide a validation helper and reject/warn on non-file schemes since the spec restricts it 'for now'. No listChanged notification or capability sub-field should be implemented for roots in this revision — omit that surface entirely (do not port over any pre-2026-07-28 SDK code that had it).",
+  "Both features should be flagged [Deprecated] in the PowerShell SDK's public API (e.g., attribute/comment-based deprecation warning) per SEP-2577, since new server/client authors SHOULD NOT adopt them; SDK docs should point sampling users to direct provider-API integration and roots users to tool-parameter/resource-URI/server-config alternatives.",
+  "Human-in-the-loop obligations (SHOULD) are UX-level, not wire-level — the SDK cannot enforce them structurally, but should provide extensibility hooks (e.g., an approval-callback delegate on the sampling handler pipeline) so host applications can implement the review/approve/edit UI the spec calls for, and should NOT auto-approve/auto-return sampling results without exposing such a hook.",
+  "Model preferences (hints ordered-first-match, costPriority/speedPriority/intelligencePriority as 0-1 doubles) should be represented as a plain advisory data object on the server side; the SDK's own bundled client (if any reference client is shipped) should implement ordered hint matching per the MUST in schema.ts, but third-party clients are free to ignore preferences entirely — the SDK's client-side API must not require a preferences implementation to declare the `sampling` capability."
+ ],
+ "open_questions": [
+  "Where exactly is the `Tool` type referenced by CreateMessageRequestParams.tools defined (likely in the tools.md/tools capability section of schema.ts, not shown in this extraction) — needs a follow-up read of the Tools page/schema section to get its exact field list (name, description, inputSchema, outputSchema, annotations, etc.) before finalizing the PowerShell Tool class shared between tools/list and sampling.",
+  "The exact shape/name of the MRTR pattern's InputRequiredResult, inputRequests, inputResponses, and requestState fields is only referenced here, not defined — must read /specification/2026-07-28/basic/patterns/mrtr in full (a separate page) before implementing the retry/dispatch mechanics that both sampling and roots depend on.",
+  "No JSON-RPC error code or _meta key specific to sampling/roots failure reporting appears on either page — need to check the base protocol/transport pages for how a client conveys 'user declined the sampling request' or 'roots unavailable' within the MRTR pattern (is there a per-inputRequest error field, or is a top-level JSON-RPC error the only path?).",
+  "ContentBlock (used as the type of ToolResultContent.content) is referenced but not expanded in the read excerpts — must confirm its full member set (text/image/audio/resource_link/embedded resource) from the base content-types section of schema.ts to type ToolResultContent.content precisely in PowerShell.",
+  "Whether `sampling.tools`/`sampling.context` are validated as pure presence-flags (any JSONObject, including {}) or whether their JSONObject payload can carry meaningful sub-config is unclear beyond 'JSONObject' typing in schema.ts (L754,758) — no documented sub-fields; treat as opaque passthrough capability markers pending further spec text."
+ ]
+}

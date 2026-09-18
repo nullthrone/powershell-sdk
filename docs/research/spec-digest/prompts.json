@@ -1,0 +1,317 @@
+{
+ "methods": [
+  {
+   "name": "prompts/list",
+   "direction": "client->server",
+   "capability_gate": "Server MUST have declared capabilities.prompts (any value, even {}) in DiscoverResult for this method to be valid; client need not declare a capability to call it.",
+   "params": "GetPromptRequestParams n/a — uses PaginatedRequestParams: `_meta` (RequestMetaObject, REQUIRED — see wire_details), `cursor` (string, optional opaque pagination token).",
+   "result": "ListPromptsResult, REQUIRED fields: `cacheScope` (enum \"private\"|\"public\"), `prompts` (array of Prompt), `resultType` (string; MUST be present for this revision, value \"complete\" when not multi-round-trip). OPTIONAL: `_meta` (ResultMetaObject), `nextCursor` (string — presence implies more results), `ttlMs` (integer >=0, cache hint analogous to Cache-Control max-age; 0 = immediately stale).",
+   "notes": "Supports pagination (server/utilities/pagination) and caching (server/utilities/caching). Result set MUST NOT vary per-connection or as a side effect of other requests, but MAY vary by the authorization presented on the request (e.g. scoped to caller's granted scopes) — per Capabilities section."
+  },
+  {
+   "name": "prompts/get",
+   "direction": "client->server",
+   "capability_gate": "Server MUST have declared capabilities.prompts.",
+   "params": "GetPromptRequestParams: `_meta` (RequestMetaObject) REQUIRED; `name` (string) REQUIRED — name of the prompt/template; `arguments` (object, additionalProperties: string — i.e. a string-to-string map) OPTIONAL; `inputResponses` (InputResponses) OPTIONAL — used when retrying after an InputRequiredResult; `requestState` (string) OPTIONAL — echoed back from a prior InputRequiredResult when retrying.",
+   "result": "anyOf GetPromptResult | InputRequiredResult (per GetPromptResultResponse). GetPromptResult REQUIRED: `messages` (array of PromptMessage), `resultType` (string, e.g. \"complete\"). OPTIONAL: `_meta` (ResultMetaObject), `description` (string). InputRequiredResult REQUIRED: `resultType`; conditionally REQUIRED: at least one of `inputRequests` (InputRequests) or `requestState` (string) MUST be present.",
+   "notes": "Arguments MAY be auto-completed via completion/complete using a PromptReference (`type`:\"ref/prompt\", `name`, optional `title`). Multi-round-trip: server MAY return InputRequiredResult instead of completing; client retries prompts/get including `inputResponses` and, if the server supplied one, `requestState` (per basic/patterns/mrtr)."
+  },
+  {
+   "name": "notifications/prompts/list_changed",
+   "direction": "notification s->c",
+   "capability_gate": "Only sent by servers that declared capabilities.prompts.listChanged = true, and only to clients that opened a subscriptions/listen stream with the `promptsListChanged` filter field set true.",
+   "params": "PromptListChangedNotification: `jsonrpc` const \"2.0\", `method` const \"notifications/prompts/list_changed\", `params` (NotificationParams, optional/generic — no prompt-specific payload fields).",
+   "result": "n/a (notification, no response).",
+   "notes": "Spec: 'servers that declared the listChanged capability SHOULD send a notification to clients that have opened a subscriptions/listen stream with promptsListChanged: true.' This is a change from pre-2026-07-28 revisions where list_changed notifications were sent directly without an explicit subscription stream (see legacy_delta)."
+  },
+  {
+   "name": "subscriptions/listen (promptsListChanged: true)",
+   "direction": "client->server (stream open) / server->client (delivery)",
+   "capability_gate": "Relies on the generic subscriptions pattern (basic/patterns/subscriptions); not a prompts-specific capability beyond prompts.listChanged.",
+   "params": "Not detailed in this page; message-flow diagram shows client opens subscriptions/listen with `promptsListChanged: true`, server responds with notifications/subscriptions/acknowledged, and thereafter server pushes notifications/prompts/list_changed on that stream.",
+   "result": "notifications/subscriptions/acknowledged (ack), then async notifications/prompts/list_changed events.",
+   "notes": "Full schema for subscriptions/listen is defined on the generic subscriptions patterns page, not this page; only its use for prompt list-changed is documented here."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that support prompts MUST declare the `prompts` capability in DiscoverResult.capabilities.prompts.",
+   "cite": "pages/.../prompts.md lines 43-45"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that declare the prompts capability MUST respond to prompts/list requests with the set of prompts currently available to the requesting client.",
+   "cite": "prompts.md lines 59-60"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "The prompts/list result set MAY be empty and MAY change over time.",
+   "cite": "prompts.md lines 60-61"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The prompts/list result set MUST NOT vary per-connection or as a side effect of other requests on the connection.",
+   "cite": "prompts.md lines 62-63"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "The prompts/list result set MAY vary by the authorization presented on the request (e.g., returning only prompts the caller's granted scopes permit), since credentials are per-request input, not connection state.",
+   "cite": "prompts.md lines 64-66"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every request MUST include the required `_meta` fields (`io.modelcontextprotocol/protocolVersion`, `io.modelcontextprotocol/clientInfo`, `io.modelcontextprotocol/clientCapabilities`).",
+   "cite": "prompts.md lines 14-20; schema.json RequestMetaObject required list"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For the HTTP transport, the `_meta` protocolVersion value MUST match the MCP-Protocol-Version header; otherwise the server MUST return 400 Bad Request.",
+   "cite": "2026-07-28_schema.json RequestMetaObject.io.modelcontextprotocol/protocolVersion description"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If the server does not support the requested protocol version it MUST return an UnsupportedProtocolVersionError.",
+   "cite": "2026-07-28_schema.json RequestMetaObject description"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD include `io.modelcontextprotocol/clientInfo` on every request unless configured not to.",
+   "cite": "2026-07-28_schema.json RequestMetaObject.io.modelcontextprotocol/clientInfo"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Servers SHOULD NOT use clientInfo to change behavior and SHOULD NOT rely on it for security decisions.",
+   "cite": "2026-07-28_schema.json RequestMetaObject.io.modelcontextprotocol/clientInfo"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "If `io.modelcontextprotocol/logLevel` is absent on a request, the server MUST NOT send notifications/message logging notifications for that request.",
+   "cite": "2026-07-28_schema.json RequestMetaObject.io.modelcontextprotocol/logLevel"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers implementing this protocol version (2026-07-28) MUST include `resultType` in results such as ListPromptsResult, GetPromptResult, InputRequiredResult.",
+   "cite": "2026-07-28_schema.json ListPromptsResult.resultType / GetPromptResult.resultType / InputRequiredResult.resultType descriptions"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For backward compatibility, when a client receives a result from a server implementing an earlier protocol version (no `resultType`), the client MUST treat the absent field as \"complete\".",
+   "cite": "2026-07-28_schema.json ListPromptsResult.resultType description"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY respond to prompts/get with an InputRequiredResult to indicate additional input is needed before the prompt can be resolved (multi round-trip).",
+   "cite": "prompts.md lines 167"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "An InputRequiredResult MUST contain at least one of `inputRequests` or `requestState`.",
+   "cite": "2026-07-28_schema.json InputRequiredResult description"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When retrying a prompts/get request after InputRequiredResult, clients MUST include `inputResponses` and, if provided by the server, `requestState` in the request parameters.",
+   "cite": "prompts.md line 167"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers that declared listChanged SHOULD send notifications/prompts/list_changed to clients that opened a subscriptions/listen stream with `promptsListChanged: true`.",
+   "cite": "prompts.md lines 171-174"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Image content data MUST be base64-encoded and include a valid MIME type.",
+   "cite": "prompts.md lines 258-259"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Audio content data MUST be base64-encoded and include a valid MIME type.",
+   "cite": "prompts.md lines 273-274"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Embedded resources MUST include a valid resource URI, the appropriate MIME type, and either text content or base64-encoded blob data.",
+   "cite": "prompts.md lines 311-315"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that support rendering icons MUST support at least image/png and image/jpeg (and image/jpg) MIME types for Prompt/ResourceLink icons.",
+   "cite": "2026-07-28_schema.json Prompt.icons / ResourceLink.icons description"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients that support rendering icons SHOULD also support image/svg+xml and image/webp.",
+   "cite": "2026-07-28_schema.json Prompt.icons description"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD return standard JSON-RPC errors for common failure cases: invalid prompt name -> -32602 (Invalid params); missing required arguments -> -32602 (Invalid params); internal errors -> -32603 (Internal error).",
+   "cite": "prompts.md lines 323-327"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD validate prompt arguments before processing.",
+   "cite": "prompts.md line 331"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD handle pagination for large prompt lists.",
+   "cite": "prompts.md line 332"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Both parties SHOULD respect capability negotiation.",
+   "cite": "prompts.md line 333"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementations MUST carefully validate all prompt inputs and outputs to prevent injection attacks or unauthorized access to resources.",
+   "cite": "prompts.md lines 337-338"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Under `cacheScope: \"private\"`, caches MUST NOT be shared across authorization contexts (a different access token requires a different cache).",
+   "cite": "2026-07-28_schema.json ListPromptsResult.cacheScope description"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Under `cacheScope: \"public\"`, any client or intermediary MAY cache the response and serve it across authorization contexts.",
+   "cite": "2026-07-28_schema.json ListPromptsResult.cacheScope description"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If `ttlMs` is positive, the client SHOULD consider the ListPromptsResult fresh for that many milliseconds after receipt.",
+   "cite": "2026-07-28_schema.json ListPromptsResult.ttlMs description"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If `ttlMs` is 0, the client MAY re-fetch the list every time the result is needed (response is immediately stale).",
+   "cite": "2026-07-28_schema.json ListPromptsResult.ttlMs description"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "PromptArgument requires `name`; `description`, `required`, `title` are optional (required defaults falsy/undefined when absent — SDK must not assume default true or false without checking schema; schema marks only `name` as required).",
+   "cite": "2026-07-28_schema.json PromptArgument required: [\"name\"]"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "GetPromptRequestParams requires `_meta` and `name`; `arguments`, `inputResponses`, `requestState` are optional.",
+   "cite": "2026-07-28_schema.json GetPromptRequestParams required: [\"_meta\",\"name\"]"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "GetPromptRequestParams.arguments, when present, MUST be an object whose values are strings (additionalProperties: {type: string}) — non-string argument values are not part of the schema.",
+   "cite": "2026-07-28_schema.json GetPromptRequestParams.arguments"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "PromptMessage requires both `content` (ContentBlock) and `role` (Role).",
+   "cite": "2026-07-28_schema.json PromptMessage required: [\"content\",\"role\"]"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "TextContent requires `text` and `type`=\"text\"; ImageContent requires `data`, `mimeType`, `type`=\"image\"; AudioContent requires `data`, `mimeType`, `type`=\"audio\"; EmbeddedResource requires `resource` and `type`=\"resource\"; ResourceLink requires (at minimum) `type`=\"resource_link\" per ContentBlock union (name is inherited but check exact required list — schema shows `type` const required; `uri` field exists via BaseMetadata/ResourceLink but full required array for ResourceLink was not fully captured in this pass — treat `uri`, `name`, `type` as required per prompts.md example and Resource conventions).",
+   "cite": "2026-07-28_schema.json TextContent/ImageContent/AudioContent/EmbeddedResource required arrays; ResourceLink properties lines 2801-2841"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "All ContentBlock types (Text/Image/Audio/ResourceLink/EmbeddedResource) MAY carry optional `annotations` (Annotations: audience, lastModified, priority) and optional `_meta`.",
+   "cite": "2026-07-28_schema.json TextContent/ImageContent/AudioContent/ResourceLink/EmbeddedResource properties; prompts.md lines 227-231, 293-294"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Resource links returned in prompts are not guaranteed to also appear in resources/list results.",
+   "cite": "2026-07-28_schema.json ResourceLink description"
+  }
+ ],
+ "wire_details": [
+  "Capability declaration key: capabilities.prompts (object). Field: listChanged (boolean) — 'Whether this server supports notifications for changes to the prompt list.' (2026-07-28_schema.json line ~3145).",
+  "Method name constants: \"prompts/list\", \"prompts/get\", notification \"notifications/prompts/list_changed\".",
+  "JSON-RPC error codes referenced on this page: -32602 Invalid params (invalid prompt name; missing required arguments), -32603 Internal error.",
+  "_meta required keys on every request per RequestMetaObject: 'io.modelcontextprotocol/protocolVersion' (string, REQUIRED), 'io.modelcontextprotocol/clientInfo' (Implementation, optional field on schema but page text says every request MUST include it — treat as effectively required per prose), 'io.modelcontextprotocol/clientCapabilities' (ClientCapabilities, REQUIRED). Optional _meta fields: 'io.modelcontextprotocol/logLevel' (LoggingLevel), 'progressToken' (ProgressToken).",
+  "HTTP transport: MCP-Protocol-Version header MUST equal the _meta protocolVersion value; mismatch => HTTP 400 Bad Request.",
+  "ListPromptsResult required fields: cacheScope, prompts, resultType, ttlMs (ttlMs is REQUIRED in this revision, not optional — note this is stricter than one might assume).",
+  "cacheScope enum values: \"private\", \"public\" — analogous to HTTP Cache-Control public/private.",
+  "GetPromptResult required fields: messages, resultType (description optional).",
+  "InputRequiredResult required field: resultType; semantically requires inputRequests and/or requestState (schema only hard-requires resultType; the 'at least one of' rule is descriptive, not enum-enforced — SDK should validate this itself).",
+  "PromptReference: type const \"ref/prompt\", required [name, type], optional title — used for completion/complete argument autocompletion linkage.",
+  "ContentBlock is a discriminated union (anyOf) over: TextContent (type:\"text\"), ImageContent (type:\"image\"), AudioContent (type:\"audio\"), ResourceLink (type:\"resource_link\"), EmbeddedResource (type:\"resource\").",
+  "EmbeddedResource.resource is anyOf TextResourceContents | BlobResourceContents (text vs base64 blob variant of resource contents).",
+  "Icon MIME types: clients MUST support image/png, image/jpeg/image/jpg; SHOULD support image/svg+xml, image/webp.",
+  "Example MIME types used in this page: image/png (image content), audio/wav (audio content), text/x-rust (resource link), text/plain (embedded resource).",
+  "PaginatedRequestParams: cursor (string, optional, opaque); ListPromptsResult.nextCursor (string, optional) signals more pages exist when present.",
+  "Annotations fields: audience (array of Role, i.e. \"user\"|\"assistant\"), lastModified (ISO 8601 string), priority (number 0..1, 1=most important, 0=least important/optional)."
+ ],
+ "sdk_implications": [
+  "PowerShell types needed: Prompt (name[req], title?, description?, icons?[Icon[]], arguments?[PromptArgument[]], _meta?), PromptArgument (name[req], description?, required?[bool], title?), PromptMessage (role[req: 'user'|'assistant'], content[req: ContentBlock]), and a ContentBlock discriminated type hierarchy (TextContent, ImageContent, AudioContent, ResourceLink, EmbeddedResource) each implementing a common base with optional Annotations and _meta.",
+  "Server-side: implement handler for 'prompts/list' returning ListPromptsResult with mandatory cacheScope/prompts/resultType/ttlMs — SDK must not let implementers omit ttlMs or resultType since schema marks them required for 2026-07-28 (a behavioral change from prior revisions — gate by negotiated protocol version).",
+  "Server-side: implement handler for 'prompts/get' accepting GetPromptRequestParams (name required, arguments as [hashtable[string,string]] or IDictionary<string,string>), and must support returning either GetPromptResult or InputRequiredResult (union return type) to support multi-round-trip flows; SDK needs an MRTR continuation mechanism keyed on requestState.",
+  "Client-side: prompts/list pagination loop respecting cursor/nextCursor; caching layer keyed by cacheScope (public vs private) and honoring ttlMs as a max-age; must key private cache entries by the credential/authorization context used for the request.",
+  "Client-side: argument autocompletion integration — expose a way to call completion/complete with a PromptReference {type:'ref/prompt', name, title?} tied to a given prompt argument name.",
+  "Validate that GetPromptRequestParams.arguments values are strings only; SDK should reject or stringify non-string values rather than silently allowing arbitrary JSON.",
+  "Every outgoing request builder (client) must inject RequestMetaObject: protocolVersion, clientCapabilities always; clientInfo per SHOULD; optional logLevel/progressToken. HTTP transport binding must set MCP-Protocol-Version header equal to this value and validate 400 on mismatch when acting as server.",
+  "Server dispatch layer must implement resultType='complete' default injection for responses to older-protocol clients (or omit for older negotiated versions) and must include resultType for 2026-07-28-negotiated connections.",
+  "Notification delivery for prompts.listChanged must be routed only over an active subscriptions/listen stream that requested promptsListChanged:true — SDK cannot broadcast list_changed to all connected clients unconditionally; needs subscription-filter bookkeeping distinct from bare capability declaration.",
+  "Error handling helper: map 'unknown prompt name' and 'missing required argument' validation failures to JSON-RPC -32602, and unexpected server-side exceptions to -32603, per SHOULD guidance — implement as default error mapping that can be overridden.",
+  "Content validation helpers: enforce base64 encoding + MIME type presence for Image/Audio content constructors; enforce EmbeddedResource requires uri+mimeType+ (text xor blob) at construction time to catch spec violations early (defense against injection per Security section).",
+  "Icon rendering support matrix (client) must accept png/jpeg/jpg always, and should accept svg+xml/webp — relevant for any PowerShell GUI/host built on this SDK.",
+  "Security: SDK should provide sanitization/validation hooks for prompt arguments and resulting message content (both directions) as an explicit extension point, since spec mandates 'careful validation... to prevent injection attacks or unauthorized access to resources' without specifying mechanism."
+ ],
+ "legacy_delta": [
+  "2026-07-28 requires `resultType` on ListPromptsResult/GetPromptResult/InputRequiredResult; earlier revisions (2025-11-25, 2025-06-18) had no resultType field — client MUST treat its absence (from an older server) as 'complete'.",
+  "InputRequiredResult / multi-round-trip requests (MRTR) via `inputResponses`/`requestState` on prompts/get is new in 2026-07-28; not present in 2025-11-25 or 2025-06-18 GetPromptRequestParams, which only had `name` and `arguments`.",
+  "ListPromptsResult gains `cacheScope` and `ttlMs` (caching hints) in 2026-07-28, tied to the new server/utilities/caching mechanism; not present in prior schemas.",
+  "list_changed delivery model changed: 2026-07-28 routes notifications/prompts/list_changed only over a subscriptions/listen stream opened with promptsListChanged:true, replacing the earlier model (2025-11-25/2025-06-18) where the server simply emitted the notification to the connection once listChanged capability was negotiated, with no explicit subscribe step.",
+  "GetPromptRequestParams and PaginatedRequestParams now require `_meta` (RequestMetaObject with protocolVersion/clientCapabilities mandatory) — the older schemas' request params typically had `_meta` as fully optional generic metadata, not a required carrier of protocol version/capabilities per request.",
+  "Not verified in this pass: whether ResourceLink's required-field list changed across revisions or whether PromptArgument/Prompt gained `icons`/`title` fields only in 2026-07-28 vs earlier — flagged as an open question below rather than asserted from memory."
+ ],
+ "open_questions": [
+  "Exact `required` array for ResourceLink was not fully captured (grep was truncated after `type` field); need to re-grep 2026-07-28_schema.json lines ~2801-2845 to confirm whether `uri` is required (very likely, but must confirm exactly, since prompts.md's example includes uri/name/description/mimeType but the schema snippet cut off before the required list).",
+  "Full text of NotificationParams (used by PromptListChangedNotification.params) was not inspected — unclear if it carries any generic fields (e.g. _meta) relevant to SDK notification typing.",
+  "InputRequests / InputResponses schema shapes (referenced by InputRequiredResult and GetPromptRequestParams) were not read in this pass — needed for full MRTR support in prompts/get; should be pulled from basic/patterns/mrtr page and schema for a complete SDK plan.",
+  "Whether `title` and `icons` on Prompt/PromptArgument/PromptReference/ResourceLink are new in 2026-07-28 vs inherited unchanged from 2025-11-25 was not diffed against 2025-11-25_schema.ts in this pass.",
+  "The subscriptions/listen request/response schema (params shape, e.g. filter field names beyond promptsListChanged) lives on a separate spec page (basic/patterns/subscriptions) not read here; needed to fully implement the listChanged flow in the SDK.",
+  "Completion linkage: completion/complete request/result schema (used for prompt argument autocompletion) is on server/utilities/completion page, not read here — needed to implement the 'Arguments may be auto-completed' behavior mentioned in prompts.md line 127."
+ ],
+ "source": "specification/2026-07-28/server/prompts.md (full file, 339 lines) cross-referenced with 2026-07-28_schema.json definitions: Prompt, PromptArgument, PromptMessage, PromptReference, PromptListChangedNotification, ListPromptsRequest/Result, GetPromptRequest/RequestParams/Result/ResultResponse, ContentBlock, TextContent, ImageContent, AudioContent, EmbeddedResource, ResourceLink, Annotations, InputRequiredResult, RequestMetaObject, PaginatedRequestParams, and the server prompts capability block (capabilities.prompts.listChanged).",
+ "summary": "The prompts/prompts.md page (2026-07-28) defines a user-controlled prompt-template feature. Servers supporting it MUST declare capabilities.prompts (with optional listChanged:boolean). Two request methods: prompts/list (paginated via PaginatedRequestParams.cursor, returns ListPromptsResult with REQUIRED cacheScope/prompts/resultType/ttlMs and optional nextCursor/_meta — result set must not vary per-connection but may vary by per-request authorization) and prompts/get (GetPromptRequestParams requires _meta+name, optional string-valued arguments map, plus new MRTR fields inputResponses/requestState; returns GetPromptResult{messages,resultType,description?} or, for multi-round-trip, InputRequiredResult{resultType, and >=1 of inputRequests/requestState}). PromptMessage = {role:'user'|'assistant', content:ContentBlock}; ContentBlock is a 5-way union: TextContent(text,type), ImageContent(data,mimeType,type — data MUST be base64+valid MIME), AudioContent(data,mimeType,type — same MUST), ResourceLink(type='resource_link', uri/name/description/mimeType/icons/size/annotations — not guaranteed to appear in resources/list), EmbeddedResource(type='resource', resource:TextResourceContents|BlobResourceContents — MUST have valid URI, correct MIME type, and text xor blob). All content types support optional Annotations (audience/lastModified/priority) and _meta. Prompt = {name[req], title?, description?, icons?, arguments?:PromptArgument[]}; PromptArgument requires only name (description/required/title optional). Argument autocompletion links via PromptReference{type:'ref/prompt',name,title?} to completion/complete. list_changed notifications (notifications/prompts/list_changed) are SHOULD-delivered only over a subscriptions/listen stream opened with promptsListChanged:true — a delivery-model change from earlier revisions. Every request MUST carry _meta with protocolVersion+clientCapabilities (clientInfo SHOULD); HTTP transport enforces protocolVersion==MCP-Protocol-Version header (400 on mismatch). Error handling: invalid name/missing args → -32602; internal errors → -32603 (SHOULD). Servers SHOULD validate arguments; both parties MUST validate inputs/outputs against injection/unauthorized-resource-access."
+}

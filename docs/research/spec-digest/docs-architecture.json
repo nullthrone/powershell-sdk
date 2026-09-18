@@ -1,0 +1,242 @@
+{
+ "legacy_delta": [
+  "architecture.md L89, L136-139: sampling (`sampling/createMessage`) and logging are marked deprecated as of protocol version 2026-07-28; new implementations should call LLM provider APIs directly and log to stderr (stdio) or OpenTelemetry instead of using MCP logging.",
+  "architecture.md L147 vs prior spec: change notifications are no longer ambient/always-on; they require the client to open a `subscriptions/listen` long-lived stream naming which notification types it wants (SubscriptionFilter) before any `notifications/*` are delivered — this replaces the old model (and replaces the resources `resources/subscribe` RPC and the HTTP GET/SSE stream, per schema.ts L1362-ish comment on SubscriptionsListenRequest).",
+  "schema.ts L104-110, L636 area: `io.modelcontextprotocol/logLevel` replaces the former `logging/setLevel` RPC; deprecated (SEP-2577), kept >=12 months.",
+  "schema.ts header comment L410-424: error code -32002 (resource not found, used through 2025-11-25) is replaced by -32602 (INVALID_PARAMS) and is permanently retired, never reused; -32042 (URL elicitation required, 2025-11-25 only) also retired.",
+  "architecture.md L111 and schema.ts RequestMetaObject: MCP is now explicitly stateless — protocol version and client capabilities travel in `_meta` on every single request, rather than being negotiated once via an `initialize` handshake (the pre-2026-07-28 model). `server/discover` is optional and mainly a convenience/caching mechanism, not a required handshake.",
+  "schema.ts L216-234: results now carry a mandatory `resultType` field (`\"complete\"` | `\"input_required\"` | custom string) enabling the new Multi Round-Trip Requests (MRTR) pattern; absence of `resultType` is back-compat-interpreted as `\"complete\"` only when the response comes from a server on an earlier protocol version.",
+  "schema.ts L217-235, L568-596: MRTR / InputRequiredResult, InputRequests/InputResponses maps, and InputResponseRequestParams (`inputResponses`, `requestState`) are new in this revision — elicitation (and deprecated sampling) are now delivered as embedded server-initiated sub-requests inside an `input_required` result rather than as separate top-level JSON-RPC requests from server to client."
+ ],
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "capability_gate": "None — MUST be implemented by every server (architecture.md L157, schema.ts L657-659: 'Servers MUST implement server/discover. Clients MAY call it but are not required to'). Calling it is optional for clients (architecture.md L227).",
+   "params": "RequestParams only: `_meta` object carrying `io.modelcontextprotocol/protocolVersion` (string, required), `io.modelcontextprotocol/clientInfo` (Implementation: name+version required, optional title/icons/description/websiteUrl; SHOULD be sent unless configured off), `io.modelcontextprotocol/clientCapabilities` (ClientCapabilities, required, may be `{}`), optional `io.modelcontextprotocol/logLevel` (deprecated), optional `progressToken`. No other params (architecture.md L160-178; schema.ts L662-668).",
+   "result": "DiscoverResult extends CacheableResult: `resultType` (\"complete\"), `supportedVersions: string[]`, `capabilities: ServerCapabilities`, optional `instructions: string`, plus CacheableResult's `ttlMs: number` and `cacheScope: \"public\"|\"private\"`, plus `_meta.io.modelcontextprotocol/serverInfo` (Implementation). (architecture.md L180-204; schema.ts L671-694, L1075-1109).",
+   "notes": "Discovery response is cacheable and reusable across subsequent requests (architecture.md L157). Purpose: protocol-version negotiation, capability discovery, identity exchange (architecture.md L206-227). SDK: Python SDK performs discovery at client-connect time and stores results on the client object for later synchronous access (architecture.md L229-238)."
+  },
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "capability_gate": "Server must have declared `capabilities.tools` in its DiscoverResult (architecture.md L225 example: `{}` present = tools/list and tools/call are supported). No client capability required.",
+   "params": "PaginatedRequest: standard `_meta` (protocolVersion, clientCapabilities, clientInfo) plus optional `cursor` (Cursor/string) for pagination (architecture.md L246-263, L319; schema.ts PaginatedRequestParams).",
+   "result": "`resultType:\"complete\"`, `tools: Tool[]` (each Tool has `name`, optional `title`, `description`, `inputSchema` — JSON Schema object with `type`,`properties`,`required`), plus CacheableResult fields `ttlMs`, `cacheScope`, plus PaginatedResult's optional `nextCursor` (architecture.md L266-315).",
+   "notes": "Example response ttlMs=300000 (5 min), cacheScope=\"public\" (architecture.md L310-311). SDK pattern: AI application fans out `list_tools()` across all connected clients into a unified registry (architecture.md L338-347); large server fleets should use progressive tool discovery instead of eager full loads (architecture.md L347, linking client-best-practices doc)."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "capability_gate": "Server capability `tools` present in discover result. Tool `name` MUST exactly match one returned by `tools/list` (architecture.md L404).",
+   "params": "`name: string` (required, exact match), `arguments: object` (per the tool's `inputSchema`; required/optional fields per schema), standard `_meta` block with protocolVersion/clientCapabilities/clientInfo (architecture.md L358-380, L402-412). Per InputResponseRequestParams, any client-initiated request MAY additionally carry `inputResponses` and `requestState` when retrying after an `input_required` result (schema.ts L594-601), though the walkthrough's example does not use this.",
+   "result": "`resultType:\"complete\"`, `content: ContentBlock[]` where each block has a `type` field (e.g. `\"text\"` with `text: string`; spec supports other content types e.g. image/resource per architecture.md L416-420, not enumerated further in this file).",
+   "notes": "AI-application pattern: host resolves which MCP client owns a tool name, calls `call_tool(tool_name, arguments)`, and feeds `result.content` back into the LLM conversation (architecture.md L430-436). A `tools/call` for an unknown/mismatched tool would be rejected — architecture.md does not give the exact error but schema.ts's generic JSON-RPC codes (METHOD_NOT_FOUND -32601 / INVALID_PARAMS -32602) are the general mechanism; the file does not name a tool-specific error code."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server (opens a long-lived stream)",
+   "capability_gate": "Client must want at least one of the SubscriptionFilter fields; server only honors filter entries matching capabilities it actually declared (e.g. `toolsListChanged` only honored if server declared `capabilities.tools.listChanged: true`) (architecture.md L508; schema.ts SubscriptionsAcknowledgedNotificationParams comment).",
+   "params": "Standard `_meta` (protocolVersion, clientCapabilities, clientInfo) plus required `notifications: SubscriptionFilter` object with optional boolean fields `toolsListChanged`, `promptsListChanged`, `resourcesListChanged`, and optional `resourceSubscriptions: string[]` (resource URIs) (architecture.md L446-467; schema.ts SubscriptionFilter/SubscriptionsListenRequestParams).",
+   "result": "Long-lived: no immediate JSON-RPC result while the stream is open. When the server tears the subscription down gracefully (e.g. shutdown) it sends a `SubscriptionsListenResult` (`Result` with empty body) whose `_meta` MUST include `io.modelcontextprotocol/subscriptionId` equal to the original request's JSON-RPC `id` (schema.ts SubscriptionsListenResult / SubscriptionsListenResultMetaObject). An abrupt transport close sends no response at all.",
+   "notes": "Change notifications are strictly opt-in — server MUST NOT send notification types not requested (schema.ts SubscriptionFilter doc, 'MUST NOT'). Request `id` (e.g. `4`) becomes the subscription's identifying token, echoed as `io.modelcontextprotocol/subscriptionId` on every notification belonging to that stream (architecture.md L444-510)."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "capability_gate": "Sent automatically once `subscriptions/listen` succeeds; no separate capability gate.",
+   "params": "`_meta.io.modelcontextprotocol/subscriptionId` (= the listen request's id) plus `notifications: SubscriptionFilter` giving the SUBSET of requested filter types the server actually agreed to honor (unsupported types silently omitted) (architecture.md L471-486; schema.ts SubscriptionsAcknowledgedNotificationParams).",
+   "result": "None (JSON-RPC notification — no `id`, no response expected).",
+   "notes": "MUST be the first message on that subscription carrying the subscriptionId; server MUST NOT send any other notification on the subscription before this ack (schema.ts SubscriptionsAcknowledgedNotification doc, 'MUST'). On stdio all subscriptions share one channel/ordering is only guaranteed per subscription-id, not globally (schema.ts same block)."
+  },
+  {
+   "name": "notifications/tools/list_changed",
+   "direction": "notification s->c",
+   "capability_gate": "Only sent to clients that requested `toolsListChanged: true` on `subscriptions/listen`, AND only from servers that declared `capabilities.tools.listChanged: true` in `server/discover` (architecture.md L508, dual gate stated explicitly).",
+   "params": "`_meta.io.modelcontextprotocol/subscriptionId` only (architecture.md L492-501); no other params.",
+   "result": "None — pure notification, no `id` field, no response expected (architecture.md L506).",
+   "notes": "Best-effort delivery: 'no guarantees that every notification will be sent or received, particularly across transport reconnects... Clients should also rely on polling' (architecture.md L514). Client's typical reaction: re-issue `tools/list` on receipt (architecture.md L516-538, L555-564)."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (client cancelling a request); also s->c/stdio-only to terminate a subscriptions/listen stream",
+   "capability_gate": "None named; cross-referenced from schema.ts since architecture.md itself doesn't walk through cancellation, but it is the mechanism implied for ending a long-lived listen stream on stdio.",
+   "params": "`requestId: RequestId` (MUST correspond to a previously issued request id), optional `reason: string` (schema.ts CancelledNotificationParams).",
+   "result": "None (notification).",
+   "notes": "On stdio, the SERVER also sends this notification solely to terminate a `subscriptions/listen` stream, referencing that stream's opening request id; servers MUST NOT use it to cancel anything else (schema.ts CancelledNotification doc, explicit MUST NOT). Cancellation is advisory/racy: request 'SHOULD still be in-flight' but may already have finished (schema.ts, SHOULD)."
+  },
+  {
+   "name": "elicitation/create",
+   "direction": "server->client, but only ever delivered embedded inside an InputRequiredResult (MRTR pattern), not as a bare top-level request",
+   "capability_gate": "Client MUST have declared `elicitation` in `clientCapabilities` (e.g. `{}`, or `{form:{}, url:{}}`) (architecture.md L132, L173, L220, L259 example). Server that needs it but the client didn't declare it gets `MissingRequiredClientCapabilityError` (-32021) per schema.ts, not shown in architecture.md's own walkthrough but implied by its capability-negotiation narrative (L212).",
+   "params": "Two shapes via `ElicitRequestParams` union: form mode (`mode?:\"form\"`, `message:string`, `requestedSchema:{type:\"object\",properties:{[key]:PrimitiveSchemaDefinition},required?:string[]}` — only top-level, non-nested primitive properties: string/number/integer/boolean/enum) or URL mode (`mode:\"url\"`, `message:string`, `url:string`) (schema.ts ElicitRequestFormParams/URLParams, L2778-2843). architecture.md itself only names the method and the MRTR delivery pattern (L132-134), not the field-level schema.",
+   "result": "`ElicitResult`: `action: \"accept\"|\"decline\"|\"cancel\"`, optional `content: {[key]: string|number|boolean|string[]}` present only when `action==\"accept\"` and mode was `\"form\"` (schema.ts L3134-3149).",
+   "notes": "Delivered per architecture.md L134 through the MRTR pattern: the server's response to the ORIGINAL client request (e.g. tools/call) comes back with `resultType:\"input_required\"` and an `InputRequiredResult` containing an `inputRequests` map keyed by server-assigned id -> ElicitRequest (or deprecated CreateMessageRequest/ListRootsRequest); the client resolves each, then RETRIES the original request, now supplying `inputResponses` (keyed the same way) and the opaque `requestState` string it was given, via `InputResponseRequestParams` (schema.ts L568-601). architecture.md does not walk through this exchange step-by-step (no elicitation example in its 'Example' steps), only names the method and references the MRTR spec page (L134)."
+  }
+ ],
+ "open_questions": [
+  "architecture.md's walkthrough never actually shows an elicitation/create or InputRequiredResult exchange end-to-end (it only names the method at L132-134 and defers to the MRTR spec page), so the exact wire sequence for a PowerShell SDK's 'retry with inputResponses+requestState' loop must be sourced from specification/2026-07-28/basic/patterns/mrtr.md and schema.ts (not read in full here per task scope) rather than from architecture.md itself.",
+  "architecture.md gives no error-code walkthrough for tools/call failures (e.g., unknown tool name, schema validation failure) — only the generic UnsupportedProtocolVersionError is discussed (L210). Exact tool-call error semantics need the tools/call spec page and INVALID_PARAMS/METHOD_NOT_FOUND definitions in schema.ts.",
+  "The doc states 'Every client request carries ... clientInfo as well' as a near-MUST (L469: 'and normally... as well') but schema.ts phrases clientInfo as SHOULD, not MUST (L78-80) — worth flagging as a SHOULD, not a MUST, in the SDK plan; architecture.md's prose is looser than the schema's normative comment.",
+  "architecture.md doesn't specify the resultType string set beyond \"complete\"/\"input_required\" (schema.ts types it as `\"complete\" | \"input_required\" | string`, i.e. an open/extensible enum) — an SDK must treat unknown resultType values as forward-compatible/extension points rather than erroring, but architecture.md itself never discusses this extensibility explicitly.",
+  "Whether `tools/list`'s optional `cursor` param and `nextCursor` result field (pagination) interact with `ttlMs`/`cacheScope` caching (e.g., can a paginated page be cached independently) is not discussed in architecture.md; would need server/utilities/pagination.md and server/utilities/caching.md (present locally, not read in full for this extraction) for a complete SDK contract.",
+  "architecture.md does not mention HTTP-specific requirements (status codes, `MCP-Protocol-Version` header) at all despite discussing the Streamable HTTP transport in general terms (L99); those exact requirements (e.g. schema.ts's 'MUST match the MCP-Protocol-Version header... 400 Bad Request') come only from schema.ts, not from this page, so they are cited here as cross-reference, not as content of the architecture guide itself."
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every MCP server MUST implement `server/discover`.",
+   "cite": "architecture.md L157 ('every server must implement'); schema.ts L657-659 ('Servers MUST implement server/discover')."
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients MAY call `server/discover` but are not required to; version negotiation can instead happen inline via per-request `_meta` on any other request.",
+   "cite": "architecture.md L157, L227; schema.ts L657-659."
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every MCP request MUST carry the protocol version and the client's capabilities relevant to that request in the request's `_meta` field (`io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities`), because MCP is a stateless protocol — servers infer nothing from previous requests.",
+   "cite": "architecture.md L109-111 (stateless protocol tooltip + prose); schema.ts L69-76, L91-98 ('Required')."
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD identify themselves via `io.modelcontextprotocol/clientInfo` in `_meta` on every request, unless configured not to.",
+   "cite": "architecture.md L111, L410; schema.ts L77-90 ('Clients SHOULD include this field on every request unless specifically configured not to')."
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT infer client capabilities from prior requests; capabilities are declared per-request, not once at initialization.",
+   "cite": "schema.ts L91-98 (directly underlies architecture.md's statelessness claim at L109-111)."
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If a server does not support the client's requested protocol version, it MUST reject the request with an `UnsupportedProtocolVersionError`, listing the versions it does support (`supported: string[]`) and the version that was requested (`requested: string`); the client then retries with a mutually supported version.",
+   "cite": "architecture.md L210; schema.ts L474-497 (UNSUPPORTED_PROTOCOL_VERSION = -32022, HTTP status 400 Bad Request per doc comment)."
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD return their identity/version info via `io.modelcontextprotocol/serverInfo` in the result's `_meta`, unless configured not to.",
+   "cite": "architecture.md L214; schema.ts L144-157."
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Tool execution (`tools/call`) requests MUST use the exact tool `name` string as returned by `tools/list`, not an abbreviated/simplified name.",
+   "cite": "architecture.md L355, L404 ('Must match exactly the tool name from the discovery response')."
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Change notifications (e.g. tool/resource/prompt list-changed) are opt-in: a client only receives them after opening a `subscriptions/listen` stream naming the desired notification types via the `notifications` (SubscriptionFilter) filter object.",
+   "cite": "architecture.md L147, L442-444; schema.ts SubscriptionFilter doc ('Each notification type is opt-in')."
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The server MUST NOT send notification types the client did not explicitly request in its `subscriptions/listen` filter.",
+   "cite": "schema.ts SubscriptionFilter / SubscriptionsListenRequestParams doc ('the server MUST NOT send notification types the client has not explicitly requested')."
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A `notifications/tools/list_changed` (and analogous list-changed notifications) is only deliverable to a client that both (a) requested the corresponding filter flag on `subscriptions/listen` and (b) is talking to a server that declared the matching `listChanged: true` capability in `server/discover`.",
+   "cite": "architecture.md L508 (dual condition stated explicitly for tools)."
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "`notifications/subscriptions/acknowledged` MUST be the first message the server sends carrying that subscription's ID in `_meta.io.modelcontextprotocol/subscriptionId`; the server sends no other notification for that subscription before this acknowledgment.",
+   "cite": "architecture.md L471; schema.ts SubscriptionsAcknowledgedNotification doc ('This notification MUST be the first message...MUST NOT send any notification on the subscription before acknowledging it')."
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every notification delivered on a subscription stream MUST carry `io.modelcontextprotocol/subscriptionId` in `_meta`, set to the JSON-RPC request id of the `subscriptions/listen` call that opened the stream.",
+   "cite": "architecture.md L510; schema.ts NotificationMetaObject doc, L120-133."
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "transport",
+   "text": "Notifications (e.g. `notifications/tools/list_changed`, `notifications/subscriptions/acknowledged`) carry no `id` field and MUST NOT expect/receive a response, per JSON-RPC 2.0 notification semantics.",
+   "cite": "architecture.md L506 ('Notice there's no id field... no response is expected or sent')."
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD NOT rely solely on change notifications for freshness — they should also poll, since there are no delivery guarantees, particularly across transport reconnects.",
+   "cite": "architecture.md L514 ('Best Effort'...'Clients should also rely on polling to preserve freshness of results')."
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A client that declares no capability for a feature the server requires (e.g. elicitation) causes the server to reject the request; conversely servers should never attempt operations the other party's declared capabilities say are unsupported.",
+   "cite": "architecture.md L212 ('so unsupported operations are never attempted'); cross-ref schema.ts MissingRequiredClientCapabilityError (-32021, HTTP 400)."
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers offering elicitation-style client-facing primitives deliver them only via the Multi Round-Trip Requests (MRTR) pattern (`resultType:\"input_required\"` + `inputRequests`), not as independent server-initiated top-level JSON-RPC calls.",
+   "cite": "architecture.md L134 ('Elicitation requests are delivered through the Multi Round-Trip Requests pattern')."
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "New implementations should not use `sampling/createMessage`; sampling is deprecated as of protocol version 2026-07-28 — integrate directly with LLM provider APIs instead.",
+   "cite": "architecture.md L89, L138."
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "New implementations should log to stderr (stdio transport) or use OpenTelemetry instead of the deprecated MCP logging primitive.",
+   "cite": "architecture.md L139."
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "`tools/list` accepts an optional `cursor` parameter for pagination beyond the standard `_meta` fields.",
+   "cite": "architecture.md L319."
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Cacheable results (`server/discover`, `tools/list`, etc.) carry `resultType:\"complete\"` plus `ttlMs` (freshness hint in ms) and `cacheScope` (`public`|`private`) so clients/intermediaries know how long and how broadly they may reuse the response.",
+   "cite": "architecture.md L332 ('the specification's caching utility defines the full rules'); schema.ts CacheableResult L1075-1109."
+  }
+ ],
+ "sdk_implications": [
+  "A PowerShell MCP client SDK needs a `Connect-McpServer`/`Client` object model that, per-connection, stores discovered `ServerCapabilities`, `supportedVersions`, and server `Implementation` info (from a single `server/discover` call made at connect time, mirroring the Python SDK pattern shown at architecture.md L233-239: 'discovery happens while the client connects. The results are then available on the client object.') — i.e., a stateful client wrapper around a stateless wire protocol.",
+  "Every outgoing request-building helper in the SDK (both client- and server-side response validation) must inject/require the three `_meta` keys: `io.modelcontextprotocol/protocolVersion` (mandatory string), `io.modelcontextprotocol/clientCapabilities` (mandatory object, default `{}`), and `io.modelcontextprotocol/clientInfo` (default-on, opt-out). This argues for a shared `New-McpRequestMeta` cmdlet/helper rather than ad hoc hashtables per call site.",
+  "Because capabilities are per-request, not connection-scoped, the SDK's server-side request context object (the per-call 'Context' passed into a PowerShell tool handler) must expose the CALLER's declared capabilities for THIS call (not a cached connection-level value), so handler authors can decide whether to attempt elicitation, etc., on a per-invocation basis.",
+  "The SDK needs first-class support for the MRTR retry loop: a helper that (1) detects `resultType == \"input_required\"` on any response, (2) walks `inputRequests` (a dictionary of server-assigned keys to ElicitRequest/deprecated CreateMessageRequest/ListRootsRequest), (3) dispatches each to the appropriate local handler (e.g. an elicitation UI callback for `elicitation/create`), (4) re-issues the ORIGINAL request with `inputResponses` (same keys) and the opaque `requestState` string round-tripped verbatim (the SDK MUST NOT parse/interpret `requestState`, per schema.ts InputRequiredResult doc), until a `resultType==\"complete\"` (or another `input_required`) comes back. This is a generic recursive/looping primitive, not per-method logic.",
+  "A `Register-McpToolChangeNotification`/subscription API needs to model `subscriptions/listen` as a long-lived, cancelable stream object (IAsyncEnumerable-like in PowerShell terms, or an event-driven callback registration) keyed by the JSON-RPC request id it was opened with; the SDK must correlate every inbound notification's `_meta.io.modelcontextprotocol/subscriptionId` back to that stream/registration, and must special-case the first message on a subscription as the `notifications/subscriptions/acknowledged` ack carrying the server-approved subset of the SubscriptionFilter.",
+  "On stdio transport specifically, the SDK's cancellation path must reuse `notifications/cancelled` to end a `subscriptions/listen` stream (referencing the listen request's id) rather than any dedicated 'stop listening' method — since none exists — and must never send that notification for any purpose other than cancelling a request or (on stdio only) ending a listen stream.",
+  "Server-side tool/resource/prompt registries in the SDK should auto-populate `ServerCapabilities.tools.listChanged` / `.resources.{subscribe,listChanged}` / `.prompts.listChanged` based on whether the developer's registration API wires up change-notification emission, so `server/discover`'s capabilities object always accurately reflects what the server will actually honor on `subscriptions/listen` (the acknowledged-subset behavior means capability flags must be truthful, not aspirational).",
+  "Result objects returned from server-side PowerShell handler cmdlets need a common base type/record implementing `resultType` (default \"complete\"), with optional `ttlMs`/`cacheScope` for cacheable methods (discover, list methods) — this argues for a `[McpCacheableResult]` base class in the SDK distinct from a plain `[McpResult]`.",
+  "Because `resultType` is an open string type (`\"complete\" | \"input_required\" | string`), the SDK's response deserializer must not throw on unrecognized `resultType` values — it should pass them through to caller-extensible handling (forward compatibility with future/extension result types), and must treat a MISSING `resultType` as `\"complete\"` only when talking to a server on a protocol version prior to 2026-07-28 (version-aware backward-compat branch).",
+  "The SDK's error model must expose the MCP-specific error codes as strongly-typed exceptions distinguishable from generic JSON-RPC errors: UnsupportedProtocolVersionError(-32022) carrying `{supported: string[], requested: string}`, MissingRequiredClientCapabilityError(-32021) carrying `{requiredCapabilities}`, and HeaderMismatchError(-32020) — each is documented (via schema.ts, cross-referenced) as requiring HTTP 400 Bad Request on the Streamable HTTP transport, which the SDK's HTTP server binding must enforce even though architecture.md itself does not spell out the status code."
+ ],
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/pages/docs__2026-07-28__learn__architecture.md (full file, 566 lines), cross-referenced against /tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/schema.ts (targeted sections: RequestMetaObject/NotificationMetaObject/ResultMetaObject L34-158, ResultType/Result/Error L208-254, JSON-RPC base types & standard error codes L262-330, MCP-specific error codes & Unsupported/HeaderMismatch/MissingRequiredClientCapability errors L407-526, InputRequest/InputResponse/InputRequiredResult/InputResponseRequestParams (MRTR) L536-602, CancelledNotification L602-636, DiscoverRequest/DiscoverResult/ClientCapabilities/ServerCapabilities/Implementation L644-960, CacheableResult L1075-1109, SubscriptionFilter/SubscriptionsListenRequest/SubscriptionsListenResult/SubscriptionsAcknowledgedNotification/ResourceUpdatedNotification L1259-1435, ElicitRequestFormParams/ElicitRequestURLParams/ElicitRequest/ElicitResult L2778-3149).",
+ "summary": "architecture.md (2026-07-28) frames MCP as host/client/server with a data layer (JSON-RPC 2.0) and transport layer (stdio, Streamable HTTP). It is explicitly stateless: every request, not a one-time handshake, carries protocol version and capabilities in `_meta`. The optional-but-server-mandatory `server/discover` method returns cacheable `supportedVersions`/`capabilities`/`instructions`. Core server primitives (tools/resources/prompts) follow list/get/call conventions (`tools/list`, `tools/call` walked through in detail with exact request/response JSON). Client-facing primitives are now delivered via elicitation (`elicitation/create`) using the new Multi Round-Trip Requests (MRTR) pattern instead of bare server-to-client calls; sampling and logging are deprecated. Real-time updates require clients to explicitly open a `subscriptions/listen` long-lived stream naming wanted notification types (`SubscriptionFilter`); the server acknowledges via `notifications/subscriptions/acknowledged` (first message, carrying `_meta.subscriptionId`) before sending any filtered notification (e.g. `notifications/tools/list_changed`), gated by matching server capability + client filter request, with best-effort/no-guarantee delivery. The doc includes Python pseudo-code showing SDK-level object model expectations: client objects expose cached `server_capabilities`, `list_tools()`/`call_tool()` methods, and an async `listen()` context manager yielding subscription events. Cross-referencing schema.ts fills in exact field types, MUST/SHOULD wording, and MCP-specific error codes (-32020/-32021/-32022) the page's narrative implies but doesn't spell out verbatim.",
+ "wire_details": [
+  "`_meta` reserved keys used throughout: `io.modelcontextprotocol/protocolVersion` (string, request), `io.modelcontextprotocol/clientInfo` (Implementation, request), `io.modelcontextprotocol/clientCapabilities` (ClientCapabilities, request), `io.modelcontextprotocol/logLevel` (deprecated, request), `io.modelcontextprotocol/serverInfo` (Implementation, result), `io.modelcontextprotocol/subscriptionId` (RequestId, notification & subscriptions/listen close result).",
+  "Protocol version constant: `2026-07-28` (LATEST_PROTOCOL_VERSION, schema.ts L30). JSON-RPC version constant: `\"2.0\"` (schema.ts L32).",
+  "MCP-specific JSON-RPC error codes (range -32020..-32099 reserved for spec; -32000..-32019 implementation-defined): HEADER_MISMATCH = -32020, MISSING_REQUIRED_CLIENT_CAPABILITY = -32021, UNSUPPORTED_PROTOCOL_VERSION = -32022 (schema.ts L410-449). Standard JSON-RPC codes also in play: PARSE_ERROR=-32700, INVALID_REQUEST=-32600, METHOD_NOT_FOUND=-32601, INVALID_PARAMS=-32602, INTERNAL_ERROR=-32603 (schema.ts L312-316). Retired/never-reused codes: -32002 (old resource-not-found, replaced by -32602) and -32042 (old URL-elicitation-required) (schema.ts L420-424).",
+  "HTTP status code requirements (schema.ts, not in architecture.md text itself): UnsupportedProtocolVersionError, HeaderMismatchError, and MissingRequiredClientCapabilityError all MUST map to HTTP 400 Bad Request on the Streamable HTTP transport; a protocol-version/header mismatch between the `MCP-Protocol-Version` HTTP header and the request body's `_meta.protocolVersion` also MUST yield 400 Bad Request.",
+  "HTTP header name: `MCP-Protocol-Version` (schema.ts L71-72), which MUST match the body's `io.modelcontextprotocol/protocolVersion` for HTTP transport.",
+  "Method name constants used in architecture.md's walkthrough: `server/discover`, `tools/list`, `tools/call`, `subscriptions/listen`, `elicitation/create` (named only), and notification methods `notifications/subscriptions/acknowledged`, `notifications/tools/list_changed`, `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/prompts/list_changed` (from schema.ts), `notifications/cancelled`.",
+  "Content type constant example in tools/call result: `\"type\": \"text\"` with sibling `text` string field (architecture.md L389-394); spec allows other content types not enumerated in this file.",
+  "`resultType` enum values seen: `\"complete\"`, `\"input_required\"` (schema.ts documents it as an open string type, i.e. extensible beyond these two).",
+  "Caching fields: `ttlMs` (integer milliseconds, minimum 0; `0` = immediately stale) and `cacheScope` with exactly two literal values `\"public\"` / `\"private\"` (schema.ts L1075-1109); example values in architecture.md: discover `ttlMs: 3600000` (1h) `cacheScope: \"public\"`; tools/list `ttlMs: 300000` (5min) `cacheScope: \"public\"`.",
+  "SubscriptionFilter boolean fields: `toolsListChanged`, `promptsListChanged`, `resourcesListChanged`; plus `resourceSubscriptions: string[]` (resource URIs) for per-resource `notifications/resources/updated` (schema.ts L1259-1290).",
+  "Notifications carry no JSON-RPC `id` field per JSON-RPC 2.0 semantics (architecture.md L506); requests use integer or string `RequestId` (schema.ts `RequestId = string | number`, L261).",
+  "Icons/MIME types (from schema.ts, cross-referenced, not in architecture.md itself): clients supporting icon rendering MUST support `image/png` and `image/jpeg`/`image/jpg`; SHOULD also support `image/svg+xml` and `image/webp`.",
+  "Elicitation mode literal values: `\"form\"` (default when `mode` omitted) and `\"url\"` (schema.ts ElicitRequestFormParams/URLParams). ElicitResult `action` literal values: `\"accept\"`, `\"decline\"`, `\"cancel\"` (schema.ts L3134-3149)."
+ ]
+}

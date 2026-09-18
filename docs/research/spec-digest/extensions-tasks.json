@@ -1,0 +1,236 @@
+{
+ "source": "pages/extensions__tasks__overview.md (full, 261 lines); extensions__overview.md (Negotiation section, lines 118-190); core schema.ts (2026-07-28) lines 1-990, 1240-1440 (RequestMetaObject/ClientCapabilities/ServerCapabilities/server-discover/InputRequests/InputRequiredResult/subscriptions-listen); 2025-11-25_schema.ts lines 25-90, 335-457, 1295-1489 (legacy Tasks); conformance_README.md lines 160-244; plus, fetched via curl raw.githubusercontent.com (main branch, not in local scratchpad) because the page links out: github.com/modelcontextprotocol/ext-tasks README.md (58 lines), schema/2026-07-28/schema.ts (350 lines, full text read), schema/2026-07-28/schema.json (JSON Schema, spot-checked Task/CreateTaskResult/GetTaskResult/*Task variants).",
+ "summary": "MCP Tasks (io.modelcontextprotocol/tasks) is an out-of-tree extension (repo modelcontextprotocol/ext-tasks, stable schema 2026-07-28, based on SEP-2663) letting a server return a durable task handle instead of blocking. Negotiation is fully generic MCP-extension negotiation: client declares the extension per-request in _meta['io.modelcontextprotocol/clientCapabilities'].extensions['io.modelcontextprotocol/tasks']={}, server advertises the same key in server/discover's ServerCapabilities.extensions. On a supported request the server MAY reply with CreateTaskResult (resultType:'task', flat Task fields, durably created before responding) instead of the normal result; server MUST NOT do this unless the client declared support. Client polls tasks/get(taskId) -> GetTaskResult (resultType:'complete', wrapping a DetailedTask union: WorkingTask/InputRequiredTask/CompletedTask/FailedTask/CancelledTask). Terminal statuses (completed/failed/cancelled) are immutable once reached. Mid-flight input surfaces as InputRequiredTask.inputRequests (map of CreateMessageRequest|ListRootsRequest|ElicitRequest, reusing core InputRequests/InputResponses types), answered via tasks/update(taskId, inputResponses) -> empty UpdateTaskResult. tasks/cancel(taskId) -> empty CancelTaskResult; cancellation is cooperative/not guaranteed. Optional notifications/tasks pushes full DetailedTask state; opt-in via subscriptions/listen with an extension-added taskIds filter. This replaces the inline, client-directed 2025-11-25 experimental tasks API (task field on request params, initialize-time per-method capability flags, separate tasks/result and tasks/list methods, related-task _meta correlation for mid-task server requests) with a server-directed, extension-based, pull-only model.",
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "RequestParams (no task-specific fields); _meta.io.modelcontextprotocol/protocolVersion required, _meta.io.modelcontextprotocol/clientCapabilities required (per every request per core schema, RequestMetaObject).",
+   "result": "DiscoverResult extends CacheableResult: supportedVersions:string[], capabilities:ServerCapabilities (capabilities.extensions:{[key:string]:JSONObject} carries 'io.modelcontextprotocol/tasks':{} when Tasks is supported), instructions?:string, plus CacheableResult's ttlMs/cacheScope hint fields.",
+   "capability_gate": "None — servers MUST implement server/discover (core schema.ts line 656-657: 'Servers MUST implement server/discover. Clients MAY call it but are not required to'). This is the channel by which server-side Tasks support is discovered.",
+   "notes": "Not Tasks-specific but is the precondition for a client to know a server advertises io.modelcontextprotocol/tasks. schema.ts lines 654-709; extensions__overview.md lines 154-181 shows the exact JSON shape of the extensions map in the discover response."
+  },
+  {
+   "name": "(polymorphic result on any task-eligible request, e.g. tools/call)",
+   "direction": "server->client (response)",
+   "params": "N/A (this is a result shape, not a method). Applies to whatever request the server elects to run asynchronously; the tasks page's only worked example is tools/call.",
+   "result": "CreateTaskResult = Result & Task & {resultType:'task'} (flat — no nested 'task' property). Task fields: taskId:string (required), status:TaskStatus (required), statusMessage?:string, createdAt:string ISO-8601 (required), lastUpdatedAt:string ISO-8601 (required), ttlMs:number|null (required, nullable = unlimited), pollIntervalMs?:number.",
+   "capability_gate": "Client MUST have declared io.modelcontextprotocol/tasks in that specific request's _meta.io.modelcontextprotocol/clientCapabilities.extensions; server MUST have advertised the same extension in server/discover. Page, Step 'Check client capabilities': 'Never return a task to a client that did not declare support.'",
+   "notes": "Server-directed: the server alone decides per-request whether to return a task; there is no client-side request field asking for one (contrast with 2025-11-25). MUST be durably created before the response is sent (page lines 54-55, 226-230). ext-tasks schema.ts lines 178-193."
+  },
+  {
+   "name": "tasks/get",
+   "direction": "client->server request",
+   "params": "GetTaskRequest.params: { taskId: string } (both required).",
+   "result": "GetTaskResult = Result & DetailedTask & {resultType:'complete'}. DetailedTask is a discriminated union keyed by status: WorkingTask (no extra fields), InputRequiredTask (+ inputRequests: InputRequests, required when status='input_required'), CompletedTask (+ result: {[key:string]:unknown}, required when status='completed'), FailedTask (+ error: JSON-RPC Error object {code,message,data?}, required when status='failed'), CancelledTask (no extra fields). All variants still carry the base Task required fields (taskId, status, createdAt, lastUpdatedAt, ttlMs).",
+   "capability_gate": "Not explicitly re-stated for this call in the material reviewed; only the original task-creating request's capability check is documented (see open_questions).",
+   "notes": "ext-tasks schema.ts lines 196-225; JSON Schema (schema.json) confirms required arrays per variant e.g. InputRequiredTask requires 'inputRequests', CompletedTask requires 'result', FailedTask requires 'error'. Page: 'The response carries the current status and, for terminal states, the final result or error.'"
+  },
+  {
+   "name": "tasks/update",
+   "direction": "client->server request",
+   "params": "UpdateTaskRequest.params: { taskId: string (required), inputResponses: InputResponses (required) }. InputResponses is a map keyed by the same arbitrary ids used in the task's inputRequests map; values are CreateMessageResult | ListRootsResult | ElicitResult (core InputResponse union).",
+   "result": "UpdateTaskResult = Result & {resultType:'complete'} — an empty acknowledgement, no task fields echoed back.",
+   "capability_gate": "Same tasks extension support implied by the task's existence; no separate gate documented.",
+   "notes": "New method not present in 2025-11-25. ext-tasks schema.ts lines 227-259: 'Each key MUST correspond to a currently-outstanding inputRequest key.' Server behavior (page, Step 'Handle tasks/update'): 'Accept inputResponses keyed to outstanding inputRequests. Acknowledge with an empty result. Ignore responses for unknown or already-satisfied keys.'"
+  },
+  {
+   "name": "tasks/cancel",
+   "direction": "client->server request",
+   "params": "CancelTaskRequest.params: { taskId: string } (required).",
+   "result": "CancelTaskResult = Result & {resultType:'complete'} — empty acknowledgement (no Task/status fields; caller must tasks/get afterward to observe the eventual terminal status).",
+   "capability_gate": "None beyond the task already existing.",
+   "notes": "ext-tasks schema.ts lines 261-288: 'An empty acknowledgement. Cancellation is cooperative and eventually consistent.' Page lines 69-71, 242-246: server 'acknowledges the intent but is not obligated to stop the work'; cancellation MAY still result in a non-'cancelled' terminal status. This is a shape change from 2025-11-25 where CancelTaskResult = Result & Task (flat Task echoed back synchronously)."
+  },
+  {
+   "name": "notifications/tasks",
+   "direction": "notification s->c",
+   "params": "TaskStatusNotificationParams = NotificationParams & DetailedTask & {[key:string]:unknown} — i.e. the full current DetailedTask state (same per-status required fields as tasks/get) plus any additional keys.",
+   "result": "N/A (notification, no response).",
+   "capability_gate": "Requires the client to have opened a subscriptions/listen stream and opted in via the extension-added taskIds filter (see TaskSubscriptionNotifications below); server support for notifications/tasks itself is optional even when the tasks extension is supported.",
+   "notes": "ext-tasks schema.ts lines 290-311. Page lines 135-143: 'Servers can push status updates via notifications/tasks... Servers are not required to send these notifications... Polling is the default. If a server supports notifications, clients can rely on them instead of polling.' No equivalent existed in 2025-11-25 (tasks were poll-only)."
+  },
+  {
+   "name": "subscriptions/listen (Tasks-extended)",
+   "direction": "client->server request, opens a long-lived notification stream",
+   "params": "Core SubscriptionsListenRequestParams.notifications: SubscriptionFilter (toolsListChanged?/promptsListChanged?/resourcesListChanged?/resourceSubscriptions?:string[] — none of these four are Tasks-specific). The Tasks extension additionally defines TaskSubscriptionNotifications { taskIds?: string[] } as 'Task-specific fields for the subscriptions/listen request', meant to be merged into the same 'notifications' filter object so the client can subscribe to notifications/tasks for specific task IDs.",
+   "result": "Core SubscriptionsAcknowledgedNotificationParams.notifications: SubscriptionFilter reporting which filters the server honored. Tasks extension defines TaskSubscriptionAcknowledgedNotifications { taskIds?: string[] } merged into the same field, listing the task IDs the server agreed to push notifications/tasks for.",
+   "capability_gate": "Requires io.modelcontextprotocol/tasks support on both sides for the taskIds field to have any effect; the base subscriptions/listen method itself is core, not gated by the extension.",
+   "notes": "Core mechanics: schema.ts lines 1290-1401 — server MUST NOT send notification types the client did not request; SubscriptionsAcknowledgedNotification MUST be the first message on that subscription id and MUST precede any notification on it. ext-tasks schema.ts lines 313-340. No worked JSON example combining taskIds with the core filter was found (see open_questions) — merge mechanics are inferred from the general extension-negotiation pattern, not shown verbatim."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Include the tasks extension identifier in per-request capabilities to opt in: _meta['io.modelcontextprotocol/clientCapabilities'].extensions['io.modelcontextprotocol/tasks'] = {} (or extension-specific settings, currently none defined).",
+   "cite": "pages/extensions__tasks__overview.md lines 48-50, 152-172; ext-tasks schema.ts lines 342-350 (TasksExtensionCapability = Record<string, never>)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Advertise the same extension identifier in the server/discover response's capabilities.extensions map to support Tasks.",
+   "cite": "pages/extensions__tasks__overview.md lines 48-50, 201-217; core schema.ts lines 871-882"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Return a CreateTaskResult (resultType:'task') to a client that did not declare the tasks extension capability on that request.",
+   "cite": "pages/extensions__tasks__overview.md lines 220-224 (Step 'Check client capabilities')"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Durably create the task before sending the response that returns its CreateTaskResult.",
+   "cite": "pages/extensions__tasks__overview.md lines 54-55, 226-230"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Set resultType to exactly 'task' on CreateTaskResult, and to exactly 'complete' on GetTaskResult, UpdateTaskResult, and CancelTaskResult.",
+   "cite": "ext-tasks schema.ts lines 181-193, 212-225, 248-259, 276-288"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every Result-derived object (including all Task result shapes) carries resultType; a client receiving a response with resultType absent (from a pre-2026-07-28 server) MUST treat it as 'complete'.",
+   "cite": "core schema.ts lines 223-236"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "In a tasks/update call, every key in inputResponses MUST correspond to a currently-outstanding key in the task's inputRequests map.",
+   "cite": "ext-tasks schema.ts lines 240-244"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ignore inputResponses entries in tasks/update whose key is unknown or already satisfied, rather than erroring.",
+   "cite": "pages/extensions__tasks__overview.md lines 237-240 (Step 'Handle tasks/update')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Honor the server-suggested pollIntervalMs when polling tasks/get, to avoid overwhelming the server.",
+   "cite": "ext-tasks schema.ts lines 84-90; pages/extensions__tasks__overview.md line 181"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Change ttlMs and pollIntervalMs over the lifetime of a task (they are not fixed at creation).",
+   "cite": "ext-tasks schema.ts lines 76-90"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Discard the task after ttlMs (measured from creation) elapses; ttlMs=null means unlimited retention.",
+   "cite": "ext-tasks schema.ts lines 75-82"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Once a task reaches a terminal status (completed, failed, cancelled), its state does not change further.",
+   "cite": "pages/extensions__tasks__overview.md lines 132-134"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Acknowledge tasks/cancel with an empty CancelTaskResult even if the work cannot actually be stopped; cancellation is cooperative, not guaranteed, and the task may still resolve to a non-cancelled terminal status.",
+   "cite": "pages/extensions__tasks__overview.md lines 69-71, 242-246; ext-tasks schema.ts lines 276-288"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Send notifications/tasks at all; it is entirely optional even when the tasks extension is otherwise supported. Polling via tasks/get is the default/fallback mechanism.",
+   "cite": "pages/extensions__tasks__overview.md lines 135-143"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Persist task IDs durably so polling can resume after a crash or restart (a stated design goal of the extension, crash resilience).",
+   "cite": "pages/extensions__tasks__overview.md lines 29-30, 191-193 (Step 'Persist task IDs')"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On a subscriptions/listen stream, never send a notification type the client did not explicitly request in its filter (applies to the Tasks-extended taskIds filter as an instance of the general rule).",
+   "cite": "core schema.ts lines 1264-1266, 1296-1301"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send SubscriptionsAcknowledgedNotification as the first message carrying a given subscription's io.modelcontextprotocol/subscriptionId, before any other notification (e.g. notifications/tasks) on that same subscription id.",
+   "cite": "core schema.ts lines 1386-1391"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "Every request (including tasks/get, tasks/update, tasks/cancel) must carry a matching io.modelcontextprotocol/protocolVersion in _meta and the MCP-Protocol-Version HTTP header; mismatch or unsupported version yields 400 Bad Request with HeaderMismatchError (-32020) or UnsupportedProtocolVersionError (-32022) respectively — general core requirement Tasks calls are subject to like any other request.",
+   "cite": "core schema.ts lines 68-76, 426-501"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Extensions (including Tasks) are optional to implement; SDK maintainers have full autonomy over whether to support them, and extensions are always disabled by default requiring explicit developer opt-in.",
+   "cite": "extensions__overview.md lines 97-103; conformance_README.md line 175 (SEP-1730: 'Experimental features and protocol extensions (such as Tasks and MCP Apps) are not required for any tier')"
+  }
+ ],
+ "wire_details": [
+  "Extension identifier constant: io.modelcontextprotocol/tasks",
+  "_meta keys used: io.modelcontextprotocol/clientCapabilities (RequestMetaObject, required on every request), io.modelcontextprotocol/protocolVersion (required, value '2026-07-28'), io.modelcontextprotocol/clientInfo (optional), io.modelcontextprotocol/serverInfo (ResultMetaObject, optional), io.modelcontextprotocol/subscriptionId (NotificationMetaObject / SubscriptionsListenResultMetaObject, correlates subscription stream)",
+  "Method names: server/discover, tasks/get, tasks/update, tasks/cancel, notifications/tasks, subscriptions/listen (extended)",
+  "resultType discriminator constants: 'task' (CreateTaskResult only), 'complete' (GetTaskResult, UpdateTaskResult, CancelTaskResult, and the implicit default for all other core results)",
+  "TaskStatus enum exact string values (identical spelling in 2025-11-25 and 2026-07-28): 'working', 'input_required', 'completed', 'failed', 'cancelled'",
+  "Task object JSON fields/types: taskId:string (required), status:TaskStatus (required), statusMessage?:string, createdAt:string ISO-8601 (required), lastUpdatedAt:string ISO-8601 (required), ttlMs:integer|null (required; JSON-Schema-generated bounds ±9007199254740991), pollIntervalMs?:integer (same bounds)",
+  "Per-variant required fields (from generated schema.json): WorkingTask/CancelledTask require only the base 5 (taskId,status,createdAt,lastUpdatedAt,ttlMs); InputRequiredTask additionally requires inputRequests; CompletedTask additionally requires result; FailedTask additionally requires error",
+  "CompletedTask.result: open object {[key:string]:unknown} — must structurally match the original request's normal result type (e.g. CallToolResult for a tools/call task)",
+  "FailedTask.error: core JSON-RPC Error object {code:number, message:string, data?:unknown}",
+  "InputRequests / InputResponses: string-keyed maps; InputRequest = CreateMessageRequest | ListRootsRequest | ElicitRequest; InputResponse = CreateMessageResult | ListRootsResult | ElicitResult (reused from core Multi-Round-Trip mechanism, not Tasks-specific types)",
+  "No Tasks-specific JSON-RPC error codes are defined anywhere in ext-tasks schema.ts/schema.json; only the generic core Error shape is reused",
+  "Core error codes any tasks/* call rides on: PARSE_ERROR=-32700, INVALID_REQUEST=-32600, METHOD_NOT_FOUND=-32601, INVALID_PARAMS=-32602, INTERNAL_ERROR=-32603, HEADER_MISMATCH=-32020 (HTTP 400), MISSING_REQUIRED_CLIENT_CAPABILITY=-32021 (HTTP 400), UNSUPPORTED_PROTOCOL_VERSION=-32022 (HTTP 400). MCP reserves -32020..-32099 for spec-defined codes, -32000..-32019 for implementation-defined codes never assigned cross-implementation meaning by the spec",
+  "TasksExtensionCapability = Record<string, never> -> wire representation is literally {} in both ClientCapabilities.extensions['io.modelcontextprotocol/tasks'] and ServerCapabilities.extensions['io.modelcontextprotocol/tasks']",
+  "SEP reference: SEP-2663 (Tasks extension), see https://modelcontextprotocol.io/seps/2663-tasks-extension (cited in ext-tasks schema.ts header comment)",
+  "Repository/schema locations: https://github.com/modelcontextprotocol/ext-tasks ; stable snapshot schema/2026-07-28/schema.ts and schema/2026-07-28/schema.json; active development schema/draft/*; JSON Schema is auto-generated from schema.ts via ts-to-zod + Zod toJSONSchema() and must not be hand-edited (ext-tasks README.md lines 16-42)",
+  "No MIME types are defined by the Tasks extension itself",
+  "Conformance: a 'tasks-lifecycle' scenario exists in the MCP conformance suite and can be individually baselined/excused; Tasks as a whole is 'extension'-tier and not_scored/not required for any conformance tier per SEP-1730 (conformance_README.md lines 173-183, 227-235)"
+ ],
+ "sdk_implications": [
+  "Model TaskStatus as a validated enum {working, input_required, completed, failed, cancelled}; do not accept other values.",
+  "Represent DetailedTask as a discriminated union (PowerShell has no native DU) — e.g. one base Task class plus status-conditioned subclasses/optional properties, with (de)serialization that enforces the JSON-Schema per-variant required fields: InputRequiredTask must carry inputRequests, CompletedTask must carry result, FailedTask must carry error, Working/CancelledTask carry neither.",
+  "CreateTaskResult must serialize/deserialize as flat Task fields + resultType='task' (no nested 'task' property) — a breaking shape vs. any 2025-11-25-based prior art.",
+  "Client SDK needs a per-request opt-in mechanism (not a one-time session setting) to attach _meta['io.modelcontextprotocol/clientCapabilities'].extensions['io.modelcontextprotocol/tasks']={} on calls where the caller is willing to receive a task handle, and must inspect resultType on every response to branch between a normal result and CreateTaskResult.",
+  "Client SDK needs a polling helper: tasks/get loop, honoring server-supplied pollIntervalMs (choose and document an internal default, e.g. 1000ms, since the spec defines none), stopping at a terminal status; and a durable task-ID persistence layer (crash resilience is an explicit design goal), not just an in-memory handle.",
+  "Client SDK needs an input-request dispatcher for status=input_required: read the embedded inputRequests map (values are full CreateMessageRequest/ListRootsRequest/ElicitRequest objects, not references), route each to the appropriate local sampling/roots/elicitation handler, collect results keyed identically into an InputResponses map, and submit via tasks/update — no inbound top-level JSON-RPC request/response pair is involved for this leg, unlike ordinary sampling/elicitation.",
+  "Optional: implement subscriptions/listen with an extension-merged 'taskIds' filter array to receive notifications/tasks; must read back which task IDs the server actually acknowledged (extension-merged into the ack's notifications object) and must keep polling any task ID the server did not acknowledge.",
+  "Server SDK must maintain a durable Task state machine per taskId (working/input_required/completed/failed/cancelled) enforcing terminal-state immutability, and must create the task record before returning CreateTaskResult (ordering requirement, not just eventual consistency).",
+  "Server SDK must centrally gate CreateTaskResult emission on the incoming request's declared client capability (io.modelcontextprotocol/tasks) rather than leaving this check to individual tool/method authors, since it's a hard MUST-NOT-violate rule.",
+  "Server SDK must implement tasks/get, tasks/update (validate keys against outstanding inputRequests; silently ignore stale/unknown keys per SHOULD), and tasks/cancel (always ack; treat cancellation as best-effort, i.e. do not force the task to 'cancelled' status just because cancel was called).",
+  "Server SDK should distinguish a CallToolResult with isError:true (which is a normal 'completed' task carrying that result) from an actual JSON-RPC-level failure (which is a 'failed' task with an error field) — this line moved between the 2025-11-25 and 2026-07-28 definitions of 'failed' and is easy to get wrong when porting old logic.",
+  "If notifications/tasks is implemented server-side, gate it behind subscriptions/listen opt-in and send the SubscriptionsAcknowledgedNotification for the subscription before any notifications/tasks message on that same subscription id.",
+  "CI/testing: implement and, if the SDK claims Tasks support, expect to actually pass the conformance suite's tasks-lifecycle scenario even though it runs as an 'extension'/not-required tier entry; treat failures there as non-blocking only if Tasks support is not claimed.",
+  "Because schema.json is auto-generated from schema.ts (ts-to-zod + Zod), treat schema.ts's JSDoc as the sole normative prose for field-level behavior; generate/validate PowerShell classes against schema.json's required-field lists directly rather than hand-guessing from the TS comments alone."
+ ],
+ "legacy_delta": [
+  "Direction inverted: 2025-11-25 was client-directed — the client requested task-augmented execution by placing a `task?: TaskMetadata` object (with optional `ttl`) inside the specific request's own params (e.g. CallToolRequestParams extends TaskAugmentedRequestParams). 2026-07-28 removes this field entirely; the client has no way to request a task, it only advertises a generic capability, and the server alone decides per-request whether to hand back a task.",
+  "Capability negotiation moved and coarsened: 2025-11-25 declared support once at initialize via top-level ClientCapabilities.tasks/ServerCapabilities.tasks objects with per-method-type granularity (client: tasks.list, tasks.cancel, tasks.requests.sampling.createMessage, tasks.requests.elicitation.create; server: tasks.list, tasks.cancel, tasks.requests.tools.call). 2026-07-28 replaces all of this with one blanket per-request extension flag, io.modelcontextprotocol/tasks: {} (TasksExtensionCapability = Record<string, never>), carrying no method-level granularity at all in the extension schema.",
+  "tasks/result removed: 2025-11-25 required a second call (GetTaskPayloadRequest, method 'tasks/result') to fetch a completed task's payload after tasks/get reported 'completed'. 2026-07-28 folds the payload directly into tasks/get's response as CompletedTask.result (or FailedTask.error) — one round trip instead of two.",
+  "tasks/list removed: 2025-11-25 defined ListTasksRequest/ListTasksResult ('tasks/list', paginated) plus corresponding capability flags. No equivalent method, request, or capability flag exists anywhere in the 2026-07-28 ext-tasks schema.ts (verified by full-file read).",
+  "tasks/update is new: no 2025-11-25 equivalent existed. It exists specifically to support the reworked input-request mechanism below.",
+  "Mid-task input mechanism reworked: 2025-11-25 correlated a server-to-client request (e.g. elicitation/create) issued mid-task to its task via _meta['io.modelcontextprotocol/related-task']: RelatedTaskMetadata{taskId} on an ordinary top-level JSON-RPC request sent over the still-open connection; the client answered it as a normal request/response pair, requiring a live bidirectional channel. 2026-07-28 removes related-task/RelatedTaskMetadata entirely (absent from the 2026-07-28 core schema.ts) and instead embeds the pending requests directly inside the task as InputRequiredTask.inputRequests, discovered via tasks/get (pull) and answered in bulk via tasks/update.params.inputResponses — no held connection or inbound request needed at all.",
+  "CreateTaskResult shape changed: 2025-11-25 nested the task under a property — `CreateTaskResult extends Result { task: Task }`. 2026-07-28 flattens it: `CreateTaskResult = Result & Task & {resultType:'task'}`, plus the new resultType discriminator (resultType/ResultType did not exist in 2025-11-25 at all).",
+  "GetTaskResult/CancelTaskResult shape changed: 2025-11-25 `GetTaskResult = Result & Task` was a single flat shape regardless of status (no status-conditioned required fields). 2026-07-28 `GetTaskResult = Result & DetailedTask & {resultType:'complete'}` is a true discriminated union whose required fields differ per status (result only on completed, error only on failed, inputRequests only on input_required). 2025-11-25 `CancelTaskResult = Result & Task` echoed the full task synchronously; 2026-07-28 `CancelTaskResult = Result & {resultType:'complete'}` is an empty ack only — the caller must call tasks/get to observe the eventual status.",
+  "Field renames with explicit unit suffixes: `ttl` -> `ttlMs`; `pollInterval` -> `pollIntervalMs` (same semantics: creation-relative retention duration, nullable = unlimited; suggested polling cadence).",
+  "'failed' status semantics narrowed: 2025-11-25 comment explicitly included tool-call results with isError:true under 'failed'. 2026-07-28 comment restricts 'failed' to 'a JSON-RPC error occurred during execution' — an isError:true CallToolResult is now expected to surface as a 'completed' task whose result carries that CallToolResult.",
+  "Repository/versioning model changed: 2025-11-25 Tasks lived inline in the core spec/schema.ts. 2026-07-28 moved Tasks out to the standalone modelcontextprotocol/ext-tasks repository under the general SEP-2133 Extensions mechanism, with its own independently versioned schema snapshots (schema/<date>/{schema.ts,schema.json}) decoupled from core spec releases, and marked optional/'extension'-tier for conformance (never required for any tier per SEP-1730).",
+  "Push notifications are new: 2025-11-25 had no notification mechanism for tasks (poll-only via tasks/get). 2026-07-28 adds notifications/tasks plus subscriptions/listen integration (TaskSubscriptionNotifications/TaskSubscriptionAcknowledgedNotifications taskIds filters) as an optional alternative to polling."
+ ],
+ "open_questions": [
+  "How exactly the Tasks extension's taskIds field merges into the core SubscriptionFilter (subscriptions/listen params) and into SubscriptionsAcknowledgedNotificationParams.notifications is asserted by ext-tasks schema.ts comments but never shown as a worked JSON example in the pages or files reviewed; the merge is inferred (flat sibling key inside the same 'notifications' object), not spec-confirmed with an example.",
+  "No default pollIntervalMs is specified for when a server omits the field; SDKs must invent their own default polling cadence.",
+  "No task-specific error code (e.g., 'task not found' for an unknown taskId on tasks/get/update/cancel) is defined anywhere in the material reviewed; only the generic core Error shape is reused, and which core numeric code (likely -32602 INVALID_PARAMS, by analogy with other 'unknown identifier' cases in that error's documented usages) a compliant server should return is not stated.",
+  "Whether a client must re-declare the io.modelcontextprotocol/tasks extension capability on the follow-up tasks/get / tasks/update / tasks/cancel requests (versus only on the original task-creating request) is not explicitly addressed; only the original request's negotiation is illustrated.",
+  "No documented minimum poll interval or maximum ttlMs; the only numeric bounds present are the generic JS safe-integer bounds baked into the ts-to-zod-generated JSON Schema (±9007199254740991), which are not protocol-meaningful limits.",
+  "The relationship between InputRequiredTask.inputRequests/tasks-update's inputResponses and the core InputRequiredResult's additional `requestState` opaque-string field (present on the core MRTR mechanism but with no counterpart field on InputRequiredTask) is unaddressed — unclear whether/how request-level retry state applies inside a task lifecycle.",
+  "Only README.md, schema/2026-07-28/schema.ts and schema/2026-07-28/schema.json were reachable via raw.githubusercontent.com (main branch); guessed paths for SPEC.md, docs/spec.md, docs/README.md, and CHANGELOG.md at several locations all returned 404. Since github.com's HTML tree view and api.github.com are blocked in this environment, it was not possible to enumerate the actual repository file tree to confirm no additional normative prose document (e.g. under an undiscovered docs/ path) exists beyond the schema.ts JSDoc and the modelcontextprotocol.io page."
+ ]
+}

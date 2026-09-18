@@ -1,0 +1,255 @@
+{
+ "source": "docs/2026-07-28/learn/server-concepts.md; docs/2026-07-28/learn/client-concepts.md; docs/2026-07-28/learn/versioning.md (cross-checked against schema.ts for exact types/fields)",
+ "summary": "Server-concepts teaches three building blocks: Tools (model-controlled: tools/list, tools/call), Resources (application-driven: resources/list, resources/templates/list, resources/read, plus subscriptions via subscriptions/listen), Prompts (user-controlled: prompts/list, prompts/get). Client-concepts covers Elicitation (form mode with JSON-Schema requestedSchema, and URL mode for out-of-band sensitive flows), and two DEPRECATED-as-of-2026-07-28 features: Roots (file:// URIs, advisory not security boundary, roots/list) and Sampling (sampling/createMessage, optional tools+toolChoice gated by ClientCapabilities.sampling.tools). Both elicitation and sampling now ride the Multi-Round-Trip-Requests (MRTR) pattern: server responds to an in-flight request (e.g. tools/call) with an InputRequiredResult carrying inputRequests (elicitation/create and/or sampling/createMessage sub-requests) and/or requestState; client resolves them and retries the original request attaching inputResponses and echoing requestState. Versioning: date-stamped revisions (YYYY-MM-DD), tri-state Draft/Current/Final; current=2026-07-28. Every request declares its version via _meta key io.modelcontextprotocol/protocolVersion; Streamable HTTP additionally carries it in the MCP-Protocol-Version header. Server accepts/rejects per request independently; mismatch yields UnsupportedProtocolVersionError listing supported versions. server/discover is a MUST-implement server RPC (client MAY call) returning supportedVersions, capabilities, optional instructions in one round trip, replacing the old initialize handshake as the recommended path; old handshake-based versions (2025-11-25 and earlier) need backward-compat handling.",
+ "methods": [
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "params": "RequestParams (pagination cursor per general pattern)",
+   "result": "Array of Tool definitions (name, description, inputSchema JSON Schema, annotations)",
+   "notes": "Server-concepts.md lines 33-36. Capability gate: server must have declared `tools` capability (ServerCapabilities.tools, schema.ts ~870-885)."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "params": "tool name + arguments object validated against inputSchema",
+   "result": "CallToolResult | InputRequiredResult (schema.ts line 1849)",
+   "notes": "server-concepts.md 33-36; MUST validate arguments per JSON Schema; may require user consent before execution (server-concepts.md line 29)."
+  },
+  {
+   "name": "resources/list",
+   "direction": "client->server",
+   "params": "RequestParams",
+   "result": "Array of resource descriptors (uri, name, title?, mimeType?)",
+   "notes": "server-concepts.md 116-121."
+  },
+  {
+   "name": "resources/templates/list",
+   "direction": "client->server",
+   "params": "RequestParams",
+   "result": "Array of ResourceTemplate (uriTemplate, name, title?, description?, mimeType?)",
+   "notes": "server-concepts.md 116-121, 139-155."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "uri",
+   "result": "ReadResourceResult | InputRequiredResult (schema.ts line 1245)",
+   "notes": "server-concepts.md 116-121."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server, notification stream server->client",
+   "params": "resourceSubscriptions?: string[] (URIs to watch), resourcesListChanged?, promptsListChanged?, toolsListChanged? boolean filters (schema.ts ~1249-1421)",
+   "result": "Stream of update notifications: notifications/resources/updated (per-URI, only for URIs opted into via resourceSubscriptions), notifications/resources/list_changed, notifications/prompts/list_changed, notifications/tools/list_changed — each only delivered if the corresponding filter field was set on the subscriptions/listen request",
+   "notes": "server-concepts.md lines 121-124. Method constant 'subscriptions/listen' confirmed schema.ts line 1315. On stdio the server also sends a cancellation-style notification solely to terminate the subscriptions/listen stream, referencing that request's ID; 'Servers MUST NOT use this notification to cancel any other request' (schema.ts line 637)."
+  },
+  {
+   "name": "prompts/list",
+   "direction": "client->server",
+   "params": "RequestParams",
+   "result": "Array of prompt descriptors (name, title?, description?, arguments?)",
+   "notes": "server-concepts.md 189-192."
+  },
+  {
+   "name": "prompts/get",
+   "direction": "client->server",
+   "params": "name, arguments",
+   "result": "GetPromptResult | InputRequiredResult (schema.ts line 1651)",
+   "notes": "server-concepts.md 189-192."
+  },
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "RequestParams (DiscoverRequest, no distinguishing fields beyond base params; schema.ts 653-667)",
+   "result": "DiscoverResult extends CacheableResult: supportedVersions: string[]; capabilities: ServerCapabilities; instructions?: string",
+   "notes": "versioning.md 58-62; schema.ts 652-696. 'Servers MUST implement server/discover. Clients MAY call it but are not required to' — version negotiation can also happen inline via per-request _meta. Response wrapped as DiscoverResultResponse."
+  },
+  {
+   "name": "elicitation/create",
+   "direction": "server->client, delivered inside InputRequiredResult.inputRequests as part of MRTR",
+   "params": "mode: 'form'|'url'; message: string; for form mode: requestedSchema (JSON Schema object, e.g. properties+required); for url mode: a URL for the user to open (data never passes through client)",
+   "result": "ElicitResult (schema.ts line 3134) — accept/decline/cancel plus, for form mode, collected field values; for url mode, only whether user consented",
+   "notes": "client-concepts.md lines 21-116. Capability gate: ClientCapabilities.elicitation {form?, url?} (schema.ts ~763-774). MUST NOT: 'Servers must not use form mode to request sensitive information such as passwords, API keys, access tokens, or payment credentials' (client-concepts.md line 116) — those belong in URL mode. Clients 'never fetch the URL automatically' and 'the client only learns whether the user consented' (line 114). Clients MUST validate responses against the provided schema before returning them to servers (line 112)."
+  },
+  {
+   "name": "sampling/createMessage",
+   "direction": "server->client, delivered inside InputRequiredResult.inputRequests as part of MRTR",
+   "params": "messages (role+content); modelPreferences{hints,costPriority,speedPriority,intelligencePriority}; systemPrompt?; maxTokens?; optional tools array + toolChoice field (schema.ts lines 2087-2151)",
+   "result": "CreateMessageResult extends SamplingMessage (schema.ts line 2210) — includes generated content, model used, stop reason; when tools used, tool-use response variant",
+   "notes": "client-concepts.md 174-270; DEPRECATED as of 2026-07-28, scheduled for removal (Warning block lines 176-180) — 'New implementations should integrate directly with LLM provider APIs instead.' Capability gate: ClientCapabilities.sampling{context?, tools?} (schema.ts 725-760), itself deprecated (SEP-2577). MUST: 'The client MUST return an error if this field [tools or toolChoice] is provided but ClientCapabilities.sampling.tools is not declared' (schema.ts lines 2143,2148). client-concepts.md line 190 restates: 'servers must not send tool-enabled sampling requests to clients that have not declared it'. If ClientCapabilities.sampling.context not declared, 'servers SHOULD only use includeContext: \"none\" (or omit it)' (schema.ts ~730-733)."
+  },
+  {
+   "name": "roots/list",
+   "direction": "client->server (server requests roots from client)",
+   "params": "none beyond RequestParams",
+   "result": "ListRootsResult — array of {uri: file://..., name?}",
+   "notes": "client-concepts.md 118-172. DEPRECATED as of 2026-07-28, scheduled for removal (Warning lines 120-125) — 'New implementations should pass directories or files via tool parameters, resource URIs, or server configuration instead.' Roots are 'exclusively filesystem paths and always use the file:// URI scheme' (line 142). Capability gate: ClientCapabilities.roots {} (schema.ts ~718-724), deprecated. Design note: spec says servers 'SHOULD respect root boundaries', not MUST enforce (line 162) — roots are advisory/coordination only, NOT a security boundary; real security must be enforced at OS level via permissions/sandboxing (line 131). Servers pick up updated roots list only on their NEXT roots/list request (line 142, 156) — no push guarantee described here beyond that."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement server/discover.",
+   "cite": "versioning.md L58-60; schema.ts L654-656"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Call server/discover; not required to — may instead send any request directly and handle a version error.",
+   "cite": "versioning.md L58-62; schema.ts L656-657"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "Support multiple protocol versions simultaneously.",
+   "cite": "versioning.md L51"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every request declares protocol version via `_meta` key `io.modelcontextprotocol/protocolVersion`.",
+   "cite": "versioning.md L45-47; schema.ts L76"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For the HTTP transport this value MUST match the `MCP-Protocol-Version` header.",
+   "cite": "schema.ts L71-74"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Accept or reject each request independently based on its declared protocol version; if unsupported, respond with UnsupportedProtocolVersionError listing supported versions.",
+   "cite": "versioning.md L53-56"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Use form-mode elicitation to request sensitive information such as passwords, API keys, access tokens, or payment credentials.",
+   "cite": "client-concepts.md L116"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Show the full URL and gather explicit consent before opening it in URL-mode elicitation, and never fetch the URL automatically.",
+   "cite": "client-concepts.md L114"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Validate elicitation responses against the provided requestedSchema before returning them to servers.",
+   "cite": "client-concepts.md L112"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Not send tool-enabled sampling requests (tools/toolChoice) to clients that have not declared the `sampling.tools` capability.",
+   "cite": "client-concepts.md L190; schema.ts L2143,2148"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Only use `includeContext: \"none\"` (or omit it) in sampling requests if the client has not declared `sampling.context` capability.",
+   "cite": "schema.ts L730-733"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Respect root boundaries communicated by the client (not MUST — roots are advisory, not enforced security).",
+   "cite": "client-concepts.md L162"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Actual filesystem security must be enforced at the OS level via permissions/sandboxing, not via roots.",
+   "cite": "client-concepts.md L131"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Use the stdio stream-termination notification (that ends a subscriptions/listen stream) to cancel any other request.",
+   "cite": "schema.ts L637"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that support rendering icons MUST support at least image/png and image/jpeg (and image/jpg) MIME types.",
+   "cite": "schema.ts Icons interface doc comment"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients that support rendering icons SHOULD also support image/svg+xml and image/webp.",
+   "cite": "schema.ts Icons interface doc comment"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Ensure icon URLs are from the same domain as client/server or a trusted domain, and take precautions consuming SVG icons (can contain executable JS).",
+   "cite": "schema.ts Icon interface doc comment"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "At least one of `inputRequests` or `requestState` MUST be present on an InputRequiredResult.",
+   "cite": "schema.ts L575"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Send an InputRequiredResult with `requestState` only and no `inputRequests`, e.g. for load shedding.",
+   "cite": "schema.ts L580 example title"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Echo back any `requestState` the server included when retrying the original request with inputResponses.",
+   "cite": "client-concepts.md L34; schema.ts L594-608"
+  }
+ ],
+ "wire_details": [
+  "_meta key: io.modelcontextprotocol/protocolVersion (string) — carries protocol version on every request (schema.ts L76).",
+  "HTTP header: MCP-Protocol-Version — Streamable HTTP transport, must match the _meta protocolVersion value (schema.ts L71-74).",
+  "Method name constants confirmed in schema.ts: tools/list, tools/call, resources/list, resources/templates/list, resources/read, subscriptions/listen, prompts/list, prompts/get, server/discover, elicitation/create, sampling/createMessage, roots/list (implied, deprecated).",
+  "Error type: UnsupportedProtocolVersionError — Omit<...> variant response listing server's supported versions (schema.ts L479-491).",
+  "Result union at MRTR sites: CreateMessageResult | ListRootsResult | ElicitResult (schema.ts L542); top-level results tools/call, prompts/get, resources/read are each unioned with InputRequiredResult (schema.ts L1245,1651,1849).",
+  "Enum: Icon.theme = 'light' | 'dark' (schema.ts Icon interface).",
+  "MIME types explicitly named: application/json (resource template examples), image/png, image/jpeg, image/jpg, image/svg+xml, image/webp (Icons MIME support tiers).",
+  "URI scheme: file:// is the exclusive scheme for Roots (client-concepts.md L142).",
+  "ServerCapabilities fields: experimental?, logging? (deprecated), completions?, prompts?{listChanged?}, resources?{subscribe?, listChanged?}, tools?{listChanged?}, extensions?{[key]: JSONObject} (schema.ts ~800-900).",
+  "ClientCapabilities fields: experimental?, roots?{} (deprecated), sampling?{context?, tools?} (deprecated), elicitation?{form?, url?}, extensions?{[key]: JSONObject} (schema.ts ~718-780).",
+  "Extension keys (ServerCapabilities.extensions / ClientCapabilities.extensions) MUST follow the `_meta` key naming rules with a mandatory prefix, e.g. io.modelcontextprotocol/oauth-client-credentials, io.modelcontextprotocol/tasks (schema.ts).",
+  "DiscoverResult fields: supportedVersions: string[]; capabilities: ServerCapabilities; instructions?: string (schema.ts L671-696). DiscoverResult extends CacheableResult (full caching contract not in the three read files).",
+  "Deprecation policy cited: deprecated features remain in spec >=12 months (or >=90 days under 'expedited-removal exception') before becoming eligible for Removal (versioning.md L29-38)."
+ ],
+ "sdk_implications": [
+  "PowerShell SDK must expose both a server role (Tools/Resources/Prompts registration + tools/list,tools/call,resources/list,resources/templates/list,resources/read,prompts/list,prompts/get,subscriptions/listen handlers, server/discover MUST be implemented) and a client role (dispatch of server/discover optionally, InputRequiredResult handling loop implementing MRTR: detect InputRequiredResult, resolve each entry in inputRequests via elicitation/create or sampling/createMessage handlers, retry original call attaching inputResponses + echoed requestState).",
+  "Need a generic MRTR retry primitive: any call that can return InputRequiredResult (tools/call, resources/read, prompts/get, and presumably others) must be retriable transparently by the client-side SDK, exposing hooks for elicitation UI and sampling/LLM callback.",
+  "Capability negotiation object model: ServerCapabilities and ClientCapabilities as extensible dictionaries (PowerShell hashtable/PSCustomObject) supporting unknown/experimental keys and namespaced `extensions` map with prefixed keys — SDK should not hardcode a closed enum.",
+  "SDK must reject (throw) attempts to send tools/toolChoice in a sampling/createMessage request when the negotiated ClientCapabilities.sampling.tools is absent — client-side guard, mirroring the MUST in schema.ts.",
+  "Elicitation subsystem needs two mode implementations: form (JSON Schema-driven prompt/validation) and url (consent-gate + no auto-fetch, return only boolean-ish consent result) — SDK should structurally prevent passing secrets through form mode (server-authoring lint/warning) even though the MUST NOT targets server authors.",
+  "Because Roots and Sampling are deprecated-and-scheduled-for-removal features (SEP-2577), the SDK should implement them but mark the corresponding cmdlets/types as Obsolete with migration guidance (tool parameters/resource URIs/server config instead of roots; direct LLM provider integration instead of sampling), consistent with the >=12-month retention window.",
+  "subscriptions/listen requires a persistent/streaming transport abstraction in the SDK (a subscription object with filter fields resourceSubscriptions/resourcesListChanged/promptsListChanged/toolsListChanged) that yields a typed notification stream (notifications/resources/updated, notifications/*/list_changed), and on stdio needs the special stream-termination notification that must not be conflated with generic request cancellation.",
+  "Version handling layer: SDK's request pipeline must attach _meta['io.modelcontextprotocol/protocolVersion'] to every outgoing request and (for Streamable HTTP transport) set the MCP-Protocol-Version header identically; server-side pipeline must validate per-request and return UnsupportedProtocolVersionError with its own supported-version list when mismatched, independent of any prior handshake.",
+  "Need backward-compatibility shim for pre-2026-07-28 handshake-based initialize flow (2025-11-25 and earlier) alongside the new server/discover-first model — dual-mode capability negotiation in the SDK's connection bootstrap.",
+  "Icon rendering support in any SDK-provided UI helpers must guarantee png/jpeg/jpg decoding at minimum; svg/webp optional-but-recommended."
+ ],
+ "legacy_delta": [
+  "2026-07-28 replaces the initialize-based handshake (2025-11-25 and earlier) with server/discover as the primary (server-MUST-implement) capability/version negotiation RPC; initialize-based negotiation still supported for backward compatibility per basic/versioning#backward-compatibility-with-initialization-based-versions (not itself read in these three files).",
+  "Roots capability and roots/list flow are marked Deprecated as of 2026-07-28 (SEP-2577), scheduled for removal — no such deprecation warning existed in prior revisions per the doc's own callouts.",
+  "Sampling (sampling/createMessage) and the whole sampling client capability are marked Deprecated as of 2026-07-28 (SEP-2577), scheduled for removal — new implementations directed to integrate LLM providers directly instead.",
+  "Elicitation is reframed under the new MRTR pattern: InputRequiredResult.inputRequests/requestState + inputResponses is a new formalism for this revision, not present as such in earlier per-request-only elicitation flows.",
+  "New URL mode for elicitation (out-of-band, e.g. OAuth/credential entry) is introduced in this revision alongside the pre-existing form mode.",
+  "Sampling gains an explicit `tools`/`toolChoice` capability-gated extension (ClientCapabilities.sampling.tools) for tool use inside sampling requests — a new field set in this revision.",
+  "Protocol version now flows per-request via `_meta['io.modelcontextprotocol/protocolVersion']` (and mirrored in the MCP-Protocol-Version HTTP header) rather than being fixed once via an initialize handshake."
+ ],
+ "open_questions": [
+  "Exact CacheableResult contract (what DiscoverResult extends) is not detailed in the three read pages — needed from basic/index.md to know caching semantics for server/discover responses in the SDK.",
+  "Full UnsupportedProtocolVersionError shape (fields beyond the Omit<...> base and the versions list) not fully visible from the grepped schema.ts excerpt — needs full type definition read for exact field names.",
+  "Whether resources/templates/list, prompts/list, tools/list support pagination cursors is implied by the general RequestParams pattern but not confirmed within these three files specifically — needs basic/index.md or a pagination utilities page.",
+  "ListRootsResult exact shape (only inferred as {uri,name} array from the Root structure example in client-concepts.md) not directly quoted from schema.ts in this pass.",
+  "Backward-compatibility mechanics with 2025-11-25-and-earlier handshake-based clients (referenced but not detailed) need a dedicated read of basic/versioning.md's 'Backward Compatibility' section for full MUST/SHOULD text before SDK dual-mode design is finalized."
+ ]
+}

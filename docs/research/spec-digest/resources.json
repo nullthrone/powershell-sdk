@@ -1,0 +1,460 @@
+{
+ "legacy_delta": [
+  "2025-11-25 and 2025-06-18 used `resources/subscribe` and `resources/unsubscribe` RPCs plus a per-connection notification channel; 2026-07-28 REMOVES these RPCs entirely and replaces them with `subscriptions/listen` carrying a `resourceSubscriptions: string[]` filter inside the `notifications` object of `SubscriptionsListenRequestParams` (schema.ts:1284-1287, 'Replaces the former `resources/subscribe` RPC'). An SDK targeting 2026-07-28 MUST NOT implement `resources/subscribe`/`resources/unsubscribe` as primary API; for legacy servers a compat shim is a separate concern.",
+  "Resource-not-found error code changed from -32002 (2025-11-25 and earlier) to -32602 (Invalid Params) in 2026-07-28 (resources.md:407-411; schema.ts:422-424, 'Codes defined by earlier protocol versions remain reserved and are never reused: -32002 ... replaced by -32602'). Clients SHOULD still accept -32002 for backward compatibility with older servers (resources.md:410-411).",
+  "resultType field ('complete' | 'input_required' | string) is NEW in 2026-07-28 and appears on every Result-derived object (ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult). It is REQUIRED for servers implementing this revision; absent-field-means-'complete' is only a backward-compat rule for parsing OLDER servers' responses (schema.ts:223-235).",
+  "InputRequiredResult / Multi-Round-Trip-Requests (MRTR) is NEW in 2026-07-28 and applies to resources/read (mrtr.md:184-194 table explicitly lists resources/read as supporting InputRequiredResult). This did not exist in 2025-11-25/2025-06-18 (those used server-initiated requests directly, now disallowed: mrtr.md:11-15, 'The previous pattern of server-initiated requests is no longer supported. This is a breaking change.').",
+  "ttlMs/cacheScope caching hints on ListResourcesResult/ListResourceTemplatesResult/ReadResourceResult are NEW in 2026-07-28 (caching.md:15-23). Prior revisions' list/read results had no caching envelope.",
+  "Every request in 2026-07-28 MUST carry required _meta fields io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities (clientInfo is SHOULD, not MUST) — this per-request capability/version declaration replaces the old one-time initialize-based capability negotiation model that 2025-11-25/2025-06-18 used (schema.ts:63-98). This affects every resources/* request an SDK builds.",
+  "ServerCapabilities.resources still exposes {subscribe?, listChanged?} exactly as before (schema.ts:846-855) — the capability SHAPE is unchanged, but its semantics moved: 'subscribe' now gates whether the server honors a resourceSubscriptions entry within a subscriptions/listen call rather than gating a resources/subscribe RPC."
+ ],
+ "methods": [
+  {
+   "name": "resources/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams: { _meta: RequestMetaObject (REQUIRED: io.modelcontextprotocol/protocolVersion:string REQUIRED, io.modelcontextprotocol/clientCapabilities:ClientCapabilities REQUIRED, io.modelcontextprotocol/clientInfo?:Implementation, progressToken?:ProgressToken, io.modelcontextprotocol/logLevel?: deprecated), cursor?: Cursor(string) }",
+   "result": "ListResourcesResult extends PaginatedResult, CacheableResult: { resultType: 'complete'|'input_required'|string (REQUIRED), resources: Resource[] (REQUIRED), nextCursor?: Cursor, ttlMs: number REQUIRED when resultType='complete' (>=0), cacheScope: 'public'|'private' REQUIRED when resultType='complete', _meta?: ResultMetaObject }",
+   "capability_gate": "Server MUST declare ServerCapabilities.resources (any shape, even {}) to respond; if not declared, server returns -32601 Method Not Found (schema.ts:346, comment on MethodNotFoundError: 'a server returns this error when a client invokes a method ... gated behind a server capability the server did not advertise').",
+   "notes": "resources.md:76-83: MUST respond with the set of resources currently available; set MAY be empty, MAY change over time, MUST NOT vary per-connection or as a side effect of other requests, MAY vary by authorization presented on the request (per-request, not connection state). Supports pagination (pagination.md) and caching (caching.md); server MUST include ttlMs/cacheScope when resultType is 'complete' (caching.md:15-23)."
+  },
+  {
+   "name": "resources/templates/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams: { _meta: RequestMetaObject (required fields as above), cursor?: Cursor }",
+   "result": "ListResourceTemplatesResult extends PaginatedResult, CacheableResult: { resultType (REQUIRED), resourceTemplates: ResourceTemplate[] (REQUIRED), nextCursor?: Cursor, ttlMs: number REQUIRED (>=0), cacheScope: 'public'|'private' REQUIRED, _meta? }",
+   "capability_gate": "Same resources capability gate as resources/list.",
+   "notes": "URI templates per RFC 6570 (resources.md:185-186). Arguments MAY be auto-completed via the completion API (server/utilities/completion) using ResourceTemplateReference. Supports pagination and caching identically to resources/list."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "ReadResourceRequestParams extends ResourceRequestParams, InputResponseRequestParams: { _meta: RequestMetaObject (required), uri: string (REQUIRED, format uri), inputResponses?: InputResponses (map of key->InputResponse, echoed back per InputRequiredResult.inputRequests keys), requestState?: string (opaque, echoed verbatim from a prior InputRequiredResult, MUST NOT be inspected/parsed/modified by client) }",
+   "result": "ReadResourceResultResponse.result: ReadResourceResult | InputRequiredResult. ReadResourceResult extends CacheableResult: { resultType:'complete' (REQUIRED), contents: (TextResourceContents|BlobResourceContents)[] (REQUIRED, MUST NOT be empty array for a non-existent resource), ttlMs: number REQUIRED (>=0), cacheScope:'public'|'private' REQUIRED, _meta? }. InputRequiredResult: { resultType:'input_required', inputRequests?: InputRequests, requestState?: string; at least one of inputRequests/requestState MUST be present; not cacheable, carries no ttlMs/cacheScope. }",
+   "capability_gate": "resources capability MUST be declared to serve this method at all (else -32601). No separate gate for InputRequiredResult itself, but server MUST NOT include an inputRequests entry whose method (elicitation/create, sampling/createMessage, roots/list) the client hasn't declared support for in its per-request clientCapabilities.",
+   "notes": "Servers MAY return multiple resource contents for one uri (e.g. directory read) (resources.md:175-177). Servers MAY reply with InputRequiredResult per MRTR pattern (resources.md:179; mrtr.md table row 'resources/read: Yes'). On retry client MUST use a different JSON-RPC id, MUST echo requestState exactly if one was given, MUST NOT include requestState if none was given, and MUST supply inputResponses satisfying every key in the prior inputRequests before retry succeeds (mrtr.md Client Requirements #1-4). Client MAY instead fetch directly from the web if uri scheme is https:// (resources.md:181)."
+  },
+  {
+   "name": "resources/templates/list (URI Template argument completion)",
+   "direction": "client->server",
+   "params": "See server/utilities/completion (completion/complete request) referencing a ResourceTemplateReference — not itself a resources/* method, but explicitly tied to resource templates (resources.md:186-187: 'Arguments may be auto-completed through the completion API').",
+   "result": "n/a (documented in completion.md, out of scope of this page; referenced only).",
+   "capability_gate": "ServerCapabilities.completions must be declared.",
+   "notes": "Included because resources.md explicitly cross-references it for resource template arguments."
+  },
+  {
+   "name": "notifications/resources/list_changed",
+   "direction": "notification s->c",
+   "params": "ResourceListChangedNotification: { method:'notifications/resources/list_changed', params?: NotificationParams { _meta?: NotificationMetaObject } }",
+   "result": "none (notification)",
+   "capability_gate": "Only delivered on a subscriptions/listen stream where the client requested it via SubscriptionFilter.resourcesListChanged=true (schema.ts:1249, 1280-1282); server capability ServerCapabilities.resources.listChanged SHOULD be true for the server to ever send it (resources.md:236-244: servers that declared listChanged SHOULD send it).",
+   "notes": "Every notification delivered on a subscription stream MUST carry _meta['io.modelcontextprotocol/subscriptionId'] equal to the id of the subscriptions/listen request that opened the stream (schema.ts:120-134; subscriptions.md:87-94)."
+  },
+  {
+   "name": "notifications/resources/updated",
+   "direction": "notification s->c",
+   "params": "ResourceUpdatedNotificationParams extends NotificationParams: { _meta?: NotificationMetaObject (MUST include io.modelcontextprotocol/subscriptionId on a subscription stream), uri: string (REQUIRED, format uri; 'This might be a sub-resource of the one that the client actually subscribed to' schema.ts:1413) }",
+   "result": "none (notification)",
+   "capability_gate": "Only sent for URIs the client opted into via SubscriptionFilter.resourceSubscriptions on a subscriptions/listen request (schema.ts:1421); requires server capability resources.subscribe=true to be meaningful (server SHOULD omit/refuse the filter entry otherwise — reflected by omission from the acknowledgment's notifications set).",
+   "notes": "Example in resources.md:254-263 shows uri plus _meta.io.modelcontextprotocol/subscriptionId:4."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server",
+   "params": "SubscriptionsListenRequestParams extends RequestParams: { _meta: RequestMetaObject (required fields), notifications: SubscriptionFilter { toolsListChanged?:boolean, promptsListChanged?:boolean, resourcesListChanged?:boolean, resourceSubscriptions?:string[] } } — all SubscriptionFilter fields optional; omitting a field = not subscribing to it.",
+   "result": "On graceful close only: SubscriptionsListenResultResponse.result: SubscriptionsListenResult extends Result { resultType:'complete', _meta: SubscriptionsListenResultMetaObject { io.modelcontextprotocol/subscriptionId: RequestId (REQUIRED, equals request id) } }. On abrupt transport close, no response is ever sent for this request.",
+   "capability_gate": "No dedicated capability flag beyond the underlying feature's own gate (e.g. resources capability with listChanged/subscribe for resource-related filter entries; tools/prompts capabilities for their filters).",
+   "notes": "This is the mechanism resources subscriptions ride on (resources.md:246-266). Opens a long-lived stream; 'Sent from the client to open a long-lived channel for receiving notifications outside the context of a specific request. Replaces the previous HTTP GET endpoint' (schema.ts:1304-1307). Server MUST NOT send notification types not requested (schema.ts:1265-1266, 1297-1299; subscriptions.md:17-18). Server MUST send notifications/subscriptions/acknowledged as the FIRST message carrying the subscriptionId, MUST NOT send any subscription notification before it (schema.ts:1386-1391; subscriptions.md:56-61). On stdio the client MUST re-send subscriptions/listen after reconnect since server holds no state across reconnections (subscriptions.md:162-164). Cancellation: client closes SSE stream (HTTP) or sends notifications/cancelled referencing the subscriptions/listen request id (stdio) — servers MUST NOT use notifications/cancelled to cancel any other request type on stdio (schema.ts:637)."
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification s->c",
+   "params": "SubscriptionsAcknowledgedNotificationParams extends NotificationParams: { _meta?: NotificationMetaObject with io.modelcontextprotocol/subscriptionId, notifications: SubscriptionFilter (REQUIRED — the SUBSET of requested types the server agreed to honor; unsupported types silently omitted) }",
+   "result": "none (notification)",
+   "capability_gate": "n/a — always sent in response to a subscriptions/listen call.",
+   "notes": "MUST be the very first message on the stream carrying the subscriptionId (schema.ts:1386-1391). Client SHOULD check the acknowledged filter against what it requested and handle unsupported types gracefully (subscriptions.md:82-83)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that support resources MUST declare the `resources` capability in ServerCapabilities (may be `{}` if neither listChanged nor subscribe is supported).",
+   "cite": "resources.md:41-74; schema.ts:846-855"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that declare the resources capability MUST respond to resources/list requests with the set of resources currently available to the requesting client.",
+   "cite": "resources.md:76-77"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The resources/list result set MUST NOT vary per-connection or as a side effect of other requests on the connection.",
+   "cite": "resources.md:79-80"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "The resources/list result set MAY be empty, MAY change over time, and MAY vary by the authorization presented on the request (credentials are per-request input, not connection state).",
+   "cite": "resources.md:78-83"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers that declared listChanged SHOULD send notifications/resources/list_changed when the resource list changes.",
+   "cite": "resources.md:236-244"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY return multiple resource contents in a single resources/read response (e.g., a directory resource returning several files).",
+   "cite": "resources.md:175-177"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY respond to resources/read with an InputRequiredResult per the MRTR pattern to request additional input before the resource can be read.",
+   "cite": "resources.md:179; mrtr.md table row resources/read"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When retrying a resources/read after an InputRequiredResult, clients include inputResponses and, if provided by the server, requestState in the request parameters.",
+   "cite": "resources.md:179; mrtr.md Client Requirements #1-2"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If the uri scheme of a resource is https://, clients may fetch the resource directly from the web instead of via resources/read.",
+   "cite": "resources.md:181"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Custom URI schemes MUST be in accordance with RFC 3986.",
+   "cite": "resources.md:400-403"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD use the https:// scheme only when the client can fetch/load the resource directly from the web on its own (i.e. does not need to read it via the MCP server); for other cases servers SHOULD prefer another or a custom URI scheme even if the server itself downloads the content over the internet.",
+   "cite": "resources.md:374-384"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "MCP servers MAY identify file:// resources with an XDG MIME type (e.g. inode/directory) for non-regular files such as directories.",
+   "cite": "resources.md:386-394"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If the requested resource does not exist, servers MUST return a JSON-RPC error with code -32602 (Invalid Params).",
+   "cite": "resources.md:407-408"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD return -32603 (Internal Error) for internal errors during resources/read.",
+   "cite": "resources.md:408"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "For backwards compatibility, clients SHOULD also accept -32002 as a resource-not-found error code, since earlier protocol versions (2025-11-25 and earlier) used it.",
+   "cite": "resources.md:410-411; schema.ts:422-424"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT return an empty `contents` array for a non-existent resource, since an empty array is ambiguous between 'exists but empty' and 'does not exist'.",
+   "cite": "resources.md:413"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST validate all resource URIs.",
+   "cite": "resources.md:433"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Access controls SHOULD be implemented for sensitive resources.",
+   "cite": "resources.md:434"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Binary data MUST be properly (base64) encoded in BlobResourceContents.",
+   "cite": "resources.md:435; schema.ts:1548-1555"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Resource permissions SHOULD be checked before operations.",
+   "cite": "resources.md:436"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST sanitize file paths to prevent directory traversal attacks when serving file:// resources.",
+   "cite": "resources.md:437-438"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every request MUST include the required `_meta` fields io.modelcontextprotocol/protocolVersion (string) and io.modelcontextprotocol/clientCapabilities (ClientCapabilities); clientInfo is a SHOULD-include, not a MUST.",
+   "cite": "resources.md:15-22 (Note); schema.ts:69-98"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "For the HTTP transport, the `io.modelcontextprotocol/protocolVersion` value in a request's _meta MUST match the `MCP-Protocol-Version` HTTP header; otherwise the server MUST return 400 Bad Request. If the server does not support the requested version it MUST return an UnsupportedProtocolVersionError.",
+   "cite": "schema.ts:69-74"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers implementing this protocol version MUST include `resultType` on every Result they return.",
+   "cite": "schema.ts:229-230"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For backward compatibility, when a client receives a result from a server implementing an earlier protocol version (no resultType field), the client MUST treat the absent field as 'complete'.",
+   "cite": "schema.ts:230-232"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST include caching hints (ttlMs, cacheScope) on results with resultType 'complete' returned by resources/list, resources/templates/list, and resources/read (also server/discover, tools/list, prompts/list).",
+   "cite": "caching.md:15-23"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST provide a ttlMs value that is >= 0.",
+   "cite": "caching.md:62; schema.ts:1092 (@minimum 0)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is 0, the response SHOULD be considered immediately stale; client MAY re-fetch every time the result is needed.",
+   "cite": "caching.md:54-55"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is positive, the client SHOULD consider the result fresh for that many ms after receipt.",
+   "cite": "caching.md:56-57"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is absent (older servers only), clients SHOULD assume a default of 0.",
+   "cite": "caching.md:58-59"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is negative, clients SHOULD ignore it and treat it as 0.",
+   "cite": "caching.md:60"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "Clients SHOULD NOT treat TTL as a polling interval that triggers automatic background refetches; if they do poll, they MUST apply jitter and backoff.",
+   "cite": "caching.md:83-86"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients MAY re-fetch before TTL expiry if they have reason to believe data changed, and MAY serve stale responses if re-fetch errors occur.",
+   "cite": "caching.md:88-93"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT serve a cached response for a request whose method or parameters differ from the request that produced it (cache key = method + parameters affecting the result, e.g. uri for resources/read, cursor for list).",
+   "cite": "caching.md:29-34"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Results produced by retrying a request via MRTR (carrying inputResponses or requestState) MUST NOT be cached.",
+   "cite": "caching.md:36-39"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Caches with cacheScope 'private' MUST NOT be shared across authorization contexts (different access token requires a different cache).",
+   "cite": "caching.md:103; schema.ts:1103-1106"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST apply the same cacheScope to all response pages for a given paginated list request (e.g., if page 1 of tools/list is 'private', all subsequent pages MUST also be 'private').",
+   "cite": "caching.md:168-171"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Server implementors MUST apply appropriate per-primitive access controls and MUST NOT rely on cacheScope alone to prevent unauthorized access to primitives.",
+   "cite": "caching.md:180-181"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT assume a fixed page size for pagination.",
+   "cite": "pagination.md:31-32"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST treat cursors as opaque tokens: no format assumptions, no parsing/modifying, no determination based on cursor value other than whether a non-null value was provided (an empty string IS a valid cursor and MUST NOT be treated as end-of-results).",
+   "cite": "pagination.md:104-109"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD provide stable cursors and handle invalid cursors gracefully.",
+   "cite": "pagination.md:96-98"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD treat a missing nextCursor as end of results and SHOULD support both paginated and non-paginated flows.",
+   "cite": "pagination.md:100-102"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Invalid cursors SHOULD result in a -32602 (Invalid Params) error.",
+   "cite": "pagination.md:111-113"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST NOT send notification types on a subscriptions/listen stream that the client did not explicitly request in its SubscriptionFilter.",
+   "cite": "schema.ts:1265-1266,1297-1299; subscriptions.md:17-18"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The server MUST send notifications/subscriptions/acknowledged as the first message carrying the subscription's ID (io.modelcontextprotocol/subscriptionId), and MUST NOT send any notification on the subscription before that acknowledgment.",
+   "cite": "schema.ts:1386-1391; subscriptions.md:56-61"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, where every subscription shares one channel, clients MUST use io.modelcontextprotocol/subscriptionId to correlate notifications with their originating subscription.",
+   "cite": "subscriptions.md:92-94; schema.ts:120-133"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, if the connection is terminated and re-established, the client MUST re-send subscriptions/listen to re-establish subscriptions; the server holds no subscription state across reconnections.",
+   "cite": "subscriptions.md:162-164"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When the server ends a subscription on its own initiative, it SHOULD respond to the original subscriptions/listen request with a completion result (resultType:'complete', _meta.subscriptionId) before closing the stream, signalling graceful end; an abrupt transport close carries no response.",
+   "cite": "subscriptions.md:124-138; schema.ts:1338-1351"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "On stdio, notifications/cancelled MUST NOT be used by servers to cancel any request other than terminating a subscriptions/listen stream.",
+   "cite": "schema.ts:637"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "At least one of `inputRequests` or `requestState` MUST be present in every InputRequiredResult.",
+   "cite": "schema.ts:575; mrtr.md requirement #6"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "inputRequests keys MUST be unique within the scope of the request; inputRequests values MUST be one of ElicitRequest, CreateMessageRequest, or ListRootsRequest.",
+   "cite": "mrtr.md requirement #2"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST treat a client-supplied requestState as attacker-controlled input; if it influences authorization/resource access/business logic, servers MUST protect its integrity (e.g. HMAC/AEAD) and MUST reject state failing verification (integrity protection MAY be omitted only when tampering can cause nothing worse than request failure).",
+   "cite": "mrtr.md requirement #4"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT include in inputRequests any request type (e.g. elicitation/create) the client has not declared support for in its per-request clientCapabilities.",
+   "cite": "mrtr.md requirement #7"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send InputRequiredResult responses on any client request other than prompts/get, resources/read, and tools/call.",
+   "cite": "mrtr.md:186-194 (table + 'MUST NOT send ... on any other client requests')"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If an InputRequiredResult contains inputRequests, the client MUST construct the requested inputs before retrying; if it does not contain inputRequests, the client MAY retry immediately.",
+   "cite": "mrtr.md Client Requirements #1"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If InputRequiredResult contains requestState, the client MUST echo it back verbatim on retry and MUST NOT inspect/parse/modify it; if no requestState was given, the client MUST NOT include one on retry.",
+   "cite": "mrtr.md Client Requirements #2"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The JSON-RPC id MUST differ between the initial request and the MRTR retry, since they are independent requests.",
+   "cite": "mrtr.md Client Requirements #3"
+  }
+ ],
+ "wire_details": [
+  "Method names: `resources/list`, `resources/templates/list`, `resources/read`, `subscriptions/listen` (all client->server requests); `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/subscriptions/acknowledged` (server->client notifications, only the latter two of which correlate via subscriptionId — list_changed also correlates via subscriptionId when delivered on a stream).",
+  "_meta keys used: `io.modelcontextprotocol/protocolVersion` (string, required on every request _meta), `io.modelcontextprotocol/clientInfo` (Implementation, SHOULD), `io.modelcontextprotocol/clientCapabilities` (ClientCapabilities, required), `io.modelcontextprotocol/logLevel` (deprecated), `io.modelcontextprotocol/subscriptionId` (RequestId — on NotificationMetaObject for every notification on a subscription stream, and on ResultMetaObject variant SubscriptionsListenResultMetaObject for the graceful-close response), `io.modelcontextprotocol/serverInfo` (Implementation, SHOULD, on ResultMetaObject).",
+  "JSON-RPC error codes referenced: -32700 PARSE_ERROR, -32600 INVALID_REQUEST, -32601 METHOD_NOT_FOUND (used when resources capability not declared or method unknown), -32602 INVALID_PARAMS (resource not found; invalid/expired cursor), -32603 INTERNAL_ERROR (SHOULD for internal errors), legacy -32002 (2025-11-25 and earlier resource-not-found, clients SHOULD still accept it, never reused), legacy -32042 (2025-11-25-only URL elicitation, never reused), -32020 HEADER_MISMATCH (HTTP header vs body mismatch), -32021 range reserved for MissingRequiredClientCapabilityError (client capability not declared). MCP reserves -32000..-32019 implementation-defined, -32020..-32099 spec-defined sequentially from -32020.",
+  "HTTP transport: MCP-Protocol-Version header MUST match _meta['io.modelcontextprotocol/protocolVersion'] on every request or the server returns 400 Bad Request.",
+  "Constants: LATEST_PROTOCOL_VERSION = '2026-07-28'; JSONRPC_VERSION = '2.0'.",
+  "Enum values: Annotations.audience ∈ Role[] = ['user','assistant']; Annotations.priority: number 0.0–1.0; Annotations.lastModified: ISO 8601 string e.g. '2025-01-12T15:00:58Z'. CacheableResult.cacheScope ∈ {'public','private'}. ResultType = 'complete' | 'input_required' | string (open string type, extensible). Icon.theme ∈ {'light','dark'}.",
+  "Example MIME types seen in the spec text for resources: 'text/x-rust', 'application/octet-stream', 'text/plain', 'image/png', 'text/markdown', and the XDG type 'inode/directory' for file:// directory-like resources. Icons: clients that render icons MUST support image/png and image/jpeg (and image/jpg); SHOULD also support image/svg+xml and image/webp.",
+  "Resource object fields (schema.ts:1441-1474; also resources.md:303-313): uri (string, format uri, REQUIRED), name (string, REQUIRED via BaseMetadata), title (string, optional, human-readable display), description (string, optional), mimeType (string, optional), size (number, optional, raw byte size before base64/tokenization), icons (Icon[], optional, via Icons), annotations (Annotations, optional), _meta (MetaObject, optional). NOTE: resources.md prose lists `icons` before `mimeType`/`size` and does not itemize `annotations` in its own bullet list, but schema.ts is authoritative and includes annotations.",
+  "ResourceTemplate object fields (schema.ts:1481-1507): uriTemplate (string, format uri-template, RFC 6570, REQUIRED), name (REQUIRED), title (optional), description (optional), mimeType (optional — 'should only be included if all resources matching this template have the same type'), annotations (optional), icons (optional), _meta (optional).",
+  "ResourceContents base fields (schema.ts:1514-1527): uri (string, format uri, REQUIRED), mimeType (optional), _meta (optional). TextResourceContents adds `text: string` (REQUIRED, only for text-representable content). BlobResourceContents adds `blob: string` (REQUIRED, base64-encoded, format byte).",
+  "CacheableResult fields ttlMs (number, minimum 0) and cacheScope ('public'|'private') are declared as REQUIRED (non-optional) properties on the TypeScript interface (schema.ts:1094,1109), gated in practice by 'MUST include ... on results with resultType: complete' (caching.md:15) — i.e. required when resultType is 'complete', not required/meaningful on 'input_required' results.",
+  "SubscriptionFilter fields and their gated notifications: toolsListChanged -> notifications/tools/list_changed; promptsListChanged -> notifications/prompts/list_changed; resourcesListChanged -> notifications/resources/list_changed; resourceSubscriptions: string[] (resource URIs) -> notifications/resources/updated per URI.",
+  "PaginatedRequestParams.cursor: Cursor = string, optional. PaginatedResult.nextCursor: Cursor, optional — presence implies more results may exist."
+ ],
+ "sdk_implications": [
+  "Implement three resource RPC client methods: Invoke-McpListResources (resources/list), Invoke-McpListResourceTemplates (resources/templates/list), Invoke-McpReadResource (resources/read) — each building _meta with io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities mandatorily populated, clientInfo populated by default (SHOULD).",
+  "Every request builder MUST reject/refuse to send a request whose _meta is missing protocolVersion or clientCapabilities — these are non-optional per schema even though they live inside a generic _meta bag; the PowerShell request-construction layer should make them required constructor parameters, not optional hashtable keys.",
+  "Model ResultType as an extensible string (not a closed enum) — a [ValidateSet] would be wrong; use a string property with 'complete'/'input_required' as known constants but allow pass-through of unknown values for forward compatibility.",
+  "ReadResourceResult must be modeled as a discriminated union / two possible .NET types (ReadResourceResult vs InputRequiredResult) selected by resultType — PowerShell classes need a factory (e.g. ConvertTo-McpReadResourceResult) that inspects resultType and returns the appropriate typed object, since ttlMs/cacheScope are absent on input_required.",
+  "Implement MRTR retry loop helper for resources/read: on receiving InputRequiredResult, resolve each entry in inputRequests (dispatch elicitation/create, sampling/createMessage, or roots/list handlers the client declared support for), build InputResponses keyed identically, and reissue resources/read with a NEW JSON-RPC id, inputResponses, and requestState echoed byte-for-byte (opaque — do not attempt to deserialize/re-serialize, store as raw string).",
+  "Client-side cache layer (optional but recommended for spec conformance) needs: cache key = (method, uri | cursor), TTL clock starting at receipt time, per-cacheScope isolation (public vs private+auth-context), and invalidation subscription to notifications/resources/list_changed and notifications/resources/updated when subscribed. Must NOT cache MRTR retry results (requests carrying inputResponses/requestState).",
+  "Pagination helper (e.g. Get-McpAllResources) must loop on nextCursor treating it as fully opaque (including empty string as a valid continuation), never assume page size, and must stop only when nextCursor is absent from the response.",
+  "Subscriptions require a persistent bidirectional/streaming transport abstraction: Invoke-McpSubscriptionsListen opens a long-lived request whose id becomes the subscriptionId; the SDK must route subsequent notifications by matching _meta['io.modelcontextprotocol/subscriptionId'] against open listen-stream ids (critical on stdio where all traffic multiplexes over one pipe). The client must not treat the notifications/subscriptions/acknowledged handshake as optional — must gate 'stream considered active' on receiving it first.",
+  "Server-side (New-McpServer or similar) implementation must expose delegates/script blocks for resources/list, resources/templates/list, resources/read and enforce: never return code -32602 for anything except not-found, never return empty contents[] for missing resources (throw a distinct 'not found' exception type mapped to -32602 instead), and stamp every list/read result with ttlMs>=0 and cacheScope before serialization — a serializer bug that omits these on a 'complete' result is a spec violation.",
+  "Server-side subscription support: track per-subscriptions/listen-request-id which resourceSubscriptions/list-changed filters were granted (acknowledgment must be a SUBSET actually supported), enforce first-message-is-acknowledgment ordering, and on graceful shutdown emit the completion Result (resultType:'complete', _meta.subscriptionId) before closing the transport — this needs explicit lifecycle hooks in the server host distinct from normal request/response handling.",
+  "URI/path safety: any file:// resource provider shipped as a sample/reference server MUST canonicalize and validate paths against a root to prevent directory traversal (resources.md security section) — implement a shared Assert-McpSafePath utility used by any bundled filesystem resource provider.",
+  "Legacy compatibility shim: when acting as a client against an older (2025-11-25 or earlier) server, the SDK's error handling MUST also recognize code -32002 as resource-not-found in addition to -32602, and must tolerate a missing resultType field by defaulting to 'complete'.",
+  "Do not implement resources/subscribe or resources/unsubscribe as first-class 2026-07-28 API; if legacy-server interop is a stated goal, isolate it behind a distinct compatibility module rather than the primary Resources API surface."
+ ],
+ "open_questions": [
+  "The prose Resource field list in resources.md (lines 303-313) omits `annotations` from its own bullet list even though schema.ts:1441-1474 defines Resource.annotations — should the SDK's documentation follow the schema (authoritative) or note the prose's minor incompleteness? I treated schema.ts as authoritative.",
+  "resources.md's capability JSON example and the ServerCapabilities.resources TypeScript type both show exactly {subscribe?, listChanged?}; the page's prose additionally says subscribe means 'the server supports resource-specific update notifications for resources requested through subscriptions/listen using the resourceSubscriptions filter'. It is not fully spelled out whether a server MUST reject (error) a resourceSubscriptions entry when it has NOT declared subscribe:true, or whether it simply silently omits resourceSubscriptions from the acknowledgment's notifications filter. The acknowledgment mechanism (subscriptions.md:63-64, 'Notification types the server does not support are omitted') suggests silent omission rather than an error, but this is inferred, not explicitly stated for the subscribe capability specifically (it's stated generically for SubscriptionFilter fields).",
+  "Whether `resources/templates/list` results can themselves return InputRequiredResult is not addressed anywhere (mrtr.md's supported-requests table only lists prompts/get, resources/read, tools/call) — confirmed NOT supported for templates/list or plain list, but worth flagging since an implementer might mistakenly extend MRTR there.",
+  "The exact interaction between a resources/read call that both matches an active resourceSubscriptions URI and also carries caching hints (ttlMs) is not explicitly specified beyond the generic caching.md 'Interaction with Notifications' section (which addresses list results, not read results, explicitly) — for read results caching.md's general rule (notification invalidates cache) should apply but is not spelled out per-uri for resources/updated vs. a cached resources/read(uri) response; reasonable to assume it does, but not textually explicit in the resources or caching pages for resources/read specifically.",
+  "2026-07-28_schema.json (the JSON Schema counterpart) was not independently diffed field-by-field against schema.ts in this pass; schema.ts (the TypeScript source of truth per repo convention) was used as authoritative. If the JSON Schema disagrees on any optionality (e.g. ttlMs required vs optional), that would need reconciliation — flagging as unresolved since only schema.ts was read in full for these interfaces."
+ ],
+ "source": "MCP specification 2026-07-28 — primary: /tmp/.../scratchpad/spec/pages/specification__2026-07-28__server__resources.md (read in full, all 439 lines). Cross-referenced in full/substantial part: schema.ts lines 1-440 (meta/result/error-code definitions), 560-1030 (InputRequiredResult, InputResponseRequestParams, DiscoverResult/Capabilities), 793-1000 (ServerCapabilities, Icons, BaseMetadata), 1100-1570 (Resources block: ListResourcesRequest/Result, ListResourceTemplatesRequest/Result, ReadResourceRequest/Result, ResourceListChangedNotification, SubscriptionFilter, SubscriptionsListenRequest/Result, SubscriptionsAcknowledgedNotification, ResourceUpdatedNotification, Resource, ResourceTemplate, ResourceContents/Text/Blob), 2260-2320 (Annotations). Supporting pages read in full: pages/specification__2026-07-28__server__utilities__caching.md, pages/specification__2026-07-28__server__utilities__pagination.md, pages/specification__2026-07-28__basic__patterns__subscriptions.md, pages/specification__2026-07-28__basic__patterns__mrtr.md.",
+ "summary": "Resources (2026-07-28) let servers expose URI-identified data via resources/list, resources/templates/list (RFC 6570 templates), and resources/read, gated by a MUST-declared `resources` ServerCapabilities flag ({subscribe?, listChanged?}, both optional/independent). List/read results now carry a mandatory `resultType` ('complete'|'input_required'|string) and, when complete, mandatory caching hints `ttlMs` (>=0) and `cacheScope` ('public'|'private'). resources/read returns ReadResourceResult{contents: (TextResourceContents|BlobResourceContents)[]} or, new in this revision, an InputRequiredResult (MRTR pattern) carrying inputRequests/requestState, retried with inputResponses+requestState and a new JSON-RPC id. The BIGGEST change from 2025-11-25/2025-06-18: `resources/subscribe`/`resources/unsubscribe` RPCs are gone, replaced by `subscriptions/listen` opening a long-lived stream with a `SubscriptionFilter` (toolsListChanged, promptsListChanged, resourcesListChanged, resourceSubscriptions:string[]); server MUST ack first via notifications/subscriptions/acknowledged carrying subscriptionId, then deliver notifications/resources/updated{uri}/notifications/resources/list_changed correlated by `_meta['io.modelcontextprotocol/subscriptionId']`. Resource/ResourceTemplate carry BaseMetadata(name,title)+Icons+description+mimeType+annotations(audience:['user','assistant'], priority 0-1, lastModified ISO8601)+_meta; Resource also has size. Error handling: not-found is now -32602 (was -32002, still SHOULD-accepted for compat), servers SHOULD use -32603 for internal errors, MUST NOT return empty contents[] for missing resources. URI scheme guidance: https:// only when client can fetch directly itself; file:// may use XDG mime type inode/directory; custom schemes MUST follow RFC 3986. Security: MUST validate URIs, sanitize paths against traversal, properly encode binary, SHOULD gate access/permissions. Every request needs required _meta (protocolVersion, clientCapabilities)."
+}

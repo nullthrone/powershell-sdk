@@ -1,0 +1,346 @@
+{
+ "legacy_delta": [
+  "Skills extension does not exist in 2025-11-25 or 2025-06-18 schemas/spec at all (grep of schema.ts, 2026-07-28_schema.json, and the 2025-11-25/2025-06-18 schemas for 'skill' returns nothing) — it is new as of / introduced under revision 2026-07-28 and lives entirely outside the core schema.ts, defined only by the separate ext-skills repository referenced from pages/extensions__skills__overview.md.",
+  "The extension builds on primitives (Resources, pagination, caching, resultType envelope) that are part of the core 2026-07-28 spec; an SDK targeting only 2025-11-25/2025-06-18 cannot support Skills at all since resultType/caching/pagination-for-resources semantics it depends on are current-revision features."
+ ],
+ "methods": [
+  {
+   "name": "skills/list",
+   "direction": "client->server",
+   "capability_gate": "Server MUST declare capabilities.resources (object, possibly empty) AND capabilities.extensions[\"io.modelcontextprotocol/skills\"] (object; may be {} or {directoryRead:true}). Client MUST only send skills/list after observing this declaration.",
+   "params": "Supports pagination: optional params.cursor (string) per standard MCP pagination utility. No other params documented in the page (example shows params: {}).",
+   "result": "{ resultType: \"complete\" (REQUIRED literal per this extension), skills: SkillEntry[], ttlMs: number (REQUIRED), cacheScope: string e.g. \"public\" (REQUIRED), nextCursor?: string for pagination }. SkillEntry = { uri: string (resource URI of SKILL.md, e.g. skill://code-review/SKILL.md), frontmatter: object (ALL YAML frontmatter fields verbatim, at minimum name and description), resources: Array<{uri:string, digest:string (\"sha256:<hex>\"), size:number}> | the literal string \"dynamic\" for generated/unstable content }.",
+   "notes": "Manifest (resources array) MUST include SKILL.md itself plus every supporting file. Each returned entry is complete/self-sufficient (client need not call skills/get afterward). Servers MAY return empty or partial listings (i.e., listing completeness is not guaranteed) but per-skill entries, once listed, must have complete manifests (manifest MUST NOT be split across pages)."
+  },
+  {
+   "name": "skills/get",
+   "direction": "client->server",
+   "capability_gate": "Same capability gate as skills/list (resources + io.modelcontextprotocol/skills extension declared).",
+   "params": "{ uri: string } — REQUIRED. The URI may originate from a user, another skill, or server instructions (i.e., need not come from a prior skills/list call).",
+   "result": "{ resultType: \"complete\", skill: SkillEntry (same shape as a skills/list entry), ttlMs: number, cacheScope: string }.",
+   "notes": "Servers MUST respond to skills/get for every skill they serve, INCLUDING skills that do not appear in any listing (hosts MUST support loading by URI even for unlisted skills). Also usable to refresh/re-verify an existing retained entry. Unknown URI -> JSON-RPC error -32602 (Invalid params); this is the documented lookup-failure path that stops skill loading."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "capability_gate": "Base Resources capability (capabilities.resources); this is the pre-existing core Resources primitive, reused (not redefined) by the Skills extension to fetch SKILL.md and supporting file bytes.",
+   "params": "{ uri: string } (standard resources/read params — page does not add extension-specific params).",
+   "result": "Standard resources/read result shape: { resultType: \"complete\", contents: [{ uri, mimeType, text (or blob) }], ttlMs, cacheScope }. Example: SKILL.md returned with mimeType \"text/markdown\" and text containing YAML frontmatter + body.",
+   "notes": "Reading SKILL.md via resources/read does NOT itself activate the skill — activation requires the host to route the read through its own skill-loading path (verification + optional user approval) before the content enters model context. Relative references inside a skill (e.g. references/checklist.md) resolve against the skill's root directory using the skill:// (or server-chosen) scheme, and are fetched from the SAME originating server via another resources/read call. Hosts MUST NOT prefetch any file (including SKILL.md itself) ahead of actual need — not on connection, not on listing, not on approval; approval binds to the manifest, not to fetched bytes."
+  },
+  {
+   "name": "resources/directory/read",
+   "direction": "client->server",
+   "capability_gate": "Optional method. Client MUST NOT call it unless the server's extension declaration sets directoryRead: true (default is false when the extension object is present but omits the key).",
+   "params": "{ uri: string (a directory URI, no trailing slash) ; cursor?: string for pagination }.",
+   "result": "{ resultType: \"complete\", resources: Array<{ uri: string, name: string, mimeType: string }>, nextCursor?: string }. Child directories are reported with mimeType: \"inode/directory\" (exact constant). Returns direct children only (non-recursive); client descends by issuing another request per child directory.",
+   "notes": "For skills with a static manifest, hosts MAY answer directory queries purely from that retained manifest instead of calling the server. Hosts MUST NOT treat a live directory/read result as extending/augmenting the retained manifest, and MUST NOT expose newly-observed files as part of the skill without an entry refresh (skills/get) plus any required re-approval."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that support Skills MUST declare both the resources capability and the io.modelcontextprotocol/skills extension object in server/discover.",
+   "cite": "pages/extensions__skills__overview.md, 'Capabilities' section, lines 41-58"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers that declare the io.modelcontextprotocol/skills extension MUST implement skills/list and skills/get.",
+   "cite": "lines 60-61"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Skill files SHOULD be served through the existing resources/read method rather than a new method (stated as the design; skills/get returns metadata only, not content).",
+   "cite": "lines 61, 177-181"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST issue skills/list and skills/get only after observing the server's extension declaration.",
+   "cite": "line 65-66"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Every request (including skills/list and skills/get) MUST include the required request metadata (_meta) per basic/index#_meta, even though examples omit it for brevity.",
+   "cite": "lines 68-72 (Note block)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A manifest (the `resources` field of a skill entry) MUST include SKILL.md and every supporting file, each with uri, SHA-256 digest, and byte size.",
+   "cite": "lines 136-138"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "List and get results MUST include resultType: \"complete\", ttlMs, and cacheScope.",
+   "cite": "lines 140-143"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Hosts MUST preserve both server identity and skill URI together (skill identity = server identity + URI) in registries, approvals, and caches, because names are only labels and are not guaranteed unique.",
+   "cite": "lines 145-147"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD use the skill:// URI scheme.",
+   "cite": "line 148"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY use a scheme other than skill://.",
+   "cite": "line 148"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Hosts MUST NOT identify a resource as a skill solely by its URI scheme.",
+   "cite": "lines 149"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY return empty or partial listings from skills/list.",
+   "cite": "line 173"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST respond to skills/get for every skill they serve, even ones absent from any listing.",
+   "cite": "lines 173-175"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Hosts MUST support loading a skill by URI, including skills that do not appear in a listing.",
+   "cite": "line 175"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A SKILL.md file MUST begin with YAML frontmatter containing name and description.",
+   "cite": "lines 217-219"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The final path segment of the skill's parent directory MUST match the frontmatter's name field.",
+   "cite": "lines 218-219"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Hosts MUST NOT retrieve (fetch) skill files ahead of actual need — not on connection, not on listing, not on approval. Approval binds to the manifest without requiring file retrieval.",
+   "cite": "lines 233-234"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT call resources/directory/read unless the server declares directoryRead: true.",
+   "cite": "lines 238-240"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "For skills with a manifest, hosts MAY answer directory queries from the retained manifest instead of the server.",
+   "cite": "lines 279-280"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Hosts MUST NOT treat a live directory/read result as extending the retained manifest, or expose newly listed files as part of the skill, without a refreshed entry and any required re-approval.",
+   "cite": "lines 281-283"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "An unknown/unlisted URI passed to skills/get returns JSON-RPC error -32602 (Invalid params) and loading stops.",
+   "cite": "lines 316, 340-343, error table lines 417-421"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "If lookup fails, approval is denied, or verification fails, the host MUST NOT load or use the content.",
+   "cite": "lines 345-347"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "While acting on a skill, the host MUST retain the entry used to load it, at least until SKILL.md leaves model context.",
+   "cite": "lines 351-352"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "For skills with a manifest, hosts MUST: (1) restrict file reads to URIs present in the retained manifest; (2) verify each file's raw byte size and SHA-256 digest before use; (3) parse SKILL.md frontmatter and compare it field-by-field with the entry's stored frontmatter.",
+   "cite": "lines 353-359"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Hosts MUST NOT use content that fails verification (digest, size, or frontmatter mismatch).",
+   "cite": "line 360"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Persisted approval MUST bind to the complete set of file URIs and digests; any changed/added/removed file revokes that approval and the host MUST re-obtain approval before loading or executing.",
+   "cite": "lines 361-364"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Hosts SHOULD cache verified content on demand.",
+   "cite": "line 366"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Disk caches MUST either (a) prevent modification of cached files by the model/tools/other users and keep them immutable, or (b) verify cached bytes on every access.",
+   "cite": "lines 366-368"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Hosts MUST exclude cached skill files from filesystem-skill discovery paths and MUST preserve their MCP origin across restarts.",
+   "cite": "lines 369-370"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "Hosts MAY decline skills whose resources are declared \"dynamic\" (no stable digests).",
+   "cite": "lines 375-376"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "For dynamic (\"resources\":\"dynamic\") skills that are accepted, hosts MUST still verify frontmatter and MUST NOT treat persisted approval as covering arbitrary future content.",
+   "cite": "lines 376-377"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST serve valid Agent Skills and implement the declared methods, including base Resources support.",
+   "cite": "lines 384-387"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST preserve all frontmatter fields and publish complete manifests computed from the actually-served bytes, unless declared \"dynamic\".",
+   "cite": "lines 388-389"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST support direct lookup (skills/get) independently of listing; each skill entry is atomic and its manifest MUST NOT be split across pages.",
+   "cite": "lines 390-391"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers declaring directoryRead: true MUST support every directory in the served skill namespaces.",
+   "cite": "lines 392-393"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Servers SHOULD NOT exceed 512 files or 16 MiB per skill, including SKILL.md.",
+   "cite": "lines 395-396"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Hosts MUST support skills up to the 512-files/16-MiB limits.",
+   "cite": "line 396"
+  },
+  {
+   "level": "MAY",
+   "actor": "host",
+   "text": "Hosts MAY support larger skills than the 512-file/16-MiB guideline.",
+   "cite": "lines 396-397"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Security: hosts MUST prevent skills with the same name from silently replacing one another.",
+   "cite": "lines 401-403"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Security: hosts MUST tag loaded content with its originating server and bind resource reads to that server via a host-assigned label; cross-server reads require explicit per-call approval naming both servers.",
+   "cite": "lines 404-406"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Security: hosts MUST treat skill content as untrusted input; host-side code execution and permission grants such as allowed-tools require explicit per-skill user approval.",
+   "cite": "lines 407-408"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Security: hosts MUST obtain fresh user consent before activating a nested skill; reading its SKILL.md merely as supporting content does not activate it or apply its frontmatter.",
+   "cite": "lines 409-410"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Unknown skill/file or invalid directory URI -> JSON-RPC error code -32602 (Invalid params).",
+   "cite": "error table, lines 417-421"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Internal server failure while serving skills -> JSON-RPC error code -32603 (Internal error).",
+   "cite": "error table, lines 417-421"
+  }
+ ],
+ "wire_details": [
+  "Extension capability key (exact string): \"io.modelcontextprotocol/skills\", nested under top-level capabilities.extensions in the server/discover response.",
+  "Extension capability object shape: {} (bare, support without directory reading) or { \"directoryRead\": boolean } (optional field, default false).",
+  "Methods (exact JSON-RPC method strings): \"skills/list\", \"skills/get\", plus reuse of core \"resources/read\" and optional \"resources/directory/read\".",
+  "skills/list result fields: resultType (must be literal \"complete\"), skills (array), ttlMs (number, e.g. 300000), cacheScope (string, e.g. \"public\"), nextCursor (optional, standard pagination cursor field).",
+  "SkillEntry fields: uri (string), frontmatter (object, arbitrary YAML-derived fields incl. required name/description), resources (array of {uri, digest, size} OR the literal string \"dynamic\").",
+  "Digest format: \"sha256:<hex>\" prefix string, e.g. \"sha256:d2489d6c182e8df9c178563ff9f2eac7998a0c1bb1278c52a7fd5306e4259160\".",
+  "skills/get params: { uri }. skills/get result: { resultType: \"complete\", skill: SkillEntry, ttlMs, cacheScope }.",
+  "resources/read result for a skill file: { resultType: \"complete\", contents: [{ uri, mimeType, text }], ttlMs, cacheScope }; mimeType example \"text/markdown\".",
+  "resources/directory/read params: { uri } (directory URI, no trailing slash), optional cursor. Result: { resultType: \"complete\", resources: [{ uri, name, mimeType }], nextCursor? }.",
+  "Directory entries for child directories use mimeType constant: \"inode/directory\".",
+  "URI scheme convention: \"skill://<skill-name>/<path>\", e.g. \"skill://code-review/SKILL.md\", \"skill://code-review/references/checklist.md\"; scheme is a SHOULD convention, not mandatory, and MUST NOT be used by hosts as sole proof of skill-ness.",
+  "Error codes used: -32602 (Invalid params) for unknown skill/file or invalid directory URI/lookup failure; -32603 (Internal error) for internal server failure. These are the standard JSON-RPC reserved codes, not new Skills-specific codes.",
+  "SKILL.md frontmatter is YAML, delimited by --- ... --- at file start; required keys: name, description. Body is markdown after the frontmatter block.",
+  "Size/scale limits: SHOULD NOT exceed 512 files or 16 MiB per skill (including SKILL.md itself); these are soft server-side limits paired with a MUST for hosts to support up to them.",
+  "No dedicated skills/read or skills/activate method exists — content retrieval is exclusively via resources/read; there is no separate wire method for 'activation' (activation is a host-local, non-protocol concept)."
+ ],
+ "sdk_implications": [
+  "PowerShell SDK server-side: to support Skills, a server implementation must (a) declare capabilities.resources and capabilities.extensions.\"io.modelcontextprotocol/skills\" (with directoryRead flag) at server/discover time, (b) implement skills/list and skills/get handlers returning the exact SkillEntry shape with resultType/ttlMs/cacheScope, (c) implement/extend resources/read to serve SKILL.md and supporting files by URI with correct mimeType, (d) optionally implement resources/directory/read only if directoryRead:true is declared, honoring no-trailing-slash directory URIs, inode/directory mimeType for subdirs, and cursor/nextCursor pagination.",
+  "SDK server helper should compute and cache SHA-256 digests + byte sizes of skill files at publish/registration time (a build-time or load-time manifest generator), since manifests MUST be computed from actually-served bytes and MUST NOT split across pagination.",
+  "SDK should validate at registration time: SKILL.md starts with YAML frontmatter containing name+description, and the final path segment of the skill's directory matches frontmatter.name — reject/error otherwise, since this is a server MUST.",
+  "SDK server should support a 'dynamic' skills mode: allow a skill provider to return resources: \"dynamic\" instead of a computed manifest for generated content lacking stable digests.",
+  "SDK client-side: implement typed calls for skills/list (with cursor pagination) and skills/get (by uri), a resources/read wrapper scoped to skill URIs, and an optional resources/directory/read call gated on the server's declared directoryRead capability (client MUST refuse to call it otherwise).",
+  "SDK client must implement a 'retained entry' / manifest cache keyed by (server identity, skill URI) — not skill name alone — supporting: file-read restriction to manifest URIs, per-file SHA-256+size verification before handing content to callers, frontmatter re-comparison against the stored entry, and invalidation-on-mismatch with a re-fetch-via-skills/get path.",
+  "SDK client should expose hooks/callbacks for host-level policy decisions the spec explicitly delegates: user-approval gating (initial load, manifest change, nested skill activation, cross-server reads, allowed-tools grants), since these are host MUST requirements the generic client library cannot decide on its own — but the SDK must provide the extension points and refuse to proceed without an approval decision when the policy requires one.",
+  "SDK client should NOT prefetch skill file contents eagerly on connect/list/approve — lazy, on-demand resources/read only, per host MUST NOT prefetch requirement.",
+  "SDK should implement optional disk-cache utilities satisfying the immutable-or-reverify-on-access requirement, and must tag any cached file with its originating server id so it can be excluded from local filesystem-skill discovery and reattributed correctly after restart.",
+  "Error handling: SDK must surface -32602 as a typed 'unknown skill / invalid uri' error distinct from -32603 'internal error', and must NOT treat digest/size/frontmatter verification failures as protocol errors — these are host-side logic (throw/return a distinct SDK-level VerificationError, not a JSON-RPC error object).",
+  "Because Skills is an extension (not core schema.ts), the SDK's type definitions for SkillEntry, manifest resource entries, and capability declaration must live in an extension-specific module (mirroring how other io.modelcontextprotocol/* extensions are structured), not in the core Requests/Results union — schema.ts and 2026-07-28_schema.json contain zero references to 'skill', confirming this must be hand-modeled from the ext-skills spec text, not generated from the core schema."
+ ],
+ "open_questions": [
+  "The page references 'the full specification' at github.com/modelcontextprotocol/ext-skills/blob/main/specification/stable/skills.mdx for complete security/approval/origin/cache rules; that repo is not available locally and github.com HTML is blocked for curl in this environment, so finer-grained normative details (e.g., exact JSON schema types for frontmatter validation, any additional error conditions, exact allowed-tools grant format) beyond what's quoted on the overview page could not be verified against the canonical source.",
+  "Whether skills/list and skills/get support any request params beyond cursor/uri (e.g., filtering, search) is not specified on this page — the example shows empty params for skills/list.",
+  "Whether there is a server-to-client notification for skill manifest changes (push-based invalidation) versus purely client-initiated refresh via skills/get is not addressed; the spec only describes client-driven refresh.",
+  "The exact structure of 'allowed-tools' permission grants mentioned in Security Considerations is not defined in this file — referenced only by name, full shape presumably lives in the external ext-skills repo (Agent Skills specification at agentskills.io).",
+  "No mention of a capability version number or extension schema version field beyond the capability object itself — unclear whether the extension key co-exists with a semantic version for forward compatibility.",
+  "Client matrix link (/extensions/client-matrix) for concrete SDK/client conformance status was not fetched; not available locally."
+ ],
+ "source": "pages/extensions__skills__overview.md (full file, 435 lines) — MCP spec revision 2026-07-28, Skills extension (io.modelcontextprotocol/skills), which normatively defers to https://github.com/modelcontextprotocol/ext-skills (specification/stable/skills.mdx, not locally available) and the third-party Agent Skills specification at agentskills.io. Cross-checked schema.ts and 2026-07-28_schema.json for any 'skill' references: none found — confirms the extension is defined entirely outside the core protocol schema.",
+ "summary": "Skills is an MCP extension (capability key \"io.modelcontextprotocol/skills\") letting servers expose Agent-Skills-format workflows (a directory with SKILL.md + optional files) for discovery/retrieval via existing Resources primitives. Servers supporting it MUST declare both capabilities.resources and the extension object (optionally {directoryRead:true}) at server/discover, and MUST implement two new methods: skills/list (paginated, returns SkillEntry[] with uri, frontmatter, and a resources manifest of {uri,digest,size} or \"dynamic\") and skills/get (by uri, returns a single complete SkillEntry, works even for unlisted skills). Actual file bytes are fetched via the pre-existing resources/read (SKILL.md, supporting files) and optionally resources/directory/read (gated by directoryRead, non-recursive, \"inode/directory\" mimeType for subdirs). All three response types MUST carry resultType:\"complete\", ttlMs, cacheScope. Skill identity = (server identity, uri), not name. SKILL.md MUST have YAML frontmatter with name+description, and its directory's final path segment MUST equal name. Hosts bear heavy verification/security duties: never prefetch, restrict reads to the retained manifest, verify SHA-256 digest+size+frontmatter before use, treat manifest changes as approval-revoking, treat skill content as untrusted, gate code-execution/allowed-tools/nested-skill-activation/cross-server-reads behind explicit user approval, and exclude skills from silent name collisions. Error model reuses plain JSON-RPC -32602 (unknown skill/file/bad directory URI) and -32603 (internal error); verification failures are host-side, not protocol errors. Soft size limit: servers SHOULD NOT exceed 512 files/16MiB per skill; hosts MUST support up to that. Entirely absent from schema.ts/2025 schemas — new, extension-only, not part of core protocol types.</summary>\n"
+}

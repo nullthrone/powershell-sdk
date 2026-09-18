@@ -1,0 +1,311 @@
+{
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "no pagination params (not a PaginatedRequest); standard RequestParams only.",
+   "result": "DiscoverResult extends CacheableResult: resultType ('complete'|'input_required'|string), supportedVersions: string[], capabilities: ServerCapabilities, instructions?: string, ttlMs: number (required, >=0), cacheScope: 'public'|'private' (required). Not paginated.",
+   "notes": "Cacheable per caching.md line 18; MUST include caching hints when resultType==='complete'. Interim resultType='input_required' results carry no caching hints (not cacheable)."
+  },
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams: cursor?: Cursor (opaque string, optional).",
+   "result": "ListToolsResult extends PaginatedResult, CacheableResult: tools: Tool[], nextCursor?: Cursor, ttlMs: number, cacheScope: 'public'|'private', resultType.",
+   "capability_gate": "server capability 'tools' must be declared (general MCP requirement, not specific to caching/pagination pages read).",
+   "notes": "Both paginated and cacheable. Cache key = method + cursor param."
+  },
+  {
+   "name": "prompts/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams: cursor?: Cursor.",
+   "result": "ListPromptsResult extends PaginatedResult, CacheableResult: prompts: Prompt[], nextCursor?, ttlMs, cacheScope, resultType.",
+   "notes": "Both paginated and cacheable."
+  },
+  {
+   "name": "resources/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams: cursor?: Cursor.",
+   "result": "ListResourcesResult extends PaginatedResult, CacheableResult: resources: Resource[], nextCursor?, ttlMs, cacheScope, resultType.",
+   "notes": "Both paginated and cacheable."
+  },
+  {
+   "name": "resources/templates/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams: cursor?: Cursor.",
+   "result": "ListResourceTemplatesResult extends PaginatedResult, CacheableResult: resourceTemplates: ResourceTemplate[], nextCursor?, ttlMs, cacheScope, resultType.",
+   "notes": "Both paginated and cacheable."
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "ReadResourceRequestParams extends ResourceRequestParams (uri: string, format uri) + InputResponseRequestParams (MRTR fields, not part of cache key semantics but relevant: presence of inputResponses/requestState disables caching).",
+   "result": "ReadResourceResult extends CacheableResult: contents: (TextResourceContents|BlobResourceContents)[], ttlMs, cacheScope, resultType.",
+   "notes": "Cacheable, NOT paginated (absent from pagination operations list). Cache key = method + uri."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include caching hints (ttlMs, cacheScope) on results with resultType: 'complete' returned by server/discover, tools/list, prompts/list, resources/list, resources/templates/list, resources/read.",
+   "cite": "caching.md 'Cacheable Results', lines 15-23"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Cacheable hints are NOT present on interim results with resultType: 'input_required' (MRTR pattern) — these are not cacheable.",
+   "cite": "caching.md lines 25-27"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Serve a cached response for a request whose method or parameters (that affect the result, e.g. uri for resources/read, cursor for paginated list requests) differ from the request that produced it.",
+   "cite": "caching.md 'Cache Key', lines 31-34"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Cache results produced by retrying a request via the multi round-trip requests (MRTR) mechanism, i.e. requests carrying inputResponses or requestState, since they depend on inputs outside the cache key.",
+   "cite": "caching.md lines 36-39"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Consider a result with ttlMs=0 immediately stale and re-fetch every time the result is needed.",
+   "cite": "caching.md line 54-55 / schema.ts CacheableResult doc"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is positive, consider the result fresh for that many ms after receiving the response.",
+   "cite": "caching.md line 56-57"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is absent (older server versions only), assume default of 0 (immediately stale) and rely on own heuristics/notifications.",
+   "cite": "caching.md line 58-59"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If ttlMs is negative, ignore it and treat as 0.",
+   "cite": "caching.md line 60"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Provide a ttlMs value that is >= 0.",
+   "cite": "caching.md line 62; schema.ts CacheableResult.ttlMs @minimum 0"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Compute freshness as: now < t_received + ttlMs, where t_received is local time response was received; once expired, treat as stale and re-fetch on next access.",
+   "cite": "caching.md 'Freshness Calculation', lines 71-81"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "client",
+   "text": "Treat TTL as a polling interval triggering automatic background refetches; TTL is a freshness hint checked only on access.",
+   "cite": "caching.md lines 83-85"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If implementing background polling anyway, apply jitter and backoff.",
+   "cite": "caching.md line 85-86"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Re-fetch before TTL expires if there is reason to believe data changed (e.g., an unexpected 'method not found' or 'invalid params' error on a related call).",
+   "cite": "caching.md lines 88-90"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Serve stale responses if errors occur during re-fetch (network issues, server downtime).",
+   "cite": "caching.md lines 92-93"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "For cacheScope 'public', any client, shared gateway, or caching proxy may store and serve the cached response to any user, even across different authorization contexts/access tokens.",
+   "cite": "caching.md table lines 100-103; Security Considerations lines 175"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "For cacheScope 'private', reuse cached responses for the same authorization context only.",
+   "cite": "caching.md line 103"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Share 'private'-scoped caches across authorization contexts (a different access token requires a different cache).",
+   "cite": "caching.md line 103"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ensure cacheScope correctly reflects the intended visibility of the primitive.",
+   "cite": "caching.md 'Security Considerations' line 179"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Apply appropriate per-primitive access controls; MUST NOT rely on cacheScope alone to prevent unauthorized access to primitives.",
+   "cite": "caching.md lines 180-181"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Provide ttlMs without advertising listChanged: true (client then relies entirely on TTL-based freshness).",
+   "cite": "caching.md 'Interaction with Notifications' lines 116-117"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Advertise listChanged: true AND provide ttlMs — client uses TTL to avoid refetches between notifications; the notification acts as immediate invalidation.",
+   "cite": "caching.md lines 118-120"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When a relevant change notification is received while a cached response is still fresh, treat the notification as invalidating the cached response immediately (considered immediately stale).",
+   "cite": "caching.md lines 122-123 (normative prose: 'the notification invalidates the cached response')"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Each paginated page is independently cacheable; freshness clock for each page starts when that page was received.",
+   "cite": "caching.md 'Interaction with Pagination' lines 151-156"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Return different ttlMs values on different pages of the same list (e.g. longer TTL for early/stable pages, shorter for the final page).",
+   "cite": "caching.md line 157-158"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Re-fetch an expired cached page using its cursor.",
+   "cite": "caching.md line 159"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Re-fetch from the beginning (without a cursor) if a consistent snapshot of the full list is required, since there is no cross-page consistency guarantee (data changes between fetches may cause duplicates or gaps).",
+   "cite": "caching.md lines 160-163"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If a cursor becomes invalid (server returns an error for a previously valid cursor), discard all cached pages and re-fetch from the beginning.",
+   "cite": "caching.md lines 164-166"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Apply the same cacheScope to all response pages for a given list request (e.g., if page 1 of tools/list is 'private', all subsequent pages for that request MUST also be 'private').",
+   "cite": "caching.md lines 168-171"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Not assume a fixed page size; page size is server-determined.",
+   "cite": "pagination.md 'Pagination Model' lines 31-32"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat cursors as opaque tokens: don't assume format, don't parse/modify, and don't make any determination based on cursor value other than whether a non-null value was provided — an empty string is a valid cursor and MUST NOT be treated as end-of-results.",
+   "cite": "pagination.md 'Implementation Guidelines' item 3, lines 104-109"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Provide stable cursors and handle invalid cursors gracefully.",
+   "cite": "pagination.md 'Implementation Guidelines' item 1, lines 96-98"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Treat a missing nextCursor as the end of results, and support both paginated and non-paginated flows.",
+   "cite": "pagination.md item 2, lines 100-102"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Invalid cursors SHOULD result in an error with JSON-RPC code -32602 (Invalid params).",
+   "cite": "pagination.md 'Error Handling' line 113"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every request MUST include required _meta fields: io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities (per basic/index#meta; omitted from pagination.md examples for brevity).",
+   "cite": "pagination.md Note, lines 17-24"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include resultType field on results for protocol version 2026-07-28.",
+   "cite": "schema.ts Result interface comment, lines 225-234"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When receiving a result from a server on an earlier protocol version that omits resultType, treat the absent field as 'complete' (backward compatibility).",
+   "cite": "schema.ts lines 230-232"
+  }
+ ],
+ "wire_details": [
+  "_meta keys referenced (pagination.md line 19-20): io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities — required on every request per basic/index#meta (not detailed further in the two focus files).",
+  "JSON-RPC error code -32602 = Invalid params, used (SHOULD) for invalid cursor errors (pagination.md line 113).",
+  "Field name: cursor (string, request param) — schema.ts PaginatedRequestParams.cursor?: Cursor; type Cursor = string (schema.ts line 172).",
+  "Field name: nextCursor (string, optional, response) — schema.ts PaginatedResult.nextCursor?: Cursor.",
+  "Field name: ttlMs (integer milliseconds, required on CacheableResult, minimum 0) — schema.ts CacheableResult.ttlMs: number, @minimum 0.",
+  "Field name: cacheScope (required on CacheableResult) — enum exactly \"public\" | \"private\" — schema.ts CacheableResult.cacheScope.",
+  "Field name: resultType — type ResultType = \"complete\" | \"input_required\" | string (open string union, schema.ts line 216); Result.resultType is required per 2026-07-28 (schema.ts line 234).",
+  "Example JSON response shape (pagination.md lines 41-53): {jsonrpc:'2.0', id, result:{resultType:'complete', resources:[...], nextCursor:'<opaque base64-like string, e.g. eyJwYWdlIjogM30=>', ttlMs:300000, cacheScope:'public'}}.",
+  "Example request with cursor (pagination.md lines 60-69): {jsonrpc:'2.0', id, method:'resources/list', params:{cursor:'<opaque string>'}}.",
+  "resultType values enumerated by spec: 'complete' (final content) and 'input_required' (MRTR — carries an InputRequiredResult object with instructions, referenced from schema.ts comment at line 213, detailed in mrtr pattern doc not read here).",
+  "No HTTP-transport-specific header names appear in caching.md or pagination.md (analogies to HTTP Cache-Control: max-age / public / private are semantic analogies only, not actual transport headers) — MCP's ttlMs/cacheScope are JSON body fields on the Result object, not HTTP headers.",
+  "PaginatedRequestParams extends RequestParams (schema.ts line 1054) — RequestParams presumably carries its own _meta (RequestParams not fully expanded in excerpts read, but Notification/Result pattern shows _meta: XMetaObject conventions).",
+  "CacheableResult and PaginatedResult are both marked @internal / mixin interfaces in schema.ts — concrete results compose via 'extends PaginatedResult, CacheableResult' (e.g. ListResourcesResult, ListResourceTemplatesResult, ListPromptsResult, ListToolsResult) or CacheableResult alone (DiscoverResult, ReadResourceResult)."
+ ],
+ "sdk_implications": [
+  "PowerShell SDK must model a shared base type (e.g. an interface/abstract class or trait applied via composition, since PowerShell/.NET lacks multiple inheritance for classes) implementing CacheableResult: required int64/int property TtlMs (>=0, validated on serialization) and required enum property CacheScope with only 'public'|'private' — serialize/deserialize exactly these two lowercase string literals.",
+  "Separately model PaginatedResult mixin: optional string NextCursor. Because .NET classes are single-inheritance, use interfaces (ICacheableResult, IPaginatedResult) or composition, and have ListResourcesResult, ListResourceTemplatesResult, ListPromptsResult, ListToolsResult implement BOTH; DiscoverResult and ReadResourceResult implement CacheableResult only (not paginated).",
+  "Client-side cache implementation must key cache entries by (method, uri) for resources/read and by (method, cursor) for the four list methods — implement as a composite key/dictionary, not just method name.",
+  "Client must implement TTL freshness check using local received-time timestamp: store t_received (DateTimeOffset.UtcNow) per cache entry; freshness predicate: DateTimeOffset.UtcNow < t_received + TimeSpan.FromMilliseconds(ttlMs). Must clamp ttlMs<0 to 0 and treat missing ttlMs as 0.",
+  "Client must implement cacheScope partitioning: private-scope cache store keyed additionally by the active auth/access-token/authorization-context identifier; public-scope cache store shared globally regardless of caller identity.",
+  "Client must implement invalidation-on-notification: subscribe to notifications/tools/list_changed, notifications/prompts/list_changed, notifications/resources/list_changed (and resource updated notifications) to purge matching cache entries immediately, independent of TTL.",
+  "Client cache MUST bypass/never store results whose request included inputResponses or requestState (MRTR retry params) — implement a pre-cache guard that checks these params before writing to cache.",
+  "Client cache MUST bypass/never store results whose resultType != 'complete' (i.e. resultType === 'input_required' results are never cached).",
+  "Cursor type must be represented as an opaque string (do not attempt to Base64-decode, parse, or interpret it); pagination helper (e.g. Get-McpAllPages / IAsyncEnumerable-based enumerator) must treat empty string '' as a valid continuation cursor distinct from null/absent, i.e. use nullable-string semantics ($null vs '') not falsy-string checks.",
+  "Auto-pagination helper cmdlets should stop when nextCursor is absent (null), not when it's falsy/empty, and should support resuming with an arbitrary opaque cursor string supplied by the caller.",
+  "Server-side SDK helper for building paginated+cacheable responses should require callers to supply ttlMs and cacheScope for tools/list, prompts/list, resources/list, resources/templates/list, resources/read, and server/discover results; consider throwing/validating if ttlMs < 0 before serialization.",
+  "Server-side SDK must throw/return JSON-RPC error -32602 (Invalid params) when an unrecognized/invalid cursor is supplied to a paginated list handler.",
+  "Server-side pagination helper must guarantee cacheScope consistency across pages of the same logical list request (track and reuse the scope decided for page 1 across subsequent cursor-driven pages of that same request).",
+  "SDK should implement backward-compatibility shim: if resultType is absent in a deserialized Result (older server), default to 'complete' rather than throwing a deserialization error.",
+  "SDK should NOT implement TTL-based background polling by default; if an optional polling feature is added, it must apply jitter+backoff per spec."
+ ],
+ "legacy_delta": [
+  "ttlMs, cacheScope, and CacheableResult are new in 2026-07-28 (Caching page and CacheableResult schema type did not exist in prior 2025-06-18/2025-11-25 schemas per the task's own framing of this as new spec material — the older schemas should be diffed for absence of ttlMs/cacheScope/resultType, which was not verified by directly reading 2025-11-25_schema.ts or 2025-06-18_schema.ts in this pass; flagged as an open question below).",
+  "resultType field (with 'complete'|'input_required'|string) and the whole multi-round-trip-request (MRTR) pattern are new/changed in 2026-07-28; backward-compat rule requires clients to treat an absent resultType from older servers as 'complete'.",
+  "Pagination model itself (opaque cursor, nextCursor, four list operations, -32602 for invalid cursor) appears unchanged in substance from prior revisions based on the pagination.md content read; the only new interaction is pagination.md's explicit tie-in with the new caching model (each page independently cacheable, cacheScope must be consistent across pages) — this cross-cutting rule is new for 2026-07-28."
+ ],
+ "open_questions": [
+  "Did NOT diff /tmp/.../2025-11-25_schema.ts and 2025-06-18_schema.ts against 2026-07-28_schema.ts in this pass to confirm ttlMs/cacheScope/resultType/CacheableResult are absent in prior revisions — recommend a follow-up read to substantiate the legacy_delta claim precisely (grep for 'ttlMs|cacheScope|resultType|CacheableResult' in both older files).",
+  "The InputRequiredResult object structure and the full MRTR (multi round-trip requests) pattern (inputResponses, requestState params) are referenced by caching.md and schema.ts but the dedicated MRTR page (/specification/2026-07-28/basic/patterns/mrtr) was not part of the assigned read scope — needed for full accuracy on 'MUST NOT cache MRTR retries' requirement's param names (inputResponses, requestState) beyond what schema.ts snippet showed.",
+  "RequestParams/_meta exact required sub-fields (io.modelcontextprotocol/protocolVersion, clientInfo, clientCapabilities) are named in pagination.md's Note but their full schema (types, required/optional) lives in basic/index#meta, not read in this pass — needed before finalizing the SDK's base request _meta model.",
+  "Whether cacheScope/ttlMs apply to any other result types beyond the six listed (e.g., could future/custom resultType string values carry caching hints) is unspecified — schema.ts marks CacheableResult as @internal mixin only for the six identified interfaces; no evidence of it being used elsewhere in the excerpts read.",
+  "Exact wire representation of nextCursor/cursor as JSON (always a JSON string per Cursor = string) confirmed, but no guidance found on maximum length or encoding constraints for cursors — none imposed by spec (opaque token), should be documented as 'implementation-defined, no length limit specified' in SDK design doc."
+ ],
+ "source": "specification/2026-07-28/server/utilities/caching.md; specification/2026-07-28/server/utilities/pagination.md; schema.ts (Cursor, ResultType, Result, PaginatedRequestParams, PaginatedRequest, PaginatedResult, CacheableResult, DiscoverResult, ListResourcesResult, ListResourceTemplatesResult, ReadResourceRequestParams, ReadResourceResult, ListPromptsResult [interface signature only], ListToolsResult [interface signature only]) at /tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/",
+ "summary": "2026-07-28 introduces a caching layer (ttlMs, cacheScope) on top of the pre-existing opaque cursor-based pagination model. Six operations MUST carry caching hints when resultType:'complete': server/discover, tools/list, prompts/list, resources/list, resources/templates/list, resources/read; interim resultType:'input_required' (MRTR) results are never cacheable, nor are MRTR retries (requests with inputResponses/requestState). CacheableResult requires ttlMs (integer ms, >=0, HTTP max-age-like semantics; 0/negative/absent all resolve to \"immediately stale\") and cacheScope (\"public\"|\"private\", HTTP Cache-Control public/private analogy; private caches MUST NOT cross authorization contexts). Cache key = method + result-affecting params (uri for resources/read, cursor for list ops). Notifications (listChanged) complement TTL and immediately invalidate fresh cache entries. Four of the six operations (all list ops except resources/read and server/discover) also support pagination via opaque string Cursor: request.params.cursor optional, response.nextCursor optional signals more pages; clients MUST treat cursors as opaque (empty string is a valid, non-terminal cursor) and MUST NOT assume fixed page size; invalid cursors SHOULD produce JSON-RPC -32602. Pagination and caching interact: each page is independently cacheable with its own ttlMs (which MAY differ per page), but cacheScope MUST be identical across all pages of one list request; no cross-page consistency is guaranteed, and clients needing a consistent snapshot SHOULD restart pagination from the beginning. Result.resultType is now a required field (open string enum 'complete'|'input_required'|string), with mandatory backward-compat fallback to 'complete' when absent from older servers."
+}

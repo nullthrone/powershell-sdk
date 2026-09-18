@@ -1,0 +1,565 @@
+{
+ "legacy_delta": [
+  "2026-07-28 REMOVES the `initialize`/`initialized` handshake and `ping` method entirely; protocol is now fully stateless per-request. Every request carries `_meta['io.modelcontextprotocol/protocolVersion']` (required) and `_meta['io.modelcontextprotocol/clientCapabilities']` (required); no session-level capability negotiation exists (schema.json $defs).",
+  "New method `server/discover` (server/discover.md) replaces `initialize` as an optional, idempotent, cacheable capability/version probe; servers MUST implement it, clients MAY call it.",
+  "New method `subscriptions/listen` (patterns/subscriptions.md) replaces the 2025-11-25 `resources/subscribe`/`resources/unsubscribe` RPCs and the deprecated HTTP GET/SSE stream endpoint; it is a single long-lived request whose reply is an open notification stream, filtered via a `notifications` object (`toolsListChanged`, `promptsListChanged`, `resourcesListChanged`, `resourceSubscriptions: string[]`).",
+  "New pattern 'Multi Round-Trip Requests' (MRTR, patterns/mrtr.md) REPLACES all server-initiated JSON-RPC requests (old `sampling/createMessage`, `elicitation/create`, `roots/list` sent server->client mid-request). Now servers return `resultType: \"input_required\"` (InputRequiredResult with `inputRequests`/`requestState`) on `tools/call`, `resources/read`, `prompts/get` ONLY, and the client re-issues the ORIGINAL request (new JSON-RPC id) with the answers as `inputResponses`. This is called out as an explicit breaking change ('The previous pattern of server-initiated requests is no longer supported').",
+  "Every JSON-RPC result now MUST carry a top-level `resultType` field ('complete' | 'input_required' | extension-defined); absent resultType from an older server MUST be treated as 'complete' for backward compat.",
+  "New `CacheableResult` base type adds `cacheScope` ('public'|'private') and `ttlMs` for client-side response caching (currently only used by DiscoverResult per schema/docs).",
+  "Three new error codes reserved/defined in the MCP sub-range -32020..-32099: -32020 HeaderMismatchError, -32021 MissingRequiredClientCapabilityError, -32022 UnsupportedProtocolVersionError. Codes -32000..-32019 are frozen 'legacy', MUST NOT be newly allocated.",
+  "Old error code -32002 (resource not found, 2025-11-25 and earlier) is retired, replaced by generic -32602 Invalid params; new servers MUST NOT emit -32002, but clients SHOULD still accept it from legacy servers. -32042 (URL elicitation required, 2025-11-25 only) is likewise retired.",
+  "Extension negotiation is now generalized under `capabilities.extensions` (map of prefixed extension id -> settings object), e.g. `io.modelcontextprotocol/ui` (MCP Apps) and `io.modelcontextprotocol/tasks` (Tasks) — both are OFFICIAL EXTENSIONS, not core; core schema.json has no Apps/Tasks-specific definitions.",
+  "New reserved _meta keys not present in 2025-11-25: `io.modelcontextprotocol/protocolVersion`, `io.modelcontextprotocol/clientInfo`, `io.modelcontextprotocol/clientCapabilities`, `io.modelcontextprotocol/logLevel`, `io.modelcontextprotocol/subscriptionId`, `io.modelcontextprotocol/serverInfo`, plus OpenTelemetry `traceparent`/`tracestate`/`baggage` as an explicit unprefixed exception.",
+  "Streamable HTTP transport: new mandatory `MCP-Protocol-Version` header per POST (mismatch with body => 400 + HeaderMismatchError), and new REQUIRED envelope headers `Mcp-Method` (all requests) and `Mcp-Name` (tools/call, resources/read, prompts/get) mirroring body fields for intermediary routing; new optional `x-mcp-header`/`Mcp-Param-{name}` tool-parameter-to-header extension mechanism. GET stream endpoint removed vs. 2025-03-26 HTTP+SSE transport.",
+  "Dual-era compatibility matrix defined in versioning.md: legacy clients speaking `initialize` against a modern-only server fail with no fallback; dual-era servers must detect era per-request (presence of `_meta` protocol fields vs. an `initialize` call) and MAY serve both eras concurrently on the same endpoint/process."
+ ],
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "none beyond standard request fields + required _meta (protocolVersion, clientCapabilities; clientInfo optional)",
+   "result": "DiscoverResult(resultType, supportedVersions: string[], capabilities: ServerCapabilities, instructions?: string, _meta[serverInfo]?, cacheScope?, ttlMs?) — extends CacheableResult",
+   "notes": "MUST be implemented by servers (server/discover.md L11). Optional for clients to call. Used as stdio backward-compat probe."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server",
+   "params": "SubscriptionsListenRequestParams{ notifications?: {toolsListChanged?:bool, promptsListChanged?:bool, resourcesListChanged?:bool, resourceSubscriptions?:string[]} } + _meta",
+   "result": "long-lived stream; first message is notifications/subscriptions/acknowledged (server->client) carrying io.modelcontextprotocol/subscriptionId=request id; then filtered notifications; eventual SubscriptionsListenResult (resultType complete) on graceful close",
+   "notes": "replaces resources/subscribe + GET SSE endpoint. Server MUST NOT send unsubscribed notification types. Ack MUST precede all other stream notifications (per-subscription-ID ordering, not per-channel)."
+  },
+  {
+   "name": "resources/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams{cursor?}",
+   "result": "ListResourcesResult(resources: Resource[], nextCursor?)",
+   "notes": "capability gate: server must declare resources capability"
+  },
+  {
+   "name": "resources/templates/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams",
+   "result": "ListResourceTemplatesResult(resourceTemplates: ResourceTemplate[], nextCursor?)",
+   "notes": "resources capability"
+  },
+  {
+   "name": "resources/read",
+   "direction": "client->server",
+   "params": "ResourceRequestParams{uri}",
+   "result": "ReadResourceResult(contents: ResourceContents[]) OR InputRequiredResult",
+   "notes": "supports MRTR (mrtr.md table). resources capability."
+  },
+  {
+   "name": "prompts/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams",
+   "result": "ListPromptsResult(prompts: Prompt[], nextCursor?)",
+   "notes": "prompts capability"
+  },
+  {
+   "name": "prompts/get",
+   "direction": "client->server",
+   "params": "GetPromptRequestParams{name, arguments?}",
+   "result": "GetPromptResult(description?, messages: PromptMessage[]) OR InputRequiredResult",
+   "notes": "supports MRTR. prompts capability"
+  },
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "params": "PaginatedRequestParams",
+   "result": "ListToolsResult(tools: Tool[], nextCursor?)",
+   "notes": "tools capability"
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "params": "CallToolRequestParams{name, arguments?}",
+   "result": "CallToolResult(content: ContentBlock[], isError?, structuredContent?) OR InputRequiredResult",
+   "notes": "supports MRTR. tools capability"
+  },
+  {
+   "name": "completion/complete",
+   "direction": "client->server",
+   "params": "CompleteRequestParams{ref: PromptReference|ResourceTemplateReference, argument:{name,value}, context?}",
+   "result": "CompleteResult(completion:{values,total?,hasMore?})",
+   "notes": "completions capability"
+  },
+  {
+   "name": "roots/list",
+   "direction": "server->client (as an MRTR inputRequest, never a bare server-initiated JSON-RPC request)",
+   "params": "ListRootsRequest (no params)",
+   "result": "ListRootsResult(roots: Root[])",
+   "notes": "client roots capability; only ever appears as a value inside InputRequests map (mrtr.md)"
+  },
+  {
+   "name": "sampling/createMessage",
+   "direction": "server->client (as MRTR inputRequest)",
+   "params": "CreateMessageRequestParams{messages: SamplingMessage[], modelPreferences?, systemPrompt?, maxTokens, ...}",
+   "result": "CreateMessageResult(role, content, model, stopReason?)",
+   "notes": "client sampling capability; MRTR-only, never top-level server-initiated request"
+  },
+  {
+   "name": "elicitation/create",
+   "direction": "server->client (as MRTR inputRequest)",
+   "params": "ElicitRequestParams — union of ElicitRequestFormParams{mode:'form', message, requestedSchema} and ElicitRequestURLParams (per schema $defs) ",
+   "result": "ElicitResult(action: accept|decline|cancel, content?)",
+   "notes": "client elicitation capability; MRTR-only"
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification client->server (normal use) or server->client (subscriptions/listen teardown only)",
+   "params": "CancelledNotificationParams{requestId, reason?}",
+   "result": "n/a (notification)",
+   "notes": "Server MUST send this ONLY to terminate a subscriptions/listen stream; MUST NOT use it for any other purpose (mrtr note in ClientNotification description, cancellation.md #2)."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification server->client",
+   "params": "ProgressNotificationParams{progressToken, progress, total?, message?}",
+   "result": "n/a",
+   "notes": "progress MUST strictly increase; requires opting in via _meta.progressToken on the original request"
+  },
+  {
+   "name": "notifications/message",
+   "direction": "notification server->client",
+   "params": "LoggingMessageNotificationParams{level: LoggingLevel, logger?, data}",
+   "result": "n/a",
+   "notes": "logging utility; gated by _meta['io.modelcontextprotocol/logLevel'] per-request"
+  },
+  {
+   "name": "notifications/resources/list_changed",
+   "direction": "notification server->client",
+   "params": "none",
+   "result": "n/a",
+   "notes": "only sent inside an active subscriptions/listen stream with resourcesListChanged filter set"
+  },
+  {
+   "name": "notifications/resources/updated",
+   "direction": "notification server->client",
+   "params": "ResourceUpdatedNotificationParams{uri}",
+   "result": "n/a",
+   "notes": "only for URIs listed in resourceSubscriptions filter of an active subscription"
+  },
+  {
+   "name": "notifications/prompts/list_changed",
+   "direction": "notification server->client",
+   "params": "none",
+   "result": "n/a",
+   "notes": "subscriptions/listen filter promptsListChanged"
+  },
+  {
+   "name": "notifications/tools/list_changed",
+   "direction": "notification server->client",
+   "params": "none",
+   "result": "n/a",
+   "notes": "subscriptions/listen filter toolsListChanged"
+  },
+  {
+   "name": "notifications/subscriptions/acknowledged",
+   "direction": "notification server->client",
+   "params": "SubscriptionsAcknowledgedNotificationParams{notifications: <agreed filter subset>} + _meta.subscriptionId",
+   "result": "n/a",
+   "notes": "MUST be first message on a subscriptions/listen stream, before any other notification on that subscription"
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "All messages MUST follow JSON-RPC 2.0; requests MUST include a non-null string/integer id, unique among in-flight requests from the sender.",
+   "cite": "basic/index.md L29-51"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Result responses MUST include a resultType field; unrecognized resultType values MUST be treated as invalid by the client; absent resultType (older server) MUST be treated as 'complete'.",
+   "cite": "basic/index.md L75-87"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT initiate JSON-RPC requests; clients do not send JSON-RPC responses. All server->client requests happen only via MRTR's InputRequiredResult mechanism.",
+   "cite": "basic/patterns/index.md L22-23; basic/patterns/mrtr.md L11-16 (Note)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every request MUST carry io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities in _meta; a request missing a required field is malformed and MUST be rejected by the server with -32602 Invalid params (400 Bad Request on HTTP).",
+   "cite": "basic/index.md L369-384"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD include io.modelcontextprotocol/clientInfo on every request unless configured not to.",
+   "cite": "basic/index.md L386-387"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If a request requires a capability the client did not declare in clientCapabilities, server MUST return MissingRequiredClientCapabilityError (-32021) with data.requiredCapabilities; HTTP status MUST be 400.",
+   "cite": "basic/index.md L389-394"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Servers SHOULD include io.modelcontextprotocol/serverInfo in every result's _meta unless configured not to.",
+   "cite": "basic/index.md L398-401"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "clientInfo/serverInfo are self-reported and unverified; implementations SHOULD NOT use them to change behavior or rely on them for security decisions.",
+   "cite": "basic/index.md L406-412"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On a subscriptions/listen stream, server MUST include io.modelcontextprotocol/subscriptionId in every delivered notification's _meta.",
+   "cite": "basic/index.md L414-416; patterns/subscriptions.md L56-94"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Implementations MUST NOT automatically dereference $ref values pointing to a network URI in JSON Schemas; an opt-in fetch mode MUST be disabled by default and enforce host allowlist/reject loopback/private addresses/timeouts/size limits/logging.",
+   "cite": "basic/index.md L303-309"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Clients and servers MUST support JSON Schema 2020-12 for schemas without explicit $schema; MUST validate per declared/default dialect and handle unsupported dialects with an appropriate error.",
+   "cite": "basic/index.md L293-296"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients that render icons MUST support image/png and image/jpeg (and image/jpg); SHOULD also support image/svg+xml and image/webp.",
+   "cite": "basic/index.md L464-475"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Icon consumers MUST reject icon URIs using unsafe schemes/redirects (javascript:, file:, ftp:, ws:, local app schemes), disallow cross-origin scheme changes/redirects, fetch icons without credentials, verify same-origin as the server, and validate MIME type via magic bytes (reject on mismatch).",
+   "cite": "basic/index.md L478-490"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST implement server/discover.",
+   "cite": "specification/2026-07-28/server/discover.md L11; versioning.md L75-76"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On unsupported/unknown requested protocol version, server MUST respond with UnsupportedProtocolVersionError (-32022) listing data.supported and data.requested.",
+   "cite": "basic/versioning.md L50-69"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Client SHOULD select a mutually supported version from the error's 'supported' list and retry, or surface an error to the user if none exists.",
+   "cite": "basic/versioning.md L71-73"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extension identifiers in capabilities.extensions MUST follow _meta key naming rules with a mandatory prefix; if one party lacks support for an advertised extension it MUST revert to core behavior or reject with an appropriate error.",
+   "cite": "basic/versioning.md L84-126"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A server implementing only modern versions SHOULD (recommendation, not MUST) name its supported protocol versions in any error returned to a legacy initialize request, on any transport.",
+   "cite": "basic/versioning.md L156-159"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Server MUST NOT send notification types on a subscriptions/listen stream that the client did not request in its notifications filter.",
+   "cite": "basic/patterns/subscriptions.md L17-18"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Server MUST send notifications/subscriptions/acknowledged as the first message of a subscription, carrying the subscriptionId, before any other notification on that subscription (ordering scoped per-subscription-id, interleaving from other subscriptions allowed on stdio).",
+   "cite": "basic/patterns/subscriptions.md L56-61"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, clients MUST use io.modelcontextprotocol/subscriptionId to demultiplex notifications since all messages share one channel.",
+   "cite": "basic/patterns/subscriptions.md L92-94"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When the server ends a subscription on its own initiative it SHOULD send a graceful-close SubscriptionsListenResult (resultType complete) before closing the stream.",
+   "cite": "basic/patterns/subscriptions.md L130-151"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, after a reconnection the client MUST re-send subscriptions/listen; the server holds no subscription state across reconnects.",
+   "cite": "basic/patterns/subscriptions.md L162-164"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST send server-to-client requests (roots/list, sampling/createMessage, elicitation/create) using the MRTR pattern; the previous server-initiated-request pattern is no longer supported (breaking change).",
+   "cite": "basic/patterns/mrtr.md L10-16"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Servers MAY respond to prompts/get, resources/read, tools/call only with InputRequiredResult; MUST NOT do so for any other client request.",
+   "cite": "basic/patterns/mrtr.md L186-194"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "inputRequests keys MUST be unique within the request scope; values MUST be one of ElicitRequest, CreateMessageRequest, ListRootsRequest.",
+   "cite": "basic/patterns/mrtr.md L230-232"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If requestState influences authorization/resource access/business logic, servers MUST protect its integrity (HMAC/AEAD) and MUST reject state failing verification; integrity protection MAY be omitted only if tampering causes nothing worse than request failure.",
+   "cite": "basic/patterns/mrtr.md L236-237"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers for which requestState must be single-use MUST enforce that invariant server-side (replay-window controls alone are insufficient).",
+   "cite": "basic/patterns/mrtr.md L243-248"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST include at least one of inputRequests or requestState in every InputRequiredResult.",
+   "cite": "basic/patterns/mrtr.md L250"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT send an inputRequests entry whose method the client hasn't declared capability support for (e.g. elicitation/create requires client elicitation capability).",
+   "cite": "basic/patterns/mrtr.md L252"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Servers MUST NOT assume clients will fulfill inputRequests or retry.",
+   "cite": "basic/patterns/mrtr.md L254"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If InputRequiredResult has inputRequests, client MUST construct the requested inputs before retrying; if absent, client MAY retry immediately.",
+   "cite": "basic/patterns/mrtr.md L258-260"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Client MUST echo requestState verbatim on retry if present, and MUST NOT include one if absent; MUST NOT inspect/parse/modify requestState.",
+   "cite": "basic/patterns/mrtr.md L261-262"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The JSON-RPC id MUST differ between the initial request and the retry (independent requests).",
+   "cite": "basic/patterns/mrtr.md L263"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "inputRequests/requestState fields from one InputRequiredResult MUST NOT be applied to any other parallel request.",
+   "cite": "basic/patterns/mrtr.md L264"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "On malformed/invalid InputResponses, server SHOULD return a JSON-RPC error with appropriate code/message; unexpected extra params SHOULD be ignored; missing required info SHOULD produce a new InputRequiredResult rather than an error.",
+   "cite": "basic/patterns/mrtr.md L268-274"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Cancellation notifications from the server (notifications/cancelled) MUST reference a subscriptions/listen request id only; MUST NOT be used for any other purpose.",
+   "cite": "basic/patterns/cancellation.md L13-16, L73-74"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Streamable HTTP: a client disconnect (closing the SSE response stream) MUST be treated by the server as cancellation of that request; no notifications/cancelled is required.",
+   "cite": "basic/patterns/cancellation.md L41-43; streamable-http.md L233-235"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio there is no per-request stream to close; client MUST send notifications/cancelled referencing the request id to cancel.",
+   "cite": "basic/patterns/cancellation.md L44-45"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Implementations SHOULD establish timeouts for all sent requests and SHOULD always enforce a maximum timeout regardless of progress notifications.",
+   "cite": "basic/patterns/cancellation.md L49-66"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Progress tokens MUST be a string or integer, unique across active requests.",
+   "cite": "basic/patterns/progress.md L18-20"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Progress value MUST strictly increase with each notification even if total is unknown; notifications MUST stop after completion.",
+   "cite": "basic/patterns/progress.md L55-56, L92"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "JSON-RPC messages MUST be UTF-8 encoded on every transport.",
+   "cite": "basic/transports/index.md L31-32"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST validate the Origin header on all incoming Streamable HTTP connections; if Origin is present and invalid, server MUST reject appropriately.",
+   "cite": "basic/transports/streamable-http.md L57-59"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Client MUST use HTTP POST for every JSON-RPC message; MUST include an Accept header listing both application/json and text/event-stream; MUST include request-metadata headers on each POST.",
+   "cite": "basic/transports/streamable-http.md L74-78"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Server MUST return 202 Accepted for an accepted notification/response POST, or an HTTP error status if it cannot accept the message; a response POST returns Content-Type application/json or text/event-stream.",
+   "cite": "basic/transports/streamable-http.md L79-89"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Server SHOULD include X-Accel-Buffering: no on SSE responses to defeat proxy buffering; SHOULD periodically emit SSE comment lines as heartbeats.",
+   "cite": "basic/transports/streamable-http.md L133-147"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Resumable SSE via Last-Event-ID is NOT supported in this revision.",
+   "cite": "basic/transports/streamable-http.md L152"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every POST to the MCP endpoint MUST include an MCP-Protocol-Version header; mismatched value vs. the body's _meta protocol version MUST yield 400 Bad Request + HeaderMismatch JSON-RPC error.",
+   "cite": "basic/transports/streamable-http.md L250-260"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A server implementing 2025-06-18 semantics (which predates the MCP-Protocol-Version header) MAY treat a request omitting the header as protocol version 2025-03-26.",
+   "cite": "basic/transports/streamable-http.md L274-281"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Mcp-Method header (mirroring params.method) is REQUIRED on all requests; Mcp-Name (mirroring params.name or params.uri) is REQUIRED for tools/call, resources/read, prompts/get.",
+   "cite": "basic/transports/streamable-http.md L287-294"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If the Mcp-Name source value cannot be safely represented as a plain ASCII header value, client MUST Base64-encode it using the sentinel format defined in the spec.",
+   "cite": "basic/transports/streamable-http.md L296-297"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients supporting x-mcp-header annotations MUST mirror the designated tool parameter values into HTTP headers named Mcp-Param-{name}.",
+   "cite": "basic/transports/streamable-http.md L365-368"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "x-mcp-header values MUST be case-insensitively unique among all such values in a tool's schema and MUST only appear directly under a properties key (else invalid).",
+   "cite": "basic/transports/streamable-http.md L377-397"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, a dual-era client SHOULD send server/discover first as backward-compat probe; falls back to initialize on any non-modern error/timeout.",
+   "cite": "basic/versioning.md L138-140, L169-171"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST NOT emit error codes -32002 or -32042 (retired 2025-11-25-and-earlier codes); clients SHOULD still accept -32002 from legacy servers.",
+   "cite": "server/discover.md via basic/index.md L142-146"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "New codes in -32020..-32099 MUST be defined exclusively by the MCP spec; implementations MUST NOT emit undefined codes from this sub-range, and MUST NOT allocate new codes in the frozen -32000..-32019 legacy sub-range.",
+   "cite": "basic/index.md L119-129"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "New error codes for non-spec purposes SHOULD be allocated outside the JSON-RPC reserved range (-32768..-32000).",
+   "cite": "basic/index.md L155-157"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "Notifications MUST NOT include an id field.",
+   "cite": "basic/index.md L159-174"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers MUST NOT rely on prior requests over the same connection to establish context (statelessness); state spanning requests MUST be referenced by an explicit identifier the client passes each request.",
+   "cite": "basic/index.md L193-204"
+  }
+ ],
+ "wire_details": [
+  "$defs enumeration (155 total, alphabetical, from 2026-07-28_schema.json): Annotations, AudioContent, BaseMetadata, BlobResourceContents, BooleanSchema, CacheableResult, CallToolRequest, CallToolRequestParams, CallToolResult, CallToolResultResponse, CancelledNotification, CancelledNotificationParams, ClientCapabilities, ClientNotification, ClientRequest, ClientResult, CompleteRequest, CompleteRequestParams, CompleteResult, CompleteResultResponse, ContentBlock, CreateMessageRequest, CreateMessageRequestParams, CreateMessageResult, Cursor, DiscoverRequest, DiscoverResult, DiscoverResultResponse, ElicitRequest, ElicitRequestFormParams, ElicitRequestParams, ElicitRequestURLParams, ElicitResult, EmbeddedResource, EmptyResult, EnumSchema, Error, GetPromptRequest, GetPromptRequestParams, GetPromptResult, GetPromptResultResponse.",
+  "(cont.) HeaderMismatchError, Icon, Icons, ImageContent, Implementation, InputRequest, InputRequests, InputRequiredResult, InputResponse, InputResponseRequestParams, InputResponses, InternalError, InvalidParamsError, InvalidRequestError, JSONArray, JSONObject, JSONRPCErrorResponse, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, JSONRPCResultResponse, JSONValue, LegacyTitledEnumSchema, ListPromptsRequest, ListPromptsResult, ListPromptsResultResponse, ListResourceTemplatesRequest, ListResourceTemplatesResult, ListResourceTemplatesResultResponse, ListResourcesRequest, ListResourcesResult, ListResourcesResultResponse, ListRootsRequest, ListRootsResult, ListToolsRequest, ListToolsResult, ListToolsResultResponse, LoggingLevel, LoggingMessageNotification, LoggingMessageNotificationParams, MetaObject.",
+  "(cont.) MethodNotFoundError, MissingRequiredClientCapabilityError, ModelHint, ModelPreferences, MultiSelectEnumSchema, Notification, NotificationMetaObject, NotificationParams, NumberSchema, PaginatedRequest, PaginatedRequestParams, PaginatedResult, ParseError, PrimitiveSchemaDefinition, ProgressNotification, ProgressNotificationParams, ProgressToken, Prompt, PromptArgument, PromptListChangedNotification, PromptMessage, PromptReference, ReadResourceRequest, ReadResourceRequestParams, ReadResourceResult, ReadResourceResultResponse, Request, RequestId, RequestMetaObject, RequestParams, Resource, ResourceContents, ResourceLink, ResourceListChangedNotification, ResourceRequestParams, ResourceTemplate, ResourceTemplateReference, ResourceUpdatedNotification, ResourceUpdatedNotificationParams, Result, ResultMetaObject, ResultType, Role, Root.",
+  "(cont.) SamplingMessage, SamplingMessageContentBlock, ServerCapabilities, ServerNotification, ServerResult, SingleSelectEnumSchema, StringSchema, SubscriptionFilter, SubscriptionsAcknowledgedNotification, SubscriptionsAcknowledgedNotificationParams, SubscriptionsListenRequest, SubscriptionsListenRequestParams, SubscriptionsListenResult, SubscriptionsListenResultMetaObject, SubscriptionsListenResultResponse, TextContent, TextResourceContents, TitledMultiSelectEnumSchema, Tool, ToolAnnotations, ToolChoice, ToolListChangedNotification, ToolResultContent, ToolUseContent, UnsupportedProtocolVersionError, UntitledMultiSelectEnumSchema, UntitledSingleSelectEnumSchema. Notably ABSENT vs 2025-11-25: InitializeRequest/InitializeResult, PingRequest/EmptyResult-for-ping, RootsListChangedNotification (roots/list_changed), SetLevelRequest (logging/setLevel), and Subscribe/Unsubscribe request types for resources — all removed/replaced.",
+  "Method const values found (grep on '\"const\": \"...\"'): tools/call, notifications/cancelled (x2: client- and general-purpose ClientNotification def), completion/complete, sampling/createMessage, server/discover, elicitation/create, prompts/get, prompts/list, resources/templates/list, resources/list, roots/list, tools/list, notifications/message, resources/read, notifications/prompts/list_changed, ref/prompt (PromptReference.type const), resources/read, notifications/resources/list_changed, ref/resource (ResourceTemplateReference.type const), notifications/resources/updated, notifications/subscriptions/acknowledged, subscriptions/listen, notifications/tools/list_changed. NOT present: 'initialize', 'notifications/initialized', 'ping', 'logging/setLevel', 'resources/subscribe', 'resources/unsubscribe', 'notifications/roots/list_changed'.",
+  "Error code consts in schema $defs: ParseError=-32700, InvalidRequestError=-32600, MethodNotFoundError=-32601, InvalidParamsError=-32602, InternalError=-32603 (standard JSON-RPC). MCP-specific new range: HeaderMismatchError, MissingRequiredClientCapabilityError, UnsupportedProtocolVersionError have no 'code' const captured directly on the def in schema.json (code fields not literal consts in those 3 in the extracted grep) but basic/index.md's table gives exact values: HeaderMismatch=-32020, MissingRequiredClientCapability=-32021, UnsupportedProtocolVersion=-32022. Retired/forbidden codes: -32002 (resource not found, pre-2026-07-28), -32042 (URL elicitation required, 2025-11-25 only).",
+  "ResultType enum values (core): 'complete', 'input_required'; extensions MAY add more, advertised via capabilities; unrecognized resultType MUST be considered invalid by the client.",
+  "CacheableResult fields: cacheScope enum ['private','public'] (Cache-Control public/private analogy — private caches MUST NOT be shared across authorization contexts), resultType (string, servers implementing 2026-07-28 MUST include it), ttlMs (number >=0, hint like Cache-Control max-age; 0 = immediately stale).",
+  "Reserved _meta keys (exact strings): progressToken, io.modelcontextprotocol/protocolVersion, io.modelcontextprotocol/clientInfo, io.modelcontextprotocol/clientCapabilities, io.modelcontextprotocol/logLevel, io.modelcontextprotocol/subscriptionId, io.modelcontextprotocol/serverInfo, traceparent, tracestate, baggage. Extension _meta keys use io.modelcontextprotocol/ prefix (official) or vendor-specific prefixes (third-party); any prefix whose 2nd label is 'modelcontextprotocol' or 'mcp' is reserved (e.g. io.modelcontextprotocol/, dev.mcp/, org.modelcontextprotocol.api/, com.mcp.tools/ — but com.example.mcp/ is NOT reserved).",
+  "HTTP headers (Streamable HTTP): MCP-Protocol-Version (required, exact value must match body _meta protocol version or 400+HeaderMismatch), Mcp-Method (required all requests, mirrors params.method), Mcp-Name (required for tools/call/resources/read/prompts/get, mirrors params.name or params.uri; Base64 sentinel encoding if unsafe as ASCII), Mcp-Param-{name} (optional, from x-mcp-header tool schema annotations), X-Accel-Buffering: no (SHOULD, server->proxy on SSE), Accept header MUST list both application/json and text/event-stream (client->server), Origin header (server MUST validate). Content-Type values: application/json (single JSON-RPC object response) or text/event-stream (SSE). HTTP status codes: 202 Accepted (notification/response POST accepted), 400 Bad Request (header mismatch, missing required _meta fields, malformed legacy initialize against modern-only server).",
+  "Extension identifiers observed as examples (not core schema defs): io.modelcontextprotocol/ui (MCP Apps extension, settings e.g. {mimeTypes:['text/html;profile=mcp-app']}), io.modelcontextprotocol/tasks (Tasks extension, empty settings object = support with defaults). These live in capabilities.extensions map, not in $defs.",
+  "Icon MIME types: clients MUST support image/png, image/jpeg/image/jpg; SHOULD support image/svg+xml, image/webp. Icon.src MUST be https: or data: URI only.",
+  "JSON Schema dialect default: JSON Schema 2020-12 (https://json-schema.org/draft/2020-12/schema) when $schema absent; implementations MUST support at least 2020-12."
+ ],
+ "sdk_implications": [
+  "A PowerShell SDK cannot model MCP as a stateful 'session' object with Initialize()/Connect() semantics the way older SDKs did; every outgoing request builder (client and server dispatch) MUST inject the three _meta fields (protocolVersion required, clientCapabilities required, clientInfo recommended) on EVERY call, not once at connection setup. This is a fundamental architecture decision to make explicit in the plan.",
+  "No 'ping' keepalive RPC exists; if the PowerShell SDK wants a liveness check it must use server/discover (cacheable) or transport-level mechanisms, not invent a 'Ping-McpServer' cmdlet that maps to a wire method.",
+  "Server-side SDK must NOT expose sampling/createMessage, elicitation/create, roots/list as things a tool handler can 'send and await' synchronously mid-call in the old server-initiated-request style; instead the SDK's tool-handler API must support returning an InputRequiredResult (pluggable 'need more input' outcome) and resuming from a subsequent request carrying inputResponses + requestState — this needs a distinct PowerShell cmdlet/object model (e.g. New-McpInputRequired, a Resume-McpToolCall path) rather than blocking calls.",
+  "Client-side SDK must implement InputRequiredResult handling as a retry loop: same original params + a freshly generated request id + inputResponses + verbatim requestState, and must never let user code inspect/mutate requestState.",
+  "Client SDK needs first-class support for subscriptions/listen as a distinct long-lived streaming call type (not a fire-and-forget notification handler), with subscription-id-based demultiplexing baked into the transport abstraction for stdio, and native reliance on the HTTP response stream's lifetime for Streamable HTTP.",
+  "Error handling layer must special-case resultType alongside JSON-RPC error responses: success path is no longer just 'no error field' — must branch on resultType complete vs input_required vs unknown (throw) vs missing (treat as complete for legacy interop).",
+  "SDK must implement the -32020/-32021/-32022 error types as strongly-typed PowerShell exceptions/error records with their `data` payloads (data.requiredCapabilities for -32021, data.supported/data.requested for -32022), and must never emit -32002/-32042 while still being able to parse them from legacy peers if dual-era support is planned.",
+  "HTTP transport implementation must set Mcp-Method/Mcp-Name/MCP-Protocol-Version headers on every POST derived from the JSON-RPC body, implement Base64 sentinel encoding for unsafe Mcp-Name values, and support the optional x-mcp-header/Mcp-Param-{name} mirroring for tool parameters flagged in tool JSON schemas.",
+  "Because the protocol is stateless, the PowerShell server SDK should not assume one process/runspace = one client; concurrent/interleaved requests from unrelated logical conversations over the same stdio pipe must be supported, which affects how request dispatch and cancellation tracking are scoped (per request id, not per connection).",
+  "Cancellation must be transport-differentiated: stdio path sends notifications/cancelled; Streamable HTTP path relies on stream/connection closing — SDK's cancellation token plumbing must map to the right primitive per transport and the server must treat HTTP disconnect as an implicit cancel signal.",
+  "If dual-era (2025-11-25/legacy) interop is in scope, the SDK needs a distinct legacy code path implementing the old initialize handshake, ping, resources/subscribe, and server-initiated requests, selected via the era-detection probe (server/discover on stdio; a 4xx/error-shape check on HTTP) — this roughly doubles the surface area versus targeting 2026-07-28 alone, and should be an explicit go/no-go decision in the plan."
+ ],
+ "open_questions": [
+  "Is dual-era (2025-11-25 and earlier) interoperability in scope for v1 of the PowerShell SDK, or is 2026-07-28-only acceptable? This materially changes the design (need for legacy initialize/ping/subscribe code paths).",
+  "Are the io.modelcontextprotocol/ui (MCP Apps) and io.modelcontextprotocol/tasks (Tasks) extensions in scope? They are official but not part of core schema.json/$defs — no type definitions for them were found in the read schema; would need separate extension spec pages fetched if required.",
+  "The exact JSON shape/required fields of ElicitRequestFormParams vs ElicitRequestURLParams, PrimitiveSchemaDefinition variants (Boolean/Number/String/Enum/MultiSelectEnum/SingleSelectEnum + Titled/Untitled/Legacy variants), and ToolAnnotations/ToolChoice were not read field-by-field in this pass (only enumerated by name) — needs a follow-up read of schema.json bodies for those defs before finalizing the PowerShell type model.",
+  "The custom-header x-mcp-header schema extension section (streamable-http.md ~L357-410) was only partially read; exact validation rules (case-insensitive uniqueness scope, nesting restriction wording) should be re-verified in full before encoding as SDK validation logic.",
+  "Whether InputRequest/InputResponse (singular) $defs differ meaningfully from InputRequests/InputResponses (the maps) was not verified — likely singular defs are the union element type, but not confirmed from schema.json body text.",
+  "Server capabilities' exact shape (ServerCapabilities/ClientCapabilities $defs) including which capability keys exist (tools, resources, prompts, sampling, roots, elicitation, completions, logging, extensions, etc.) was inferred from usage examples, not from directly reading those two $defs' property lists — needs confirmation before finalizing capability-gating code."
+ ],
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/2026-07-28_schema.json ($defs enumeration, method/error consts) plus pages/specification__2026-07-28__basic__index.md, server__discover.md, basic__versioning.md, basic__patterns__index.md, basic__patterns__mrtr.md, basic__patterns__subscriptions.md, basic__patterns__cancellation.md, basic__patterns__progress.md, basic__transports__index.md, basic__transports__streamable-http.md (partial, headers/status section)",
+ "summary": "2026-07-28 is a ground-up rewrite of MCP's core protocol relative to 2025-11-25: it drops the stateful `initialize`/`ping` handshake and all server-initiated JSON-RPC requests in favor of (1) fully stateless per-request `_meta` fields (protocolVersion, clientCapabilities required; clientInfo, logLevel optional) on every message, (2) an optional `server/discover` method for capability/version probing, replacing initialize, (3) a new \"Multi Round-Trip Requests\" (MRTR) pattern where servers signal need for client input via `resultType: \"input_required\"` (InputRequiredResult) on only `tools/call`/`resources/read`/`prompts/get`, and the client retries the SAME logical request (new id) with `inputResponses` + echoed opaque `requestState` — sampling/createMessage, elicitation/create, and roots/list now only ever appear inside this InputRequests map, never as bare server->client requests, and (4) `subscriptions/listen`, a single long-lived request replacing `resources/subscribe`/GET-SSE, filtered by a notifications object and demultiplexed via `io.modelcontextprotocol/subscriptionId`. Every result now carries `resultType` ('complete'|'input_required', extensible); CacheableResult adds `cacheScope`/`ttlMs` for `server/discover`. Three new error codes occupy the -32020..-32099 MCP-reserved sub-range: HeaderMismatchError (-32020), MissingRequiredClientCapabilityError (-32021), UnsupportedProtocolVersionError (-32022); old -32002/-32042 are retired. Streamable HTTP transport requires `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` headers mirroring body fields, drops the GET stream endpoint and Last-Event-ID resumption, and adds an `x-mcp-header`/`Mcp-Param-{name}` tool-parameter-to-header extension. Extensions (e.g. MCP Apps `io.modelcontextprotocol/ui`, Tasks `io.modelcontextprotocol/tasks`) are negotiated via `capabilities.extensions`, outside core schema.json. schema.json enumerates 155 $defs (full list below); `InitializeRequest`, `PingRequest`, `SetLevelRequest`, resource subscribe/unsubscribe requests, and `notifications/roots/list_changed` are all absent versus earlier revisions, confirming their removal. Dual-era (legacy+modern) coexistence is explicitly specified with a compatibility matrix and stdio/HTTP-specific era-detection probes, which a PowerShell SDK targeting only 2026-07-28 could skip but a dual-era SDK could not."
+}

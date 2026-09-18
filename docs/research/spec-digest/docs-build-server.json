@@ -1,0 +1,152 @@
+{
+ "legacy_delta": [
+  "File is scoped to a single revision path (/docs/2026-07-28/...); no diff markers vs 2025-11-25 or 2025-06-18 appear anywhere in this tutorial page. Historical comparison would require reading the archived 2025-11-25/2025-06-18 build-server pages, which were NOT provided/read in this task.",
+  "TypeScript sample imports `@modelcontextprotocol/server` and `@modelcontextprotocol/server/stdio` (no '/sdk' segment) — this is the 'v2' package layout; older TS SDK docs used `@modelcontextprotocol/sdk`. Confirms the prompt's claim that 'TypeScript v2' is what's shown, but the file itself does not label it 'v2' or discuss the rename.",
+  "Rust `rmcp` Cargo.toml pins `edition = \"2024\"` and `rmcp = \"0.3\"` — a concrete version floor for the Rust SDK at this revision.",
+  "Kotlin sample pins `mcpVersion = \"0.9.0\"`, `ktorVersion = \"3.2.3\"` as of this revision."
+ ],
+ "open_questions": [
+  "The tutorial never shows an HTTP/Streamable-HTTP server example for any language (only stdio) — cannot extract HTTP hosting startup code, port binding, or the Mcp-Session-Id / Origin header handling from this file. Must read a different page (likely a transports or build-client doc) for that.",
+  "No elicitation (elicitation/create) or sampling (sampling/createMessage) example appears anywhere in this file — cannot extract client-side or server-side elicitation/MRTR usage patterns from build-server.md. This file only ever exercises the 'tools' capability.",
+  "No resources or prompts registration code is shown for any language despite the intro listing all three primitives — only a passing text mention that the WebFlux Java example 'showcases how to define and register MCP Tools, Resources, and Prompts' with no code. Resource/prompt registration ergonomics must come from a different page (server-concepts or an SDK's own README).",
+  "No explicit JSON-RPC wire trace, no `initialize`/`initialized` handshake code, and no capability-negotiation JSON is shown in any language's server code (capabilities are set via SDK constructs like `ServerCapabilities.builder().enable_tools()` or `ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = true))`, not via raw JSON-RPC payloads) — exact over-the-wire `capabilities` object shape must be cross-checked against schema.ts rather than this tutorial.",
+  "The C# sample uses `.WithToolsFromAssembly()` reflection-based registration with no explicit `ServerCapabilities` object at all — unclear from this file alone whether the hosting extension auto-declares `tools` capability with `listChanged: true`; would need the C# SDK source, not this doc.",
+  "Go sample calls `mcp.NewServer(&mcp.Implementation{...}, nil)` — the `nil` second arg (presumably ServerOptions) is never explained in this file; unclear what capability defaults it implies.",
+  "No `_meta` key, no MCP-Protocol-Version header, no error-code table, and no MIME-type table appear anywhere in this file — none of the requested 'exact constants' for headers/error codes/status codes exist in build-server.md; they must be sourced from the base protocol/transport pages instead."
+ ],
+ "methods": [
+  {
+   "name": "tools/list",
+   "direction": "client->server",
+   "params": "Not shown in this file at all (no raw JSON-RPC is ever printed). Inferred only from schema.ts (line 1768: `method: \"tools/list\"`) as background context, not from build-server.md content.",
+   "result": "Not documented in this file. Every SDK sample instead exposes registration-time metadata (tool name, description, input schema) that the SDK itself is presumably responsible for surfacing via tools/list; the tutorial never shows the resulting list payload.",
+   "capability_gate": "Implied server-side by declaring a tools capability object at server construction (see wire_details), but build-server.md never states the gate explicitly; this is inferred, not asserted by the source file.",
+   "notes": "Included only because the task's method table is mandatory; build-server.md is an SDK-ergonomics tutorial, not a wire-protocol reference, and does not itself document this method's params/result shape."
+  },
+  {
+   "name": "tools/call",
+   "direction": "client->server",
+   "params": "Not shown as raw JSON-RPC. Each SDK's tool handler signature is the closest analogue to the eventual request shape: Python `async def get_alerts(state: str) -> str` (kwargs = tool arguments, docstring Args: block = per-arg description); TypeScript handler `async ({ state }) => {...}` fed by a Zod `inputSchema`; Java `@Tool`/`@ToolParam` annotated method params; Kotlin handler receives `request.arguments` as a `JsonObject` looked up by key; C# `[McpServerTool]` static method params (with `[Description]` attributes) plus a DI-injected `HttpClient`; Ruby `self.call(state:)` keyword args per `input_schema`; Rust `Parameters(MCPAlertRequest { state }): Parameters<MCPAlertRequest>` deserialized via `schemars::JsonSchema`; Go `getForecast(ctx, req *mcp.CallToolRequest, input ForecastInput)` with `input` decoded from JSON per Go struct tags.",
+   "result": "Every language ultimately returns/produces a text content block. TypeScript, Kotlin, Ruby, and Go samples construct the CallToolResult shape explicitly: `{ content: [ { type: \"text\", text: \"...\" } ] }` (TS), `CallToolResult(content = listOf(TextContent(...)))` (Kotlin), `MCP::Tool::Response.new([{ type: \"text\", text: ... }])` (Ruby), `&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: ...}}}` (Go, 3-tuple return `(*mcp.CallToolResult, any, error)`). Python and Java and Rust and C# tools instead just `return` a plain string/Task<string>, i.e. those SDKs auto-wrap a scalar return value into the text-content result — the file never states the exact wrapping rule, it only shows the effect by omission.",
+   "capability_gate": "Same caveat as tools/list: implied by the same tools-capability declaration, not asserted verbatim in this file.",
+   "notes": "Go's tool function signature returning `(*mcp.CallToolResult, any, error)` is notable: the middle `any` return is never explained in this file (presumably a structured-content / typed-output slot) — flagged as an open question above rather than invented."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Python STDIO servers must never write to stdout (e.g. via `print()`), because doing so corrupts the JSON-RPC message stream and breaks the server.",
+   "cite": "pages/docs__2026-07-28__develop__build-server.md, Python tab, 'Logging in MCP Servers', lines 44-48"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Python STDIO servers should use the standard `logging` module (which writes to stderr) instead of `print()`, with one logger per module via `logging.getLogger(__name__)`.",
+   "cite": "same file, Python tab, 'Best Practices', lines 52-55, 60-68"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "HTTP-based servers (any language) may log to stdout freely, since stdout logging does not interfere with HTTP responses.",
+   "cite": "same file, repeated verbatim in every language tab's 'Logging in MCP Servers' subsection, e.g. lines 50-51 (Python), 351 (TS), 806 (Java), 1099 (Kotlin), 1470 (C#), 1724 (Ruby), 2029 (Rust), 2448 (Go)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "TypeScript STDIO servers must never call `console.log()`, since it writes to stdout by default and corrupts JSON-RPC messages.",
+   "cite": "same file, TypeScript tab, lines 349-351"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "TypeScript STDIO servers should use `console.error()` (stderr) or a stderr/file-based logging library.",
+   "cite": "same file, TypeScript tab, line 355"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Java STDIO servers must never use `System.out.println()`/`System.out.print()`.",
+   "cite": "same file, Java tab, lines 800-806"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Java STDIO servers should use `Host.CreateEmptyApplicationBuilder` semantics equivalent (for C#) or a stderr/file logging library (Java/Kotlin/Ruby/Rust/Go) to avoid stray console output; C# specifically must use `CreateEmptyApplicationBuilder` rather than `CreateDefaultBuilder` for STDIO transport so the host framework itself does not print startup banners to stdout.",
+   "cite": "same file, C# tab, Note under 'Building your server', lines 1550-1552"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Kotlin STDIO servers must never use `println()`.",
+   "cite": "same file, Kotlin tab, lines 1093-1097"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "C# STDIO servers must never use `Console.WriteLine()`/`Console.Write()`.",
+   "cite": "same file, C# tab, lines 1464-1468"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Ruby STDIO servers must never use `puts` or `print`.",
+   "cite": "same file, Ruby tab, lines 1718-1722"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Rust STDIO servers must never use `println!()`/`print!()`.",
+   "cite": "same file, Rust tab, lines 2023-2027"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Go STDIO servers must never use `fmt.Println()`/`fmt.Printf()`.",
+   "cite": "same file, Go tab, lines 2442-2446"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every quickstart's `mcpServers` entry in the Claude Desktop config must give the launch command an absolute path (not relative) to the server executable/project/jar/script; this is repeated as a Note or Warning in every single language tab.",
+   "cite": "same file, e.g. Python lines 323-325, Ruby lines 2000-2002, Rust lines 2420-2422, Go lines 2853-2855"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Claude for Desktop should be fully quit (not just window-closed) and restarted after any `claude_desktop_config.json` change for the change to take effect — OS-specific quit procedures given for Windows/macOS/Linux.",
+   "cite": "same file, Troubleshooting > 'Claude for Desktop Integration Issues', lines 2939-2947"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "The MCP UI elements only appear in Claude for Desktop if at least one server is properly configured in `mcpServers`.",
+   "cite": "same file, e.g. lines 281, 752, 978, 1411, 1669, 1970, 2394, 2827 (restated once per language tab)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "On Windows, JSON path strings in `claude_desktop_config.json` should use escaped double backslashes (`\\\\`) or forward slashes (`/`).",
+   "cite": "same file, e.g. Python Note line 324, Ruby Note line 2001, Rust Note line 2421, Go Note line 2854"
+  }
+ ],
+ "wire_details": [
+  "No JSON-RPC request/response payloads, no HTTP headers (no Mcp-Session-Id, no MCP-Protocol-Version, no Origin), no numeric error codes, and no MIME-type constants appear anywhere in this file. This tutorial operates entirely at the SDK-ergonomics layer (decorators/annotations/builders) and stdio process launch, never at the wire layer.",
+  "The only 'constant' string literals that recur across all 8 language tabs are the two tool names used by the running example: `get_alerts` and `get_forecast` (Java/C# use PascalCase `GetAlerts`/`GetWeatherForecastByLocation`/`GetForecast` for the method name but the underlying tool identifiers registered are still effectively these two concepts).",
+  "Claude Desktop config key is `mcpServers` (object), each entry keyed by an arbitrary server name (e.g. `\"weather\"`) with fields `command` (string), `args` (string array), and optionally `cwd` (string, shown only in the Ruby example to set the working directory for `bundle exec ruby weather.rb`).",
+  "Config file path is OS-dependent: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `~/.config/Claude/claude_desktop_config.json` (Linux), `%AppData%\\Claude\\claude_desktop_config.json` (Windows) — stated identically in every language tab's 'Testing your server with Claude for Desktop' section.",
+  "Claude Desktop log locations (macOS/Linux only, Windows not given): `~/Library/Logs/Claude/mcp*.log` (macOS), `~/.config/Claude/logs/mcp*.log` (Linux); general connection log is `mcp.log`, per-server stderr capture is `mcp-server-SERVERNAME.log`.",
+  "NWS API constants used identically across all language samples (not MCP constants, but load-bearing for behavioral parity across the comparative table): base URL `https://api.weather.gov`, `Accept: application/geo+json` request header, and a `User-Agent` header whose exact string differs slightly per language (`weather-app/1.0` in Python/TS/Ruby/Rust; `WeatherApiClient/1.0 (your@email.com)` in Java; `WeatherApiClient/1.0` in Kotlin; `weather-tool/1.0` via `ProductInfoHeaderValue` in C#).",
+  "Version floors stated in this file: Python SDK `mcp[cli]` — 'Python MCP SDK 2.0.0 or higher', Python 3.10+; Node.js 20+ for TypeScript; Java 17 + Spring Boot 3.3.x for the Java/Spring-AI sample; JDK 11+ and Kotlin SDK `0.9.0` (`io.modelcontextprotocol:kotlin-sdk`), Ktor `3.2.3`; .NET 8 SDK + NuGet package `ModelContextProtocol` installed with `--prerelease`; Ruby 2.7+ with gem `mcp`; Rust 1.70+ with crate `rmcp = \"0.3\"` (features `server, macros, transport-io`); Go 1.24+ with module `github.com/modelcontextprotocol/go-sdk/mcp`."
+ ],
+ "sdk_implications": [
+  "A PowerShell SDK's cmdlet surface should mirror the 'decorator vs explicit builder' split seen here: Python (`@mcp.tool()` decorator on a plain async function, docstring Args: block becomes per-parameter description, type hints become the JSON Schema) and Java/C# (attribute-based: `@Tool`/`[McpServerTool]` + `[Description]`/`@ToolParam` on ordinary methods, auto-discovered via `MethodToolCallbackProvider`/`WithToolsFromAssembly()` reflection) are the 'low ceremony' end. TypeScript (`server.registerTool(name, { description, inputSchema: zod-schema }, handler)`), Kotlin (`server.addTool(name, description, inputSchema = ToolSchema(...), handler)`), Ruby (class-based `MCP::Tool` subclass with `tool_name`/`description`/`input_schema` DSL + `self.call`), Rust (`#[tool_router]`/`#[tool(description=...)]` proc macros over an impl block, with `Parameters<T: JsonSchema>` extraction), and Go (freestanding `func(ctx, req, input T) (*Result, any, error)` + `mcp.AddTool(server, &mcp.Tool{Name, Description}, fn)`, schema derived from Go struct tags `json:`/`jsonschema:`) are all 'explicit registration' patterns requiring a name+description+schema triple passed to a registration call. PowerShell has no decorator/attribute-on-function primitive as clean as Python's, so the natural analogue is the Go/TypeScript/Kotlin pattern: a `Register-McpTool -Name -Description -InputSchema <hashtable|scriptblock> -ScriptBlock` cmdlet, since PowerShell functions can carry `[Parameter()]`/comment-based help metadata similar to C#'s attributes — an `Register-McpTool` cmdlet that introspects a function's `[CmdletBinding()]`/param block (analogous to C#'s `[McpServerTool]` + `[Description]` reflection route) is the closest fit to the 'low ceremony' end.",
+  "None of the 8 samples show manual JSON-RPC framing, confirming that a PowerShell SDK should hide the transport entirely behind a `Start-McpServer -Transport Stdio|Http` cmdlet, matching every language's single terminal call: Python `mcp.run(transport=\"stdio\")`, TS `await server.connect(new StdioServerTransport())`, Kotlin `server.createSession(transport)` + manual `Job`/`onClose` wait loop, C# `builder.Services.AddMcpServer().WithStdioServerTransport()...; await app.RunAsync()`, Ruby `MCP::Server::Transports::StdioTransport.new(server); transport.open`, Rust `Weather::new().serve(transport).await?; service.waiting().await?`, Go `server.Run(context.Background(), &mcp.StdioTransport{})`. A PowerShell `Start-McpServer` should likewise block the pipeline/thread until the transport closes, and must guarantee (per the MUST NOT logging rules above) that the harness disables PowerShell's default stdout write-host path when running under `-Transport Stdio` — this is a concrete, checkable SDK requirement: `Write-Host`/unredirected `Write-Output` on the host stream must be forbidden or auto-redirected to stderr in STDIO mode.",
+  "The Go sample's 3-tuple handler return `(*mcp.CallToolResult, any, error)` is the only SDK here that separates 'structured/typed result', 'raw result object', and 'error' as distinct return channels — a PowerShell equivalent could map `error`/exception to native PowerShell terminating-error semantics (`$PSCmdlet.ThrowTerminatingError`) while letting the scriptblock's normal output become the content array, closest in spirit to Python's 'return a string, let the SDK wrap it' auto-wrapping behavior.",
+  "Every SDK's Claude-Desktop config entry is transport-agnostic JSON (`command` + `args` [+ `cwd`]) launching a native OS process; a PowerShell-authored server is just another `command: pwsh, args: [-File, /path/to/server.ps1]` (or a published `.exe`/module entry point) — no PowerShell-specific config schema is implied or required beyond what every other language already uses.",
+  "Because this file never demonstrates resources, prompts, elicitation, sampling, or HTTP transport, the PowerShell SDK plan CANNOT rely on this file alone to design `Register-McpResource`/`Register-McpPrompt`/elicitation cmdlets or `Start-McpServer -Transport Http` — those must be planned from the server-concepts, transport, and elicitation spec pages (not read in this task) plus schema.ts/schema.json.",
+  "Version-floor conventions across ecosystems (Python 3.10+, Node 20+, Java 17+/Boot 3.3+, JDK 11+, .NET 8+, Ruby 2.7+, Rust 1.70+, Go 1.24+) suggest a PowerShell SDK should likewise pin and document a minimum PowerShell version (7.x for cross-platform parity, since the container/target has 'no pwsh' currently) and a minimum SDK package version once published to the gallery, consistent with every other SDK's practice of stating an explicit floor at the top of its quickstart."
+ ],
+ "source": "pages/docs__2026-07-28__develop__build-server.md (full 3005-line file, read in its entirety, offsets 1-600, 600-1200, 1200-1800, 1800-2400, 2400-3005)",
+ "summary": "This page is a hands-on tutorial ('Build an MCP server'), not the normative protocol spec: it walks through building an identical stdio-only weather MCP server (two tools: get_alerts, get_forecast) in eight language SDKs — Python (`mcp[cli]`, `@mcp.tool()` decorator on `MCPServer`), TypeScript (`@modelcontextprotocol/server`, `McpServer.registerTool(name, {description, inputSchema: zod}, handler)`, `StdioServerTransport`), Java/Spring AI (`@Tool`/`@ToolParam` annotations, `MethodToolCallbackProvider`, Spring Boot auto-config, STDIO or `STREAMABLE` protocol property), Kotlin (`kotlin-sdk` 0.9.0, `Server`/`ServerCapabilities(tools=Tools(listChanged=true))`, `server.addTool(name, description, inputSchema=ToolSchema(...))`), C# (`ModelContextProtocol` NuGet prerelease, `AddMcpServer().WithStdioServerTransport().WithToolsFromAssembly()`, `[McpServerToolType]`/`[McpServerTool]` attributes), Ruby (`mcp` gem, `MCP::Tool` subclass DSL with `tool_name`/`description`/`input_schema`), Rust (`rmcp` 0.3 crate, `#[tool_router]`/`#[tool(description=...)]` macros, `schemars::JsonSchema` request structs, `ServerHandler`), and Go (`go-sdk/mcp`, `mcp.AddTool(server, &mcp.Tool{...}, handlerFn)` with JSON/jsonschema struct tags). It gives, per language: STDIO logging must-not/should rules (never write to stdout — corrupts JSON-RPC; HTTP servers may log to stdout freely), version floors, project scaffolding commands, and a `claude_desktop_config.json` `mcpServers` entry (command/args[/cwd]) plus OS-specific config/log paths and a restart-fully-quit warning. It explicitly does NOT cover resources, prompts, elicitation, sampling, or HTTP/Streamable-HTTP server hosting — those primitives are only named in the intro or a single unelaborated Java WebFlux mention. No JSON-RPC payloads, headers, error codes, or MIME constants appear."
+}

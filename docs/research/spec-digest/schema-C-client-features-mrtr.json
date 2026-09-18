@@ -1,0 +1,592 @@
+{
+ "source": "schema.ts (2026-07-28, all 3197 lines) — focus C: MRTR (InputRequiredResult/InputRequests/InputResponses/requestState), elicitation, sampling, roots, logging, cancellation, progress, extension hooks; cross-checked against pages: basic/patterns/mrtr.md, client/elicitation.md, client/sampling.md, client/roots.md, server/utilities/logging.md, basic/patterns/cancellation.md, basic/patterns/progress.md, basic/index.md (_meta, error codes, resultType), basic/versioning.md, deprecated.md, changelog.md, extensions/overview.md; legacy delta from 2025-11-25_schema.ts and 2025-06-18_schema.ts.",
+ "summary": "2026-07-28 removes server-initiated JSON-RPC requests entirely. Servers obtain client input (elicitation/create, sampling/createMessage, roots/list) only via the Multi Round-Trip Request (MRTR) pattern: on tools/call, prompts/get or resources/read (and NO other method) the server may answer with a Result whose resultType is \"input_required\" (InputRequiredResult) carrying an inputRequests map (server-assigned unique keys -> ElicitRequest | CreateMessageRequest | ListRootsRequest, each a bare {method, params} object with no jsonrpc/id) and/or an opaque requestState string; at least one MUST be present. The client fulfils the requests, then re-issues the ORIGINAL request with a NEW JSON-RPC id, adding inputResponses (same keys -> ElicitResult | CreateMessageResult | ListRootsResult, which are bare objects without resultType/_meta) and echoing requestState byte-for-byte. Servers must treat requestState as attacker-controlled (HMAC/AEAD, principal/TTL/request binding). Elicitation (active) has form mode (flat requestedSchema of String/Number/Boolean/Enum incl. titled oneOf/anyOf, multi-select arrays, legacy enumNames) and url mode (message+url; elicitationId and notifications/elicitation/complete removed). ElicitResult.action in accept|decline|cancel. Sampling, Roots and Logging are DEPRECATED (SEP-2577, earliest removal >=2027-07-28) but fully specified: sampling keeps tools/toolChoice, ToolUseContent/ToolResultContent, ModelPreferences/ModelHint, stopReason incl. \"toolUse\"; includeContext thisServer/allServers deprecated. Logging is opt-in per request via _meta \"io.modelcontextprotocol/logLevel\" (logging/setLevel removed) and notifications/message is request-stream scoped. notifications/cancelled is client->server (stdio only; HTTP cancels by closing the stream) and server->client solely to end a subscriptions/listen stream. Progress via _meta.progressToken. Extensions are negotiated via capabilities.extensions maps keyed by prefixed identifiers (e.g. io.modelcontextprotocol/tasks, io.modelcontextprotocol/ui); reserved _meta keys are enumerated.",
+ "methods": [
+  {
+   "name": "tools/call (MRTR-capable client request)",
+   "direction": "client->server",
+   "capability_gate": "Server must advertise ServerCapabilities.tools (else MethodNotFound -32601). Input requests embedded in the InputRequiredResult are gated by client capabilities declared in _meta['io.modelcontextprotocol/clientCapabilities'] (elicitation.form/url, sampling(.tools/.context), roots).",
+   "params": "CallToolRequestParams extends InputResponseRequestParams: _meta: RequestMetaObject (required; must contain 'io.modelcontextprotocol/protocolVersion': string and 'io.modelcontextprotocol/clientCapabilities': ClientCapabilities; optional 'io.modelcontextprotocol/clientInfo': Implementation, 'io.modelcontextprotocol/logLevel': LoggingLevel [deprecated], progressToken: string|number); name: string (required); arguments?: {[k:string]: unknown}; inputResponses?: InputResponses ({[key:string]: CreateMessageResult|ListRootsResult|ElicitResult}); requestState?: string. (schema.ts l.597-609, 1863-1872)",
+   "result": "CallToolResultResponse.result: CallToolResult | InputRequiredResult (schema.ts l.1848-1850). CallToolResult: resultType 'complete'; content: ContentBlock[]; structuredContent?: unknown; isError?: boolean; _meta?: ResultMetaObject. InputRequiredResult: resultType 'input_required'; inputRequests?: InputRequests; requestState?: string (at least one MUST be present, l.575, 584-595). Not CacheableResult.",
+   "notes": "Every retry is an independent request with a different id (mrtr.md Client Req 3). Servers MAY return InputRequiredResult repeatedly (mrtr.md Server Req 8)."
+  },
+  {
+   "name": "prompts/get (MRTR-capable client request)",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.prompts; embedded input requests gated by client capabilities as for tools/call.",
+   "params": "GetPromptRequestParams extends InputResponseRequestParams: _meta (required, as above); name: string (required); arguments?: {[k:string]: string}; inputResponses?: InputResponses; requestState?: string (schema.ts l.1602-1611)",
+   "result": "GetPromptResultResponse.result: GetPromptResult | InputRequiredResult (l.1650-1652). GetPromptResult: resultType; description?: string; messages: PromptMessage[] (role: 'user'|'assistant'; content: ContentBlock).",
+   "notes": "Only prompts/get, resources/read and tools/call may return InputRequiredResult (mrtr.md 'Supported Requests'; ServerResult union l.3185-3197 includes InputRequiredResult)."
+  },
+  {
+   "name": "resources/read (MRTR-capable client request)",
+   "direction": "client->server",
+   "capability_gate": "ServerCapabilities.resources; embedded input requests gated by client capabilities.",
+   "params": "ReadResourceRequestParams extends ResourceRequestParams, InputResponseRequestParams: _meta (required); uri: string (required, @format uri); inputResponses?: InputResponses; requestState?: string (l.1191-1206)",
+   "result": "ReadResourceResultResponse.result: ReadResourceResult | InputRequiredResult (l.1244-1246). ReadResourceResult extends CacheableResult: resultType; contents: (TextResourceContents|BlobResourceContents)[]; ttlMs: number (>=0, required); cacheScope: 'public'|'private' (required).",
+   "notes": "Note asymmetry: the 'complete' branch is CacheableResult (ttlMs/cacheScope required) while the InputRequiredResult branch is a plain Result."
+  },
+  {
+   "name": "elicitation/create (input request, carried in InputRequiredResult.inputRequests)",
+   "direction": "server->client (embedded in a result; NOT a JSON-RPC request)",
+   "capability_gate": "Client MUST declare ClientCapabilities.elicitation on each request (elicitation.md 'Capabilities'); empty object {} == {form:{}}; server MUST NOT send a mode the client did not declare (elicitation.md; InvalidParams -32602 is listed for 'Server requests an elicitation mode not declared in client capabilities', schema.ts l.370). Client declaring elicitation MUST support at least one of form/url.",
+   "params": "ElicitRequest = { method: 'elicitation/create'; params: ElicitRequestFormParams | ElicitRequestURLParams } (l.2856-2859). No jsonrpc, no id, no _meta field defined on params. ElicitRequestFormParams: mode?: 'form' (absent == form); message: string (required); requestedSchema: { $schema?: string; type: 'object'; properties: {[k:string]: PrimitiveSchemaDefinition}; required?: string[] } (required) (l.2788-2811). ElicitRequestURLParams: mode: 'url' (required); message: string (required); url: string (required, @format uri) (l.2821-2838). NO elicitationId field exists in 2026-07-28. PrimitiveSchemaDefinition = StringSchema | NumberSchema | BooleanSchema | EnumSchema (l.2867-2868). StringSchema: type 'string'; title?, description?: string; minLength?, maxLength?: number; format?: 'email'|'uri'|'date'|'date-time'; default?: string. NumberSchema: type 'number'|'integer'; title?, description?; minimum?, maximum?, default?: number. BooleanSchema: type 'boolean'; title?, description?; default?: boolean. EnumSchema = SingleSelectEnumSchema | MultiSelectEnumSchema | LegacyTitledEnumSchema. UntitledSingleSelectEnumSchema: type 'string'; title?, description?; enum: string[]; default?: string. TitledSingleSelectEnumSchema: type 'string'; title?, description?; oneOf: Array<{const: string; title: string}>; default?: string. UntitledMultiSelectEnumSchema: type 'array'; title?, description?; minItems?, maxItems?: number; items: {type:'string'; enum: string[]}; default?: string[]. TitledMultiSelectEnumSchema: type 'array'; title?, description?; minItems?, maxItems?; items: {anyOf: Array<{const: string; title: string}>}; default?: string[]. LegacyTitledEnumSchema (to be removed, use TitledSingleSelectEnumSchema): type 'string'; title?, description?; enum: string[]; enumNames?: string[]; default?: string (l.2876-3118).",
+   "result": "ElicitResult (carried in inputResponses under the same key; NOT a Result — no resultType/_meta fields declared, l.3134-3149): action: 'accept'|'decline'|'cancel' (required); content?: {[k:string]: string|number|boolean|string[]} — only present when action=='accept' and mode=='form'; omitted for url mode.",
+   "notes": "URL mode accept means user consented to open the URL, not that the out-of-band interaction completed; the server learns completion by inspecting requestState (or its own state) on retry and may return another InputRequiredResult (elicitation.md 'URL Mode'). Clients SHOULD offer manual retry/cancel controls."
+  },
+  {
+   "name": "sampling/createMessage (input request) — DEPRECATED (SEP-2577)",
+   "direction": "server->client (embedded in InputRequiredResult.inputRequests; NOT a JSON-RPC request)",
+   "capability_gate": "Client MUST declare ClientCapabilities.sampling ({} baseline; sampling.tools for tools/toolChoice; sampling.context for includeContext thisServer/allServers). Server MUST NOT send tool-enabled sampling requests to clients without sampling.tools (sampling.md 'Tools in Sampling'); client MUST return an error if tools/toolChoice present without sampling.tools declared (schema.ts l.2143, 2148). InvalidParams -32602 for 'Missing tool result or tool results mixed with other content' (l.371).",
+   "params": "CreateMessageRequest = { method: 'sampling/createMessage'; params: CreateMessageRequestParams } (l.2185-2188). CreateMessageRequestParams (does NOT extend RequestParams; no _meta declared, l.2104-2152): messages: SamplingMessage[] (required); modelPreferences?: ModelPreferences; systemPrompt?: string; includeContext?: 'none'|'thisServer'|'allServers' (default 'none'; thisServer/allServers deprecated SEP-2596); temperature?: number; maxTokens: number (required); stopSequences?: string[]; metadata?: JSONObject; tools?: Tool[]; toolChoice?: ToolChoice {mode?: 'auto'|'required'|'none', default {mode:'auto'}}. SamplingMessage: role: 'user'|'assistant'; content: SamplingMessageContentBlock | SamplingMessageContentBlock[]; _meta?: MetaObject (l.2245-2249). SamplingMessageContentBlock = TextContent | ImageContent | AudioContent | ToolUseContent | ToolResultContent. ToolUseContent: type 'tool_use'; id: string; name: string; input: {[k]: unknown}; _meta? (clients SHOULD preserve for caching). ToolResultContent: type 'tool_result'; toolUseId: string (MUST match a prior ToolUseContent.id); content: ContentBlock[]; structuredContent?: unknown; isError?: boolean (default false); _meta? (SHOULD preserve). ModelPreferences: hints?: ModelHint[] ({name?: string}); costPriority?, speedPriority?, intelligencePriority?: number in [0,1] (l.2508-2579).",
+   "result": "CreateMessageResult extends SamplingMessage (NOT Result; no resultType, l.2210-2228): role; content (single block or array); _meta?; model: string (required); stopReason?: 'endTurn'|'stopSequence'|'maxTokens'|'toolUse'|string (open string).",
+   "notes": "Human-in-the-loop SHOULD (sampling.md). Client MUST respect maxTokens; MAY modify/ignore temperature, stopSequences, metadata, systemPrompt, includeContext, modelPreferences. Hints evaluated in order (first match) — MUST (l.2511-2513); hints treated as substrings, MAY map across providers. Tool-result user messages MUST contain ONLY tool_result blocks; every assistant message with tool_use MUST be followed by a user message of exactly matching tool_results before any other message (sampling.md 'Message Content Constraints'). On error/decline the client simply does not retry (sampling.md 'Error Handling'). Messages SHOULD NOT be retained between separate requests."
+  },
+  {
+   "name": "roots/list (input request) — DEPRECATED (SEP-2577)",
+   "direction": "server->client (embedded in InputRequiredResult.inputRequests)",
+   "capability_gate": "Client MUST declare ClientCapabilities.roots ({} — no listChanged sub-field exists in 2026-07-28) on each request (roots.md 'Capabilities'); servers SHOULD check the capability before use.",
+   "params": "ListRootsRequest = { method: 'roots/list'; params?: { _meta?: MetaObject } } (l.2718-2723). params entirely optional.",
+   "result": "ListRootsResult = { roots: Root[] } (NOT Result; no resultType, l.2742-2744). Root: uri: string (required; MUST start with 'file://'); name?: string; _meta?: MetaObject (l.2758-2775).",
+   "notes": "notifications/roots/list_changed no longer exists (changelog Major 5). Roots are informational, not access control (roots.md). Clients MUST only expose roots with appropriate permissions and validate root URIs against path traversal."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s (primary); notification s->c ONLY to terminate a subscriptions/listen stream (stdio)",
+   "capability_gate": "none",
+   "params": "CancelledNotificationParams extends NotificationParams: _meta?: NotificationMetaObject; requestId: RequestId (string|number, required; MUST correspond to a request the client previously issued — or, server-sent, the id of the subscriptions/listen request); reason?: string (MAY be logged/shown) (l.620-651)",
+   "result": "none (notification; receiver MUST NOT respond)",
+   "notes": "Streamable HTTP: client cancels by closing the SSE response stream; server MUST treat disconnect as cancellation; no notifications/cancelled expected. stdio: client MUST send notifications/cancelled (cancellation.md 'Transport-Specific'). Servers MUST NOT use this notification to cancel anything else (l.637). Invalid/unknown/late cancellations SHOULD be ignored; client SHOULD ignore a response arriving after it cancelled."
+  },
+  {
+   "name": "notifications/progress",
+   "direction": "notification s->c (spec text: 'server MAY send progress notifications to report status of requests the client has issued'; schema says 'inform the receiver')",
+   "capability_gate": "none; opt-in per request via params._meta.progressToken (string|number, unique across active requests)",
+   "params": "ProgressNotificationParams extends NotificationParams: _meta?; progressToken: ProgressToken (required); progress: number (required; MUST increase each notification; MAY be float); total?: number (MAY be float); message?: string (SHOULD be human-readable) (l.1009-1043)",
+   "result": "none",
+   "notes": "Flows on the response stream of the originating request, not on subscriptions/listen (changelog Major 4). MUST only reference tokens of active in-progress requests; MUST stop after completion (progress.md). Receiver is not obligated to send progress (l.65). Timeout clocks MAY be reset on progress but a maximum timeout SHOULD always be enforced (cancellation.md 'Timeouts')."
+  },
+  {
+   "name": "notifications/message — DEPRECATED (SEP-2577)",
+   "direction": "notification s->c",
+   "capability_gate": "Server that emits MUST declare ServerCapabilities.logging ({}; deprecated). Client opts in per request via _meta['io.modelcontextprotocol/logLevel'] (LoggingLevel; deprecated). Server MUST NOT emit for requests lacking that key (l.102-104; logging.md).",
+   "params": "LoggingMessageNotificationParams extends NotificationParams: _meta?; level: LoggingLevel ('debug'|'info'|'notice'|'warning'|'error'|'critical'|'alert'|'emergency', RFC 5424 order) (required); logger?: string; data: unknown (required; any JSON) (l.2031-2083)",
+   "result": "none",
+   "notes": "Request-scoped: MUST be delivered only on the response stream of the request that set the level, before the final response; MUST NOT be delivered on subscriptions/listen or any other stream (logging.md 'Per-request log level'). Unrecognized level -> server SHOULD reject with -32602. logging/setLevel RPC removed. Log messages MUST NOT contain credentials, PII, or internal details aiding attacks."
+  },
+  {
+   "name": "server/discover (capability/extension advertisement)",
+   "direction": "client->server",
+   "capability_gate": "none — servers MUST implement; clients MAY call (l.654-668)",
+   "params": "RequestParams: _meta: RequestMetaObject (required keys as for any request)",
+   "result": "DiscoverResult extends CacheableResult: resultType; supportedVersions: string[] (required); capabilities: ServerCapabilities (required); instructions?: string; ttlMs: number; cacheScope: 'public'|'private'; _meta?: ResultMetaObject ('io.modelcontextprotocol/serverInfo': Implementation SHOULD be present) (l.678-709). ServerCapabilities: experimental?: {[k]: JSONObject}; logging?: JSONObject (deprecated); completions?: JSONObject; prompts?: {listChanged?: boolean}; resources?: {subscribe?: boolean; listChanged?: boolean}; tools?: {listChanged?: boolean}; extensions?: {[extensionId: string]: JSONObject} (keys MUST follow _meta key naming rules with a MANDATORY prefix) (l.793-883). ClientCapabilities (sent per request): experimental?; roots?: {} (deprecated); sampling?: {context?: JSONObject; tools?: JSONObject} (deprecated); elicitation?: {form?: JSONObject; url?: JSONObject}; extensions?: {[extensionId]: JSONObject} (mandatory prefix) (l.716-786).",
+   "notes": "Extensions negotiation: if one party supports an extension the other does not, the supporting party MUST revert to core behavior or reject with an appropriate error (versioning.md 'Extension Negotiation'). Known extension ids: 'io.modelcontextprotocol/tasks' (adds resultType 'task'), 'io.modelcontextprotocol/ui' (settings {mimeTypes: ['text/html;profile=mcp-app']}), 'io.modelcontextprotocol/oauth-client-credentials'. Extensions are disabled by default in SDKs and require explicit opt-in (extensions/overview.md)."
+  },
+  {
+   "name": "subscriptions/listen + notifications/subscriptions/acknowledged (referenced by cancellation/progress rules)",
+   "direction": "client->server request; s->c notification",
+   "capability_gate": "listChanged/subscribe server capability flags determine which filter types the server honours (unsupported types omitted from acknowledgement, l.1371-1379)",
+   "params": "SubscriptionsListenRequestParams: _meta; notifications: SubscriptionFilter {toolsListChanged?, promptsListChanged?, resourcesListChanged?: boolean; resourceSubscriptions?: string[]} (l.1270-1302). SubscriptionsAcknowledgedNotificationParams: notifications: SubscriptionFilter (subset honoured).",
+   "result": "SubscriptionsListenResult: resultType; _meta: SubscriptionsListenResultMetaObject with REQUIRED 'io.modelcontextprotocol/subscriptionId': RequestId (== the listen request id); sent only on graceful teardown (l.1326-1364).",
+   "notes": "Every notification delivered on the stream MUST carry _meta['io.modelcontextprotocol/subscriptionId'] (l.120-134); the acknowledged notification MUST be the first message carrying that id (l.1386-1391). notifications/progress and notifications/message are NOT delivered on this stream."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send server-to-client requests (roots/list, sampling/createMessage, elicitation/create) only via the MRTR pattern; the previous server-initiated request pattern is no longer supported.",
+   "cite": "mrtr.md intro Note"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Return an InputRequiredResult on any client request other than prompts/get, resources/read, tools/call.",
+   "cite": "mrtr.md 'Supported Requests'; schema.ts l.1245,1651,1849"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Include at least one of inputRequests or requestState in every InputRequiredResult.",
+   "cite": "schema.ts l.575; mrtr.md Server Req 6"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "inputRequests keys are server-assigned and unique within the scope of the request; values are exactly one of ElicitRequest, CreateMessageRequest, ListRootsRequest.",
+   "cite": "mrtr.md Server Req 2; schema.ts l.537-555"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Set resultType 'input_required' on InputRequiredResult and 'complete' on ordinary results; servers implementing 2026-07-28 MUST include resultType on every result.",
+   "cite": "schema.ts l.209-236; basic/index.md 'ResultType'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat an absent resultType (server implementing an earlier protocol version) as 'complete'; treat any unrecognized resultType value as invalid.",
+   "cite": "schema.ts l.229-232; basic/index.md 'ResultType'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Include in inputRequests any request kind/mode the client has not declared in _meta clientCapabilities (e.g. no elicitation/create if no elicitation capability; no url mode if only form declared; no tools in sampling without sampling.tools).",
+   "cite": "mrtr.md Server Req 7; elicitation.md 'Capabilities'; sampling.md 'Tools in Sampling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat requestState received from a client as attacker-controlled input; if it influences authorization, resource access or business logic, protect its integrity (HMAC/AEAD) and reject state failing verification.",
+   "cite": "mrtr.md Server Req 4; 'Security Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Embed in the integrity-protected requestState and verify on receipt: the authenticated principal, a short TTL, and an identifier of the originating request (method + digest of salient params).",
+   "cite": "mrtr.md Server Req 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Enforce single-use of a requestState server-side where at-most-once consumption is required (e.g. one-time redemptions).",
+   "cite": "mrtr.md Server Req 5 Warning"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Assume clients will fulfill inputRequests or retry the original request.",
+   "cite": "mrtr.md Server Req 8"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "If InputRequiredResult contains inputRequests, construct all requested inputs before retrying; if it does not, the client MAY retry immediately.",
+   "cite": "mrtr.md Client Req 1"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Echo requestState back exactly (byte-for-byte) on the retry; MUST NOT inspect, parse, modify or make assumptions about it; MUST NOT include requestState in the retry if none was returned.",
+   "cite": "mrtr.md Client Req 2; schema.ts l.589-594"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Use a different JSON-RPC id for the retry than for the initial request.",
+   "cite": "mrtr.md Client Req 3"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Use inputRequests/requestState from one InputRequiredResult on any request other than the retry of that original request (e.g. parallel requests).",
+   "cite": "mrtr.md Client Req 4"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For each key in the InputRequiredResult.inputRequests, place the corresponding response under the same key in params.inputResponses of the retry.",
+   "cite": "schema.ts l.601-605; mrtr.md 'InputResponses'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Validate inputResponses is well-formed and parseable; return JSON-RPC errors for protocol errors; ignore unrecognized extra entries; if required information is missing, respond with a new InputRequiredResult rather than an error.",
+   "cite": "mrtr.md 'Error Handling'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Use form-mode elicitation for sensitive information (passwords, API keys, access tokens, payment credentials); MUST use URL mode for such interactions.",
+   "cite": "elicitation.md Warning; 'Form Mode Security' 1"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Provide UI that makes clear which server is requesting information; provide clear decline and cancel options; for form mode allow review/modification before sending; for URL mode clearly display target domain/host and obtain consent before navigation.",
+   "cite": "elicitation.md Warning; 'Security Considerations' 2"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Declare the elicitation capability in _meta clientCapabilities on each request when supporting elicitation; support at least one mode; treat {} as {form:{}}.",
+   "cite": "elicitation.md 'Capabilities'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Treat elicitation requests without a mode field as form mode.",
+   "cite": "elicitation.md 'Elicitation Requests'; schema.ts l.2792"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Form-mode requests MUST specify mode 'form' or omit mode, and include requestedSchema (flat object, primitive properties only); URL-mode requests MUST specify mode 'url', message, and a valid url.",
+   "cite": "elicitation.md 'Form Mode'/'URL Mode'; schema.ts l.2788-2838"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Pre-populate form fields with schema default values when defaults are supported; validate all responses against the provided schema.",
+   "cite": "elicitation.md 'Requested Schema'; 'Form Mode Security' 2"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Validate received elicitation data matches the requested schema.",
+   "cite": "elicitation.md 'Form Mode Security' 3"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "ElicitResult.action is one of accept|decline|cancel; content only when action=='accept' and mode was form; omitted for URL mode.",
+   "cite": "schema.ts l.3134-3149; elicitation.md 'Response Actions'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Handle user decline/cancel and client failure to process elicitation; SHOULD NOT assume elicitation always succeeds.",
+   "cite": "elicitation.md 'Error Handling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Bind elicitation requests to the client and user identity; if state is stored, protect it and derive user identity from MCP authorization credentials (e.g. sub) for remote servers.",
+   "cite": "elicitation.md 'Security Considerations' 1; 'Statefulness'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Include sensitive end-user information (credentials, PII) in a URL-mode url; MUST NOT provide a pre-authenticated URL; SHOULD NOT include clickable URLs in form-mode fields; SHOULD use HTTPS outside development.",
+   "cite": "elicitation.md 'Safe URL Handling' (servers)"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Pre-fetch a URL-mode url or its metadata; MUST NOT open it without explicit user consent; MUST show the full URL before consent; MUST open it in a manner that prevents the client/LLM from inspecting content or inputs; SHOULD highlight the domain, warn on Punycode/suspicious URIs, and not render URLs clickable except the url field.",
+   "cite": "elicitation.md 'Safe URL Handling' (clients)"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Verify the identity of the user who opens a URL-mode URL and ensure it is the same user who started the elicitation (phishing mitigation); the mechanism MUST be resilient to attacker modification of the URL.",
+   "cite": "elicitation.md 'Phishing'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Rely on URL-mode elicitation to authorize users for the MCP server itself; MUST NOT transmit third-party credentials obtained via URL mode to the client; MUST NOT use the client's credentials for third-party services (token passthrough).",
+   "cite": "elicitation.md 'URL Mode Elicitation for OAuth Flows'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Provide manual controls to retry or cancel the original request after a URL-mode accept, since completion is only discovered on retry.",
+   "cite": "elicitation.md 'URL Mode Elicitation Requests'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Declare sampling (and sampling.tools / sampling.context as applicable) in _meta clientCapabilities to receive sampling / tool-enabled / context-inclusion sampling requests.",
+   "cite": "sampling.md 'Capabilities', 'Tools in Sampling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Return an error if tools or toolChoice is present in a sampling request but sampling.tools was not declared.",
+   "cite": "schema.ts l.2143, 2148"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Respect maxTokens in sampling requests.",
+   "cite": "sampling.md 'Sampling Parameters'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Evaluate ModelPreferences.hints in order (first match wins); SHOULD prioritize hints over numeric priorities but MAY use priorities to break ties; SHOULD treat hint name as substring; MAY map to another provider's model.",
+   "cite": "schema.ts l.2511-2516, 2570-2577"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "A user message containing tool_result blocks MUST contain only tool_result blocks; every assistant message containing tool_use blocks MUST be followed by a user message consisting entirely of tool_result blocks matching every tool_use id, before any other message; server MUST respond to stopReason 'toolUse' accordingly.",
+   "cite": "sampling.md 'Message Content Constraints', 'Security Considerations' 6; schema.ts l.2451"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Omit includeContext or use 'none'; only use 'thisServer'/'allServers' if client declares sampling.context (deprecated values).",
+   "cite": "schema.ts l.2118-2123; sampling.md Note"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Keep a human in the loop for sampling: review/edit prompts before sending and review responses before returning; implement approval controls, rate limiting, iteration limits for tool loops.",
+   "cite": "sampling.md Warning, 'Security Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Preserve _meta on ToolUseContent and ToolResultContent when replaying them in subsequent sampling requests (caching optimizations).",
+   "cite": "schema.ts l.2427-2430, 2480-2483"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "Adopt Sampling, Roots or Logging in new implementations; existing implementations SHOULD migrate (LLM provider APIs; tool params/resource URIs/config; stderr/OpenTelemetry). Features remain for >=12 months (earliest removal: first revision on/after 2027-07-28).",
+   "cite": "sampling.md/roots.md/logging.md deprecation Warnings; deprecated.md; schema.ts @deprecated markers l.106,724,736,801,2022,2049,2069,2098,2157,2179,2204,2239,2252,2400,2439,2502,2560,2712,2736,2752"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Declare roots capability in _meta clientCapabilities on each request when supporting roots; Root.uri MUST be a file:// URI.",
+   "cite": "roots.md 'Capabilities', 'Root'; schema.ts l.2760"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Only expose roots with appropriate permissions; validate root URIs against path traversal; implement access controls; monitor root accessibility.",
+   "cite": "roots.md 'Security Considerations' 1"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Check for roots capability before use; respect root boundaries; validate paths against roots; handle roots becoming unavailable; cache root information appropriately.",
+   "cite": "roots.md 'Security Considerations' 2, 'Implementation Guidelines' 2"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Declare ServerCapabilities.logging when emitting notifications/message.",
+   "cite": "logging.md 'Capabilities'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Emit notifications/message for a request whose _meta lacks 'io.modelcontextprotocol/logLevel'; when present, MAY emit at or above that level only on that request's response stream before the final response; MUST NOT deliver on subscriptions/listen or any other stream.",
+   "cite": "schema.ts l.100-104; logging.md 'Per-request log level'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Reject a request whose logLevel value is not a recognized level with -32602; internal errors -32603; rate limit log messages; remove sensitive information.",
+   "cite": "logging.md 'Error Handling', 'Implementation Considerations'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Log messages MUST NOT contain credentials/secrets, PII, or internal system details aiding attacks.",
+   "cite": "logging.md 'Security'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Send notifications/cancelled (stdio) to terminate a previously issued in-progress request; on Streamable HTTP close the response stream instead (no notification expected).",
+   "cite": "cancellation.md intro, 'Transport-Specific Cancellation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On Streamable HTTP treat a client disconnect as cancellation of that request.",
+   "cite": "cancellation.md 'Transport-Specific Cancellation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On stdio, send notifications/cancelled referencing the request ID to cancel (including on timeout).",
+   "cite": "cancellation.md 'Transport-Specific Cancellation', 'Timeouts'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Send notifications/cancelled referencing the subscriptions/listen request ID when tearing down that stream (stdio); MUST NOT send notifications/cancelled for any other purpose.",
+   "cite": "cancellation.md intro, 'Behavior Requirements' 2; schema.ts l.637"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Cancellation notifications MUST only reference requests previously issued by the client and believed still in progress.",
+   "cite": "cancellation.md 'Behavior Requirements' 1; schema.ts l.624"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "On receiving cancellation: stop processing, free resources, and not send a response; MAY ignore if request unknown/completed/uncancellable.",
+   "cite": "cancellation.md 'Behavior Requirements' 3-4"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Ignore any response to a cancelled request arriving afterward; ignore invalid cancellation notifications (unknown ids, completed, malformed).",
+   "cite": "cancellation.md 'Behavior Requirements' 5, 'Error Handling'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Handle cancellation race conditions gracefully (notification may arrive after completion/response).",
+   "cite": "cancellation.md 'Timing Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Establish timeouts for all sent requests; cancel and stop waiting on expiry; SDKs SHOULD allow per-request timeout configuration; MAY reset the clock on progress but SHOULD enforce a maximum timeout regardless.",
+   "cite": "cancellation.md 'Timeouts'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "progressToken MUST be a string or integer and unique across all active requests.",
+   "cite": "progress.md 'Progress Flow'; schema.ts l.165"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "progress value MUST increase with each notification even if total unknown; notifications MUST only reference tokens of active in-progress requests and MUST stop after completion.",
+   "cite": "progress.md 'Progress Flow', 'Behavior Requirements', 'Implementation Notes'"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Choose not to send progress, send at any frequency, omit total.",
+   "cite": "progress.md 'Behavior Requirements' 2"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Track active progress tokens; rate limit progress notifications.",
+   "cite": "progress.md 'Implementation Notes'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Every request's params._meta MUST carry 'io.modelcontextprotocol/protocolVersion' (string) and 'io.modelcontextprotocol/clientCapabilities' (ClientCapabilities; {} means no optional capabilities); SHOULD carry 'io.modelcontextprotocol/clientInfo' unless configured otherwise.",
+   "cite": "schema.ts l.63-98; basic/index.md 'Per-request protocol fields'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Reject a request missing required _meta fields with -32602 (HTTP 400); MUST NOT infer capabilities from prior requests; if a required client capability is missing return MissingRequiredClientCapabilityError -32021 with data.requiredCapabilities (HTTP 400); if protocol version unsupported return UnsupportedProtocolVersionError -32022 with data.supported/requested (HTTP 400); on HTTP the _meta protocolVersion MUST match the MCP-Protocol-Version header else 400.",
+   "cite": "schema.ts l.69-98, 434-526; basic/index.md; versioning.md"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include 'io.modelcontextprotocol/serverInfo' (Implementation) in every result's _meta unless configured otherwise.",
+   "cite": "schema.ts l.143-158; basic/index.md 'Per-response protocol fields'"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "Use clientInfo/serverInfo to change behavior or for security decisions (self-reported, unverified).",
+   "cite": "schema.ts l.85-88, 152-155"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "_meta key names: optional prefix = dot-separated labels (start letter, end letter/digit, interior letters/digits/hyphens) followed by '/'; second label 'modelcontextprotocol' or 'mcp' is reserved; name (unless empty) starts/ends alphanumeric, interior may include '-', '_', '.'; implementations MUST NOT make assumptions about values at reserved keys; SHOULD use reverse-DNS prefixes.",
+   "cite": "schema.ts l.34-54; basic/index.md '_meta'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extension identifiers in capabilities.extensions MUST follow _meta key naming rules with a MANDATORY prefix; when one party supports an extension the other does not, the supporting party MUST revert to core behavior or reject with an appropriate error.",
+   "cite": "schema.ts l.774-785, 871-882; versioning.md 'Extension Negotiation'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "_meta keys 'traceparent', 'tracestate', 'baggage' (unprefixed exception) MUST follow W3C Trace Context / W3C Baggage formats when present.",
+   "cite": "basic/index.md 'OpenTelemetry trace context'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Emit error codes -32002 or -32042 in this protocol version; MUST NOT emit undefined codes in -32020..-32099; MUST use defined codes only with their specified meanings; new codes SHOULD be allocated outside -32768..-32000. Clients SHOULD still accept -32002 from legacy servers.",
+   "cite": "basic/index.md 'Error Codes'; schema.ts l.407-425"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return MethodNotFound -32601 for methods not implemented or gated behind an unadvertised server capability; -32021 (not -32601) when a required CLIENT capability is missing.",
+   "cite": "schema.ts l.343-359"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Every notification delivered on a subscriptions/listen stream MUST carry _meta['io.modelcontextprotocol/subscriptionId'] (the listen request's JSON-RPC id); MUST NOT send notification types not opted in; acknowledgement MUST precede any notification for that subscription.",
+   "cite": "schema.ts l.120-134, 1265-1266, 1386-1391"
+  }
+ ],
+ "wire_details": [
+  "LATEST_PROTOCOL_VERSION = \"2026-07-28\"; JSONRPC_VERSION = \"2.0\" (schema.ts l.30-32)",
+  "resultType values: \"complete\", \"input_required\" (core); extensions may add e.g. \"task\" (io.modelcontextprotocol/tasks); unrecognized value MUST be treated as invalid; absent => \"complete\" (legacy servers)",
+  "InputRequiredResult JSON shape: {\"resultType\":\"input_required\",\"inputRequests\":{\"<key>\":{\"method\":\"elicitation/create\"|\"sampling/createMessage\"|\"roots/list\",\"params\":{...}}},\"requestState\":\"<opaque string>\"} — input request objects carry NO jsonrpc/id",
+  "Retry params additions: \"inputResponses\":{\"<key>\":<ElicitResult|CreateMessageResult|ListRootsResult>}, \"requestState\":\"<echoed>\" — allowed on tools/call, prompts/get, resources/read params",
+  "Method names: \"elicitation/create\", \"sampling/createMessage\", \"roots/list\" (input requests); \"notifications/cancelled\", \"notifications/progress\", \"notifications/message\" (deprecated), \"notifications/subscriptions/acknowledged\", \"server/discover\", \"subscriptions/listen\", \"tools/call\", \"prompts/get\", \"resources/read\"",
+  "Removed method/notification names (must NOT be relied upon in 2026-07-28): \"initialize\", \"notifications/initialized\", \"ping\", \"logging/setLevel\", \"notifications/roots/list_changed\", \"notifications/elicitation/complete\", \"resources/subscribe\", \"resources/unsubscribe\", \"tasks/*\" (moved to extension)",
+  "Reserved _meta keys: \"progressToken\", \"io.modelcontextprotocol/protocolVersion\" (request, required), \"io.modelcontextprotocol/clientInfo\" (request, SHOULD), \"io.modelcontextprotocol/clientCapabilities\" (request, required), \"io.modelcontextprotocol/logLevel\" (request, optional, deprecated), \"io.modelcontextprotocol/serverInfo\" (result, SHOULD), \"io.modelcontextprotocol/subscriptionId\" (notifications on listen stream + SubscriptionsListenResult, required there), \"traceparent\", \"tracestate\", \"baggage\" (OTel, unprefixed exception)",
+  "Reserved _meta prefix rule: any prefix whose SECOND label is \"modelcontextprotocol\" or \"mcp\" (e.g. io.modelcontextprotocol/, dev.mcp/, org.modelcontextprotocol.api/, com.mcp.tools/); com.example.mcp/ is NOT reserved",
+  "Extension identifiers seen in material: \"io.modelcontextprotocol/tasks\" ({}), \"io.modelcontextprotocol/ui\" ({\"mimeTypes\":[\"text/html;profile=mcp-app\"]}), \"io.modelcontextprotocol/oauth-client-credentials\"",
+  "Error codes: -32700 PARSE_ERROR, -32600 INVALID_REQUEST, -32601 METHOD_NOT_FOUND, -32602 INVALID_PARAMS (unknown tool/prompt, bad args, bad cursor, invalid log level, undeclared elicitation mode, sampling tool-result violations, missing required _meta, resource not found), -32603 INTERNAL_ERROR, -32020 HEADER_MISMATCH (HTTP 400), -32021 MISSING_REQUIRED_CLIENT_CAPABILITY (data.requiredCapabilities: ClientCapabilities; HTTP 400), -32022 UNSUPPORTED_PROTOCOL_VERSION (data.supported: string[], data.requested: string; HTTP 400); reserved-never-reuse: -32002 (legacy resource not found), -32042 (2025-11-25 URL elicitation required); -32000..-32019 implementation-defined; -32020..-32099 spec-reserved, allocated sequentially",
+  "HTTP header: MCP-Protocol-Version MUST equal _meta['io.modelcontextprotocol/protocolVersion'] else 400 Bad Request (schema.ts l.71-74); Mcp-Method / Mcp-Name headers required on Streamable HTTP POST (changelog Minor 4; details in transport page, not in focus)",
+  "LoggingLevel enum (RFC 5424 order): debug, info, notice, warning, error, critical, alert, emergency",
+  "ElicitResult.action enum: accept, decline, cancel; ElicitResult.content value types: string | number | boolean | string[]",
+  "Elicitation mode enum: \"form\" (default when absent), \"url\"; StringSchema.format enum: email, uri, date, date-time; NumberSchema.type: number | integer; multi-select: type \"array\" with items.enum or items.anyOf[{const,title}]; titled single: oneOf[{const,title}]; legacy enumNames: string[]",
+  "Sampling: stopReason standard values endTurn, stopSequence, maxTokens, toolUse (open string); toolChoice.mode: auto (default), required, none; includeContext: none (default), thisServer, allServers (deprecated); content block types text, image, audio, tool_use, tool_result; roles user, assistant; ModelPreferences priorities in [0,1]",
+  "Root.uri MUST start with \"file://\"",
+  "ProgressToken: string | number; progress/total: number (floats allowed)",
+  "Cancellation on Streamable HTTP = client closes SSE response stream (no message); on stdio = notifications/cancelled {requestId, reason?}",
+  "Icons MIME: clients rendering icons MUST support image/png, image/jpeg (and image/jpg); SHOULD support image/svg+xml, image/webp"
+ ],
+ "sdk_implications": [
+  "Type model: model InputRequest as a discriminated union on method (elicitation/create | sampling/createMessage | roots/list) of bare {method, params} objects WITHOUT jsonrpc/id; model InputResponse (ElicitResult | CreateMessageResult | ListRootsResult) as bare objects WITHOUT resultType/_meta. Do not reuse the JSONRPCRequest/Result envelope classes for them. CreateMessageRequestParams, ElicitRequest*Params have no _meta; ListRootsRequest.params is optional with only _meta?.",
+  "Result parsing: every deserialized result must be dispatched on resultType ('complete' | 'input_required' | extension values advertised via capabilities); absent => 'complete' (legacy); unknown => error. Server-side Result serializer must always emit resultType.",
+  "Server SDK: allow tool/prompt/resource handlers to return an InputRequiredResult (or throw a typed 'NeedInput' exception) containing inputRequests + requestState; enforce (a) at least one of the two, (b) unique keys, (c) only the 3 permitted request kinds, (d) only on tools/call, prompts/get, resources/read, (e) capability gating against the per-request ClientCapabilities (drop/refuse elicitation without elicitation cap, url mode without elicitation.url, sampling without sampling, tools without sampling.tools, roots without roots) — surface as -32021 MissingRequiredClientCapability when the operation cannot proceed.",
+  "Server SDK: provide a requestState helper that serializes handler state and applies HMAC/AEAD with a server key, embedding principal, expiry, and originating method+params digest; verify and reject on retry; expose an opt-out only for cases where tampering can only cause request failure. Never store server-side session state for MRTR (statelessness).",
+  "Server SDK: on retry, expose inputResponses to the handler keyed identically; if responses are missing, re-issue InputRequiredResult (not an error); ignore unknown keys; validate ElicitResult.content against requestedSchema (SHOULD) and validate sampling tool-use/tool-result balance.",
+  "Client SDK: implement an MRTR driver loop around Call-Tool/Get-Prompt/Read-Resource: on input_required, invoke registered handlers (elicitation form/url handler, sampling handler, roots provider), build inputResponses with same keys, echo requestState verbatim (never parse), re-issue with a fresh id, repeat until complete; cap iterations; never leak inputResponses/requestState into other concurrent requests; provide cancel/retry controls for url-mode elicitation.",
+  "Client SDK: compute ClientCapabilities from registered handlers and stamp it plus protocolVersion (and clientInfo unless disabled) into _meta on every outgoing request; treat elicitation {} as form-only; refuse sampling requests with tools/toolChoice when sampling.tools not declared (return error/decline).",
+  "Client SDK elicitation: form renderer must support String (minLength/maxLength/format email|uri|date|date-time/default), Number/Integer (minimum/maximum/default), Boolean(default), single-select enum (enum[] or oneOf[{const,title}] or legacy enum+enumNames), multi-select (type array, items.enum or items.anyOf[{const,title}], minItems/maxItems, default string[]); reject nested objects/arrays of objects; pre-populate defaults; produce content values as string|number|boolean|string[]; URL mode: show full URL, no prefetch, explicit consent, open in non-inspectable browser, return {action:'accept'} without content.",
+  "Client SDK sampling (deprecated but required for dual-era/back-compat): implement ModelPreferences hint matching (ordered, substring, provider mapping), honor maxTokens, allow user approval hooks before request and before returning result, preserve _meta on tool_use/tool_result across turns, validate tool-result-only user messages, support content as single block or array, return model + stopReason. Mark the whole API surface [Obsolete]/deprecated with SEP-2577 reference.",
+  "Logging: server SDK exposes a per-request logger that emits notifications/message only if the incoming request's _meta had io.modelcontextprotocol/logLevel, filtered at/above that level, written to the same response stream before the final response; reject unknown levels with -32602; do NOT expose logging/setLevel; recommend stderr/OTel in docs and mark deprecated.",
+  "Progress: server SDK exposes a progress reporter bound to the request's _meta.progressToken (no-op if absent), enforcing monotonic increase and stopping at completion; client SDK generates unique tokens per active request, routes notifications/progress by token to the awaiting call, optionally resets the timeout on progress but enforces a hard maximum.",
+  "Cancellation: client SDK on stdio sends notifications/cancelled {requestId, reason} on user cancel or timeout and discards late responses; on Streamable HTTP it aborts the HTTP response stream instead. Server SDK maps stdio notifications/cancelled to a CancellationToken for the handler and suppresses the response; on HTTP it maps client disconnect to cancellation; server sends notifications/cancelled only for subscriptions/listen teardown on stdio.",
+  "Timeouts: per-request configurable timeouts on both sides with a global maximum.",
+  "Capabilities/extensions: ClientCapabilities/ServerCapabilities types must include extensions: map<string, object> with key validation (mandatory prefix, _meta naming grammar) and experimental maps; extension support must be opt-in and default-off; provide hooks so an extension (e.g. io.modelcontextprotocol/tasks) can register additional resultType values, _meta keys and methods; fallback/reject behavior when peer lacks the extension.",
+  "_meta handling: implement a validator for _meta key grammar; treat reserved-key values as opaque; pass through unknown keys; support OTel traceparent/tracestate/baggage propagation.",
+  "Error handling: define constants for -32020/-32021/-32022 with typed data payloads; never emit -32002/-32042; accept -32002 from legacy servers; local errors (timeouts) must not be confusable with peer errors.",
+  "Dual-era client: detect server era (stdio: probe server/discover; HTTP: inspect 400 body) and, for legacy servers, fall back to initialize handshake where server-initiated JSON-RPC requests (elicitation/create, sampling/createMessage, roots/list with ids) must be handled as real requests with real responses, plus notifications/roots/list_changed, logging/setLevel, ping, notifications/elicitation/complete, elicitationId, -32042 URLElicitationRequiredError.",
+  "Schema validation: JSON Schema 2020-12 by default for tool schemas; elicitation requestedSchema is a restricted subset validated by SDK-specific logic; no network $ref dereferencing by default."
+ ],
+ "legacy_delta": [
+  "Transport of client-feature requests: 2025-11-25/2025-06-18 — server sends real JSON-RPC requests (ElicitRequest/CreateMessageRequest/ListRootsRequest extend JSONRPCRequest/Request with id) and awaits a JSON-RPC response; 2026-07-28 — embedded as bare {method, params} objects inside InputRequiredResult.inputRequests; responses returned in the retry's params.inputResponses; no server-initiated requests at all (breaking, SEP-2322).",
+  "New in 2026-07-28: Result.resultType (required), InputRequiredResult, InputRequests, InputResponses, InputResponseRequestParams (inputResponses, requestState) on tools/call, prompts/get, resources/read. None exist in legacy schemas.",
+  "Elicitation URL mode: 2025-11-25 ElicitRequestURLParams has elicitationId: string (required, opaque) and there is a notifications/elicitation/complete {elicitationId} notification and URLElicitationRequiredError (-32042, data.elicitations: ElicitRequestURLParams[]); all three removed in 2026-07-28 (changelog Minor 11); correlation now via requestState. 2025-06-18 has no URL mode at all (ElicitRequest params: message + requestedSchema only; no mode field).",
+  "Elicitation schemas: 2025-06-18 EnumSchema is only {type:'string', enum, enumNames?} (no default, no titled oneOf, no multi-select; StringSchema/NumberSchema have no default); 2025-11-25 introduced Untitled/Titled Single/MultiSelect enum schemas, LegacyTitledEnumSchema and default fields; 2026-07-28 keeps 2025-11-25 shapes unchanged. ElicitResult.content in 2025-06-18 is string|number|boolean only; 2025-11-25+ adds string[].",
+  "ElicitResult / CreateMessageResult / ListRootsResult: legacy versions extend Result (carry _meta and, for JSON-RPC, jsonrpc/id); in 2026-07-28 they are bare objects without resultType/_meta.",
+  "Elicitation/sampling params in 2025-11-25 extend TaskAugmentedRequestParams (task?: {ttl?}); tasks moved to extension io.modelcontextprotocol/tasks in 2026-07-28 and removed from core params. ClientCapabilities.tasks / ServerCapabilities.tasks removed; replaced by extensions map.",
+  "Capabilities: 2025-11-25 ClientCapabilities.roots = {listChanged?: boolean}; 2026-07-28 roots = {} (no listChanged) and notifications/roots/list_changed removed. sampling {context?, tools?} and elicitation {form?, url?} shapes are the same in 2025-11-25 and 2026-07-28 (2025-06-18 had sampling: object, elicitation: object with no sub-keys and no tools-in-sampling). experimental values typed JSONObject vs object. New extensions?: map on both capability objects.",
+  "Capabilities are declared per request in _meta['io.modelcontextprotocol/clientCapabilities'] (2026) instead of once in initialize (legacy); servers MUST NOT infer from prior requests.",
+  "Sampling tools/toolChoice/ToolUseContent/ToolResultContent and stopReason 'toolUse': introduced in 2025-11-25, unchanged in 2026-07-28; absent in 2025-06-18 (SamplingMessage.content single Text|Image|Audio; stopReason endTurn|stopSequence|maxTokens|string). includeContext thisServer/allServers: soft-deprecated 2025-11-25, formally Deprecated 2026-07-28 (SEP-2596).",
+  "Deprecation status: Sampling, Roots, Logging fully active in 2025-11-25; Deprecated in 2026-07-28 (SEP-2577), earliest removal first revision on/after 2027-07-28. A dual-era SDK must keep them functional.",
+  "Logging: 2025-11-25 has logging/setLevel request (SetLevelRequestParams.level) and notifications/message may be sent automatically if no setLevel was received; 2026-07-28 removes logging/setLevel, uses per-request _meta logLevel, and forbids notifications/message without it; scoped to the request's response stream.",
+  "Cancellation: legacy notifications/cancelled is bidirectional for any request (with note not to use for tasks); 2026-07-28 restricts server-sent cancellation to subscriptions/listen teardown and makes HTTP cancellation = closing the stream. Legacy 'MUST NOT cancel initialize' rule is moot (initialize removed).",
+  "Progress: semantics unchanged (progressToken in _meta; progress/total/message); 2026-07-28 clarifies progress flows on the originating request's response stream, never on subscriptions/listen.",
+  "Error codes: -32002 resource-not-found (legacy) replaced by -32602; -32042 (2025-11-25) removed; new -32020/-32021/-32022 (renumbered from draft -32001/-32003/-32004).",
+  "Removed core methods vs 2025-11-25: initialize, notifications/initialized, ping, logging/setLevel, notifications/roots/list_changed, notifications/elicitation/complete, resources/subscribe, resources/unsubscribe, tasks/get|result|cancel|list, notifications/tasks/status; added: server/discover, subscriptions/listen, notifications/subscriptions/acknowledged.",
+  "Era detection for dual-era clients: stdio probe with server/discover (non-modern error/timeout => legacy => initialize); HTTP: modern request then inspect 400 body for recognized modern error; cache era per server process/origin (versioning.md 'Backward Compatibility')."
+ ],
+ "open_questions": [
+  "schema.ts declares no _meta on CreateMessageRequestParams / ElicitRequest*Params and only an optional _meta on ListRootsRequest.params; whether SDKs should accept/forward _meta (e.g. progressToken, OTel keys) on embedded input requests is unspecified.",
+  "ElicitResult, CreateMessageResult and ListRootsResult are not Result subtypes in 2026-07-28 (no resultType/_meta). Whether an SDK should tolerate legacy-shaped responses containing _meta inside inputResponses (spec says unrecognized extra data SHOULD be ignored) is implied but not explicit.",
+  "The schema comment for InputRequiredResult uses plain (non-doc) comments for inputRequests/requestState; schema.json generation of descriptions for these fields should be verified against 2026-07-28_schema.json.",
+  "How a client should respond when it cannot fulfil an inputRequest (e.g. user declines sampling): sampling.md/roots.md say the client 'does not need to replay'; for elicitation, decline/cancel actions exist. Whether a client MAY retry with a partial inputResponses map (omitting a key) and what the server should do is only covered by the SHOULD 're-request missing info' rule.",
+  "The exact HTTP mapping for MRTR retries (same POST endpoint, headers Mcp-Method/Mcp-Name, x-mcp-header extraction for retries) lives in the Streamable HTTP page (out of this focus) and should be cross-checked by the transport extraction.",
+  "Sampling ToolChoice 'required'/'none' enforcement and iteration limits are SHOULD-level; no error code is specified for a client refusing a sampling request (unlike tools-without-capability which is an unspecified 'error').",
+  "notifications/progress direction: schema text says 'inform the receiver' (bidirectional wording) while progress.md speaks only of server->client; whether a client may send progress for input requests it is fulfilling is unspecified (and moot under MRTR since input requests are not in-flight JSON-RPC requests).",
+  "The io.modelcontextprotocol/tasks extension defines resultType 'task', methods tasks/get, tasks/update and its own _meta keys; the full normative text is in the ext-tasks repository and was not extracted here.",
+  "LegacyTitledEnumSchema is marked 'will be removed in a future version' but is not listed in the deprecated features registry; its lifecycle status is ambiguous."
+ ]
+}

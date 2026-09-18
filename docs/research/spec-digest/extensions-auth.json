@@ -1,0 +1,287 @@
+{
+ "legacy_delta": [
+  "Both extensions are new (ext-auth repo, separate from core spec) and did not exist in 2025-06-18 or 2025-11-25 revisions as core content; they are optional extensions layered on top of whichever core authorization spec revision is in use.",
+  "Enterprise-Managed Authorization spec references the 2025-11-25 revision's Client ID Metadata Documents section (/specification/2025-11-25/basic/authorization#client-id-metadata-documents) for unregistered-client fallback — confirm this mechanism is present/unchanged in 2026-07-28 core spec before SDK implementation; if 2026-07-28 renamed or moved CIMD, update the client id fallback logic accordingly.",
+  "Extension negotiation itself (io.modelcontextprotocol/clientCapabilities in _meta, extensions field, server/discover advertising) is a 2026-07-28-era mechanism per extensions__overview.md reference; SDK must confirm server/discover exists in this revision's core spec (not directly read in this task) before wiring capability advertisement."
+ ],
+ "methods": [
+  {
+   "name": "POST /token (Authorization Server token endpoint) — client_credentials grant",
+   "direction": "client->server (HTTP, not JSON-RPC)",
+   "params": "grant_type=client_credentials (fixed); EITHER client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer + client_assertion=<signed JWT> (client_id omitted per RFC7523 §3, conveyed via JWT 'sub' claim) OR client_id + client_secret (form body); optional resource=<MCP server resource URI>; optional scope=<space-delimited scopes>. Content-Type: application/x-www-form-urlencoded.",
+   "result": "OAuth 2.0 Token Response JSON: access_token, token_type (Bearer), expires_in, scope (typical fields; not enumerated exhaustively in source doc — standard OAuth2.1 token response applies).",
+   "notes": "Defined in oauth-client-credentials.mdx 'Flow Steps' + 'Examples'. JWT assertion claims per doc page: iss=Client ID, sub=Client ID, aud=AS token endpoint URL, exp, iat. Source: pages/extensions__auth__oauth-client-credentials.md lines 51-61; raw spec 'Examples' section."
+  },
+  {
+   "name": "GET Protected Resource Metadata (WWW-Authenticate resource_metadata URL)",
+   "direction": "client->server",
+   "params": "none beyond following the URL extracted from the 401 response's WWW-Authenticate header's resource_metadata parameter.",
+   "result": "RFC9728 Protected Resource Metadata document naming the Authorization Server(s) for the MCP resource.",
+   "notes": "Step 1-3 of client-credentials Flow Steps sequence diagram; MCP request without token -> 401 Unauthorized with WWW-Authenticate header -> client extracts resource_metadata URL. Source: raw oauth-client-credentials.mdx 'Flow Steps'."
+  },
+  {
+   "name": "GET Authorization Server Metadata (OAuth2.0 / OIDC discovery)",
+   "direction": "client->server",
+   "params": "none; tries OAuth 2.0 Authorization Server Metadata (RFC8414) and OpenID Connect discovery endpoints 'in priority order'.",
+   "result": "AS metadata JSON including token_endpoint, token_endpoint_auth_methods_supported, token_endpoint_auth_signing_alg_values_supported.",
+   "notes": "MUST include token_endpoint_auth_methods_supported containing at least one of \"private_key_jwt\" or \"client_secret_basic\"; token_endpoint_auth_signing_alg_values_supported REQUIRED when JWT auth is supported. Source: raw oauth-client-credentials.mdx 'Server Metadata Requirements'."
+  },
+  {
+   "name": "MCP request (post-token)",
+   "direction": "client->server",
+   "params": "HTTP Authorization: Bearer <access_token> header on the MCP HTTP request.",
+   "result": "Normal MCP response, or 401 again if token invalid/expired/insufficient scope.",
+   "notes": "Source: pages/extensions__auth__oauth-client-credentials.md 'Include the token' step; header name and scheme are exact constants 'Authorization' / 'Bearer'."
+  },
+  {
+   "name": "Token Exchange (grant_type=urn:ietf:params:oauth:grant-type:token-exchange) at IdP token endpoint — obtain ID-JAG",
+   "direction": "client->server (HTTP)",
+   "params": "grant_type=urn:ietf:params:oauth:grant-type:token-exchange (exact URN); requested_token_type=urn:ietf:params:oauth:token-type:id-jag (exact URN); audience=<MUST be issuer identifier of the Resource Authorization Server>; resource=<OPTIONAL; if set MUST be the RFC9728 Resource Identifier of the MCP Server>; scope=<requested scopes, space or '+' delimited>; subject_token=<ID Token or Refresh Token>; subject_token_type=urn:ietf:params:oauth:token-type:id_token (or refresh_token type per identity-assertion-authz-grant §4.5 for SAML flow); optional client_id/client_secret for IdP client authentication (required if IdP required client auth during the original OIDC SSO).",
+   "result": "200 OK JSON, headers Cache-Control: no-store, Pragma: no-cache: { \"issued_token_type\": \"urn:ietf:params:oauth:token-type:id-jag\", \"access_token\": <ID-JAG JWT>, \"token_type\": \"N_A\", \"scope\": <granted scopes>, \"expires_in\": <seconds, e.g. 300> }. On denial: OAuth 2.0 Token Error response per RFC6749 §5.2.",
+   "notes": "Exact constants: grant_type URN, requested_token_type URN, issued_token_type value, token_type literal string \"N_A\". Source: raw enterprise-managed-authorization.mdx §4 'Token Exchange', §4.1 'Processing Rules', §4.2 'Token Exchange Response'. IdP evaluates admin-defined policy per identity-assertion-authz-grant §4.3.3; unauthorized users MUST NOT receive a token for that server (client never gets a usable ID-JAG)."
+  },
+  {
+   "name": "ID-JAG structure (JWT issued by IdP)",
+   "direction": "server->client (embedded in token exchange result)",
+   "params": "n/a (it is a JWT payload, not a request)",
+   "result": "JWT header {\"typ\": \"oauth-id-jag+jwt\"}; claims: jti, iss (IdP issuer), sub (stable user identifier — MUST be used as primary identifier per server guidance), email (OPTIONAL, fallback matching only), aud (Resource Authorization Server issuer identifier), resource (MUST contain MCP Server Resource Identifier if present, per this profile), client_id, exp, iat, scope.",
+   "notes": "Source: raw enterprise-managed-authorization.mdx §4.3 'Identity Assertion JWT Authorization Grant'. Server-side guidance: 'Use the subject claim as the primary stable identifier for the user, and fall back to the email claim' — pages/extensions__auth__enterprise-managed-authorization.md line 134."
+  },
+  {
+   "name": "POST /token (Resource/MCP Authorization Server) — jwt-bearer grant using ID-JAG",
+   "direction": "client->server (HTTP)",
+   "params": "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer (exact URN, RFC7523); assertion=<ID-JAG JWT>; client_id=<client's registered id, OR its Client ID Metadata Document URL per 2025-11-25 spec §basic/authorization#client-id-metadata-documents if not pre-registered — optionally with private_key_jwt client authentication>.",
+   "result": "OAuth 2.0 Token Response, Content-Type: application/json, Cache-Control: no-store: { \"token_type\": \"Bearer\", \"access_token\": <MCP access token>, \"expires_in\": <seconds>, \"scope\": <granted scopes> }.",
+   "notes": "MUST: issued access token MUST be audience-restricted to the MCP Server identified by the ID-JAG's `resource` claim (raw spec §5.1). Source: raw enterprise-managed-authorization.mdx §5 'Access Token Request', §5.1, §5.2."
+  },
+  {
+   "name": "Extension capability declaration (per-request, both extensions)",
+   "direction": "notification/param c->s (embedded in every JSON-RPC request's params._meta)",
+   "params": "params._meta[\"io.modelcontextprotocol/clientCapabilities\"].extensions[\"io.modelcontextprotocol/oauth-client-credentials\"] = {} and/or [\"io.modelcontextprotocol/enterprise-managed-authorization\"] = {} (empty object = presence signals support; no sub-fields documented).",
+   "result": "n/a (declarative only)",
+   "capability_gate": "Client MUST declare the extension identifier in this _meta field on requests for the server to recognize/require the extension. Extensions are OPT-IN and 'never active by default' for both.",
+   "notes": "Source: pages/extensions__auth__oauth-client-credentials.md lines 89-110; pages/extensions__auth__enterprise-managed-authorization.md lines 91-110; pages/extensions__auth__overview.md line 58 (general negotiation mechanism)."
+  },
+  {
+   "name": "server/discover capability advertisement",
+   "direction": "server->client (result of server/discover method)",
+   "params": "none (method itself out of scope of these two docs)",
+   "result": "result.capabilities.extensions[\"io.modelcontextprotocol/oauth-client-credentials\"] = {} — advertises server support.",
+   "capability_gate": "For oauth-client-credentials: advertising via server/discover is explicitly OPTIONAL ('Optionally (but recommended for discoverability)'). For enterprise-managed-authorization: server declares the extension 'in your server's authorization metadata, indicating that clients must use the enterprise-managed flow' (mechanism not further specified as server/discover in that doc, described only as 'authorization metadata').",
+   "notes": "Source: pages/extensions__auth__oauth-client-credentials.md lines 143-161; pages/extensions__auth__enterprise-managed-authorization.md line 124; pages/extensions__auth__overview.md line 58 names server/discover as the general advertisement channel."
+  },
+  {
+   "name": "ID-JAG profile discovery via AS metadata",
+   "direction": "client reads server metadata",
+   "params": "n/a",
+   "result": "authorization_server metadata field `authorization_grant_profiles_supported` array containing the exact string `urn:ietf:params:oauth:grant-profile:id-jag` when the Resource Authorization Server supports this profile.",
+   "notes": "Source: raw enterprise-managed-authorization.mdx §6 'Discovery'."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementations that adopt the OAuth Client Credentials extension MUST conform to all requirements in the extension spec AND MUST also conform to the baseline authorization requirements of the core MCP Authorization spec.",
+   "cite": "raw oauth-client-credentials.mdx 'Extension Requirements'"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "The OAuth Client Credentials extension is OPTIONAL for MCP implementations; adoption is not required.",
+   "cite": "raw oauth-client-credentials.mdx 'Extension Requirements'"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "transport",
+   "text": "This extension is 'specifically designed for HTTP-based transports' (implicitly excludes non-HTTP transports such as stdio); an SDK MUST NOT attempt this flow over stdio.",
+   "cite": "raw oauth-client-credentials.mdx 'Extension Requirements'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST authenticate to the token endpoint using one of exactly two methods: JWT Authentication (RFC7523 §2.2, RECOMMENDED) or Client Secret (OAuth 2.1 §2.4.1).",
+   "cite": "raw oauth-client-credentials.mdx 'Client Authentication Methods'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD prefer JWT Authentication over Client Secret (marked RECOMMENDED); doc overview additionally frames JWT assertions as 'recommended' because they are short-lived and don't require transmitting the signing key.",
+   "cite": "raw oauth-client-credentials.mdx 'Client Authentication Methods'; pages/extensions__auth__oauth-client-credentials.md line 36"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Authorization Server metadata, when supporting client credentials, MUST include token_endpoint_auth_methods_supported containing at least one of \"private_key_jwt\" or \"client_secret_basic\".",
+   "cite": "raw oauth-client-credentials.mdx 'Server Metadata Requirements'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "token_endpoint_auth_signing_alg_values_supported is REQUIRED (MUST be present) in AS metadata when JWT authentication is supported.",
+   "cite": "raw oauth-client-credentials.mdx 'Server Metadata Requirements'"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementations MUST follow OAuth 2.1 security best practices (draft-ietf-oauth-v2-1-13 §7), with particular attention to client authentication security, token storage/handling, communication security requirements, and client credential protection.",
+   "cite": "raw oauth-client-credentials.mdx 'Security Considerations'"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Client secrets SHOULD be stored in a secrets manager, never in source code or VCS-checked env files; SHOULD be rotated on a schedule and immediately after suspected compromise; SHOULD be scoped to minimum required permissions.",
+   "cite": "pages/extensions__auth__oauth-client-credentials.md lines 74-80 (Warning box)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients SHOULD implement token refresh logic to obtain a new token before expiry, since client-credentials tokens typically have shorter lifetimes than user-delegated tokens.",
+   "cite": "pages/extensions__auth__oauth-client-credentials.md 'Handle token refresh' step"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On each request, the server MUST verify the JWT signature and claims against the authorization server's public keys (typically via JWKS) and MUST check the token includes required scopes for the requested operation.",
+   "cite": "pages/extensions__auth__oauth-client-credentials.md 'Validate the token' / 'Check scopes' steps"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Advertising the extension in server/discover's capabilities is optional but recommended for discoverability.",
+   "cite": "pages/extensions__auth__oauth-client-credentials.md 'Advertise support' step"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST declare the extension identifier `io.modelcontextprotocol/oauth-client-credentials` (or `io.modelcontextprotocol/enterprise-managed-authorization`) in the `extensions` field of `io.modelcontextprotocol/clientCapabilities` inside each request's `_meta`, per the general extension-negotiation mechanism — extensions are never active by default and require explicit client support.",
+   "cite": "pages/extensions__auth__overview.md line 58; pages/extensions__auth__overview.md line 54"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Token Exchange request's `audience` parameter MUST be the issuer identifier of the Resource Authorization Server.",
+   "cite": "raw enterprise-managed-authorization.mdx §4 bullet list"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "The `resource` parameter in the Token Exchange request is OPTIONAL; if set, it MUST be the RFC9728 Resource Identifier of the MCP Server.",
+   "cite": "raw enterprise-managed-authorization.mdx §4 bullet list"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The `resource` claim in the issued ID-JAG (minted by the enterprise IdP acting in the authorization-server role for this exchange) MUST contain the Resource Identifier of the MCP Server if present.",
+   "cite": "raw enterprise-managed-authorization.mdx §4.3"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The Resource Authorization Server MUST audience-restrict the issued MCP access token to the MCP Server identified by the ID-JAG's `resource` claim.",
+   "cite": "raw enterprise-managed-authorization.mdx §5.1"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When enterprise-managed auth is required (server indicates it), the client MUST request the ID-JAG from the enterprise IdP and exchange it for an access token, and MUST NOT redirect the user to the MCP Authorization Server's own authorization endpoint.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md 'Handle ID-JAGs' step (item 3)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Client MUST support SSO — users authenticate to the MCP Client via the enterprise IdP — and MUST save the Identity Assertion (OIDC ID Token or SAML assertion) issued during login for later use in the token-exchange step.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md item 2"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Client SHOULD support organization-level configuration of the enterprise IdP's endpoints (admin-configured, not per-user) and SHOULD handle scope errors gracefully since enterprise-issued tokens may have different scope restrictions.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md items 4-5"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "The IdP/policy layer MUST NOT allow the MCP client to receive a token for a server the employee is not authorized to access; an appropriate error must be returned instead.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md 'Policy enforcement' key aspect"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Handle Account Linking: ID-JAG tokens will always contain a subject (`sub`) claim; server MUST use the `sub` claim as the primary stable identifier and MAY fall back to the `email` claim (if present) only for matching pre-existing accounts created before enterprise-managed auth was configured.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md item 3 under 'For MCP Authorization Servers'"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Resource Authorization Server MUST validate ID-JAGs issued by the enterprise IdP: validate JWT signature against the IdP's JWKS endpoint and check audience, issuer, and expiration.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md item 1 under 'For MCP Authorization Servers'"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "If the MCP Client is not pre-registered with the Resource Authorization Server, it MAY use its Client ID Metadata Document (per 2025-11-25 core spec, basic/authorization#client-id-metadata-documents) as its client_id, optionally authenticating via private_key_jwt.",
+   "cite": "raw enterprise-managed-authorization.mdx §5"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Server MAY optionally publish its resource descriptor so enterprise administrators can configure access policies in their IdP admin console (integration with IdP admin APIs is optional).",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md item 2 under 'For MCP servers'"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Both extensions require explicit support from the MCP client; they are never active by default (stated identically for both extensions).",
+   "cite": "pages/extensions__auth__overview.md line 54; pages/extensions__auth__oauth-client-credentials.md 'Client support' Note; pages/extensions__auth__enterprise-managed-authorization.md 'Client support' Note"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Enterprise-Managed Authorization typically requires client-level support both from the MCP client application and from the organization's IT team (IdP configuration) — not a pure SDK-side concern but affects deployment docs.",
+   "cite": "pages/extensions__auth__enterprise-managed-authorization.md 'Client support' section"
+  }
+ ],
+ "wire_details": [
+  "Extension identifiers (exact strings): `io.modelcontextprotocol/oauth-client-credentials`, `io.modelcontextprotocol/enterprise-managed-authorization`.",
+  "_meta key for capability declaration (exact): `io.modelcontextprotocol/clientCapabilities`, nested object field `extensions`, each extension keyed by its identifier string mapping to an (currently empty) object `{}`.",
+  "HTTP header: `Authorization: Bearer <access_token>` on MCP requests after token acquisition.",
+  "HTTP header: `WWW-Authenticate` on 401 response from MCP Resource Server, carrying a `resource_metadata` parameter/URL per RFC9728 flow.",
+  "Grant type URNs (exact): `client_credentials` (OAuth2.1 standard); `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` (client_assertion_type for JWT auth to AS); `urn:ietf:params:oauth:grant-type:token-exchange` (Token Exchange grant for ID-JAG request); `urn:ietf:params:oauth:grant-type:jwt-bearer` (grant type used to redeem the ID-JAG at the Resource Authorization Server).",
+  "Token type URNs (exact): `urn:ietf:params:oauth:token-type:id-jag` (requested_token_type and issued_token_type for ID-JAG); `urn:ietf:params:oauth:token-type:id_token` (subject_token_type for OIDC ID Token as subject).",
+  "ID-JAG JWT header: `{\"typ\": \"oauth-id-jag+jwt\"}` (exact typ value).",
+  "ID-JAG token_type field in the Token Exchange response is literally the string `\"N_A\"` (not \"Bearer\") — SDKs must not treat ID-JAG as a directly-usable bearer token; it is only valid as a JWT assertion at the next hop.",
+  "Token Exchange / Access Token responses: Content-Type: application/json; Cache-Control: no-store (both responses); Pragma: no-cache (ID-JAG response example).",
+  "AS metadata fields (exact names): `token_endpoint_auth_methods_supported` (values include `\"private_key_jwt\"`, `\"client_secret_basic\"`), `token_endpoint_auth_signing_alg_values_supported`, `authorization_grant_profiles_supported` (value `urn:ietf:params:oauth:grant-profile:id-jag` signals ID-JAG support).",
+  "Token endpoint form fields for client-credentials grant: `grant_type`, `client_assertion_type`, `client_assertion`, `client_id`, `client_secret`, `resource`, `scope` — Content-Type application/x-www-form-urlencoded.",
+  "Token Exchange request fields (exact): `grant_type`, `requested_token_type`, `audience`, `resource` (optional), `scope`, `subject_token`, `subject_token_type`, plus optional `client_id`/`client_secret` for IdP client auth.",
+  "ID-JAG redemption request fields (exact): `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`, `assertion=<ID-JAG>`, `client_id` (may be a Client ID Metadata Document URL).",
+  "ID-JAG JWT claims (exact names): `jti`, `iss`, `sub`, `email` (optional), `aud`, `resource`, `client_id`, `exp`, `iat`, `scope`.",
+  "JWT Bearer assertion claims for client-credentials JWT auth (per doc page, not raw spec): `iss` (Client ID), `sub` (Client ID), `aud` (AS token endpoint URL), `exp`, `iat`.",
+  "Error handling: Token Exchange denial returns an OAuth 2.0 Token Error response per RFC6749 §5.2 (standard `error`/`error_description` JSON body, no MCP-specific error codes documented in these pages).",
+  "No JSON-RPC error codes, no MCP tool/resource method names, and no MIME types beyond `application/json` / `application/x-www-form-urlencoded` are defined by either extension page — all interaction described is plain HTTP/OAuth, layered underneath the JSON-RPC MCP transport."
+ ],
+ "sdk_implications": [
+  "Client SDK needs a pluggable `AuthProvider`/credentials-provider abstraction analogous to TS SDK's `ClientCredentialsProvider` and `PrivateKeyJwtProvider` (seen in code samples): constructed with clientId + (clientSecret | privateKey+algorithm), attached to the HTTP transport (e.g., StreamableHTTPClientTransport authProvider option), responsible for: (a) resource-metadata discovery on 401, (b) AS metadata discovery (OAuth2.0 + OIDC, in priority order), (c) building and POSTing the token request with correct grant_type/client_assertion or client_secret, (d) caching + auto-refreshing the access token before expiry, (e) injecting `Authorization: Bearer` header on subsequent MCP HTTP calls.",
+  "PowerShell SDK must implement JWT signing for client-assertion (RS256 at least, per algorithm field in code sample) — needs a JWT library or hand-rolled RS256 signer using System.Security.Cryptography, plus construction of standard claims (iss, sub, aud, exp, iat) with configurable lifetime (sample shows lifetime_seconds=300).",
+  "Client SDK must expose a way to add per-request `_meta.\"io.modelcontextprotocol/clientCapabilities\".extensions.\"io.modelcontextprotocol/oauth-client-credentials\"` (and the enterprise-managed one) — likely a capability-registration API on the Client object that auto-injects this into every outgoing request's params._meta, not something the caller sets manually per call.",
+  "Server SDK must expose a request-level JWT validation hook (JWKS fetch/cache, signature verify, aud/iss/exp checks) and a scope-check gate before invoking tool/resource handlers; must support returning 401 with a `WWW-Authenticate` header carrying `resource_metadata` per RFC9728, and must be able to serve/host Protected Resource Metadata (RFC9728) and (optionally) advertise `oauth-client-credentials` in its `server/discover` capabilities.extensions map.",
+  "For enterprise-managed auth: client SDK needs a distinct code path from the standard OAuth authorization-code flow — on receiving a server indication that requires enterprise-managed auth, it must skip the normal AS authorize-endpoint redirect and instead: hold the previously-obtained ID token/SAML assertion, POST a Token Exchange request (grant_type=token-exchange, requested_token_type=id-jag) to the IdP, receive the ID-JAG, then POST it as a jwt-bearer assertion to the Resource Authorization Server's token endpoint to get the final MCP access token. This is a second, chained token acquisition distinct from oauth-client-credentials and needs its own provider type (e.g., `IdJagProvider` or `EnterpriseManagedAuthProvider`).",
+  "Client SDK needs configuration surface (org-level, not per-user) for enterprise IdP endpoints: IdP issuer/token-exchange endpoint, and must persist Identity Assertion (ID token or SAML assertion) across the session for reuse in Token Exchange calls; must handle SAML->refresh-token exchange (§4.5 referenced but not detailed in read pages) as a documented gap.",
+  "Server/Authorization-Server SDK helper library (if PowerShell SDK ships an auth-server reference/testing helper) must validate ID-JAG audience-restriction requirement: minted access tokens MUST be scoped to the `resource` claim from the ID-JAG — a testable invariant for conformance.",
+  "Must implement account-linking logic guidance as a documented extensibility point: server-side user-resolution callback should accept `sub` as primary key and `email` as an optional secondary/fallback matcher — not enforced by the protocol itself but should be exposed as a documented server-SDK hook.",
+  "Because these are pure HTTP/OAuth flows (no new JSON-RPC methods, no new MCP result/error schema entries), nothing in schema.ts/schema.json needs new TypeScript-equivalent types for these two extensions beyond the generic `_meta` extensions map already used for capability negotiation — confirm by checking schema files if `io.modelcontextprotocol/clientCapabilities` or extensions map has a typed shape there (not verified in this read; flagged as open question below since schema.ts wasn't opened in this pass).",
+  "Both extensions are HTTP-transport-only per the client-credentials doc ('specifically designed for HTTP-based transports') — SDK must gate/disable these providers when the active transport is stdio or any non-HTTP transport, and should raise a clear configuration error rather than silently no-op."
+ ],
+ "open_questions": [
+  "The two page files read describe the extensions at a documentation/overview level; the AUTHORITATIVE normative text lives in github.com/modelcontextprotocol/ext-auth/specification/{draft,stable}/*.mdx, which I fetched via raw.githubusercontent.com (main branch) rather than a pinned 2026-07-28 tag — confirm these raw files match the exact revision pinned by the local schema/spec snapshot (task says local spec dir is authoritative; I supplemented with live raw GitHub content since ext-auth is a separate repo not mirrored locally). If ext-auth versions independently of the core MCP spec, verify the correct tag/ref for revision 2026-07-28 before finalizing SDK behavior.",
+  "oauth-client-credentials.mdx is explicitly marked 'Protocol Revision: draft' (not stable) — unclear whether draft status blocks it from 'complete PowerShell SDK' scope for a FINAL 2026-07-28 revision, or whether draft extensions are still expected to be implemented. Enterprise-managed-authorization.mdx is marked 'Status: Stable'.",
+  "Exact shape of the `io.modelcontextprotocol/clientCapabilities` and `extensions` objects (any required sub-fields per extension, e.g. version negotiation) is not defined in either page beyond an empty `{}` — need to check schema.ts/2026-07-28_schema.json (not opened in this task) for a typed ClientCapabilities/extensions schema before finalizing PowerShell type definitions.",
+  "server/discover method itself (params/result shape, whether it's a JSON-RPC method or REST endpoint) is referenced but not defined in the read pages — must be cross-checked against core spec pages for exact request/response schema.",
+  "SAML-to-refresh-token exchange (§4.5 of draft-ietf-oauth-identity-assertion-authz-grant, referenced but not inlined) is not detailed in the fetched enterprise-managed-authorization.mdx beyond a pointer — needed for full SAML SSO support in the client SDK; requires fetching the external IETF draft directly.",
+  "No explicit list of standard/reserved scope strings (e.g., 'mcp:read') is normative — examples like `mcp:read`, `chat.read`, `chat.history` are illustrative only, not defined constants; SDK must not hardcode them as protocol-defined scopes.",
+  "Neither page defines a specific error code enum for extension-specific failures (e.g., 'enterprise auth required' signal) — the mechanism by which a server 'indicates that enterprise-managed auth is required' to the client is not specified with an exact field/error code in the read material; likely conveyed via WWW-Authenticate/PRM/AS-metadata parameters defined in the base authorization spec, needs checking against core spec's basic/authorization page (not in scope of this read)."
+ ],
+ "source": "MCP spec (revision 2026-07-28) Authorization Extensions: /tmp/.../scratchpad/spec/pages/extensions__auth__overview.md, extensions__auth__oauth-client-credentials.md, extensions__auth__enterprise-managed-authorization.md, supplemented with the linked normative ext-auth repo specs fetched live via raw.githubusercontent.com/modelcontextprotocol/ext-auth/main/specification/{draft/oauth-client-credentials.mdx, stable/enterprise-managed-authorization.mdx} (the doc pages point to these as the actual normative text; local scratchpad spec dir does not mirror the ext-auth repo).",
+ "summary": "Two optional, opt-in MCP authorization extensions layered on core OAuth2.1 authorization, both HTTP-transport-only, negotiated via the generic extension mechanism (`_meta[\"io.modelcontextprotocol/clientCapabilities\"].extensions[\"<id>\"]={}` on every client request; server advertises via server/discover capabilities.extensions). (1) OAuth Client Credentials (`io.modelcontextprotocol/oauth-client-credentials`, draft status): machine-to-machine auth, no user. Client authenticates to the Authorization Server token endpoint via JWT Bearer assertion (RFC7523, RECOMMENDED) or client_secret (OAuth2.1 §2.4.1), using grant_type=client_credentials, then calls MCP with `Authorization: Bearer <token>`. AS metadata MUST advertise token_endpoint_auth_methods_supported (private_key_jwt or client_secret_basic) and, for JWT, token_endpoint_auth_signing_alg_values_supported. (2) Enterprise-Managed Authorization (`io.modelcontextprotocol/enterprise-managed-authorization`, stable): delegated flow via enterprise IdP. User does SSO to client (OIDC/SAML) yielding an Identity Assertion; client does RFC8693 Token Exchange with the IdP (grant_type=token-exchange, requested_token_type=urn:ietf:params:oauth:token-type:id-jag, audience=Resource AS issuer) to get an ID-JAG (JWT, typ oauth-id-jag+jwt, token_type \"N_A\" in response); client redeems ID-JAG at the MCP's own Authorization Server via RFC7523 jwt-bearer grant to get the actual MCP access token, which MUST be audience-restricted to the resource claim. Client must never redirect to the MCP AS's own authorize endpoint in this mode. Server-side account linking: sub is primary identifier, email is fallback only. Discovery of ID-JAG support via AS metadata's authorization_grant_profiles_supported containing urn:ietf:params:oauth:grant-profile:id-jag. Both extensions: never active by default; require explicit SDK-level provider implementations, capability negotiation wiring, and are pure OAuth/HTTP — no new JSON-RPC methods or MCP-specific error codes are introduced."
+}

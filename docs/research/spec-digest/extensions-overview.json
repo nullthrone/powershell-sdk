@@ -1,0 +1,215 @@
+{
+ "methods": [
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "params": "Not detailed in these two pages (not the focus); page only shows the response shape.",
+   "result": "result.resultType: string (e.g. \"complete\"); result.supportedVersions: string[] (e.g. [\"2026-07-28\"]); result.capabilities: object, including result.capabilities.extensions: object — a map from extension identifier (string) to that extension's settings/capability object (empty object {} = extension supported with no settings); result.capabilities.tools etc. are other core capability keys (not extension-specific); result._meta: object, containing _meta[\"io.modelcontextprotocol/serverInfo\"] = {name, version}; result.ttlMs: number (cache lifetime in ms, e.g. 3600000); result.cacheScope: string enum-like value, e.g. \"public\". [extensions__overview.md lines 156-181]",
+   "capability_gate": "The presence of an entry under capabilities.extensions[<identifier>] in the server/discover result IS the server's declaration of extension support for that identifier.",
+   "notes": "This is the server->client side of extension negotiation. The client-side declaration happens per-request via _meta, not via a dedicated method (see clientCapabilities meta key below)."
+  },
+  {
+   "name": "(request-scoped extension capability declaration, not a distinct RPC method)",
+   "direction": "client->server (notification-like field on every request)",
+   "params": "Every JSON-RPC request's params._meta[\"io.modelcontextprotocol/clientCapabilities\"] object, containing an `extensions` field: a map from extension identifier (string) to that extension's per-request settings object (empty object {} = supported with no settings). Example shown: params._meta[\"io.modelcontextprotocol/clientCapabilities\"].extensions[\"io.modelcontextprotocol/ui\"] = {mimeTypes: [\"text/html;profile=mcp-app\"]}. Also co-located in the same _meta on the example: `io.modelcontextprotocol/protocolVersion` (string, e.g. \"2026-07-28\") and `io.modelcontextprotocol/clientInfo` ({name, version}). [extensions__overview.md lines 122-152]",
+   "result": "N/A — this is metadata attached to any request (example shown on tools/call), not a response.",
+   "capability_gate": "Client must include this _meta block on (at least) the relevant request(s) to declare which extensions and extension-specific settings it supports for that call; server checks its own extensions capability from server/discover / its own support list before honoring it.",
+   "notes": "The spec text states plainly: \"Clients advertise extension support in `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` within each request\" — i.e., per-request, not a one-time handshake field. [extensions__overview.md line 124]"
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extension identifiers follow the format {vendor-prefix}/{extension-name}, e.g. io.modelcontextprotocol/oauth-client-credentials.",
+   "cite": "extensions__overview.md L13"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extension identifiers follow the same rules as `_meta` keys (per basic/index#meta), with a mandatory vendor prefix (unlike plain _meta keys where a prefix is optional/reserved-namespace-only) — i.e., no unprefixed extension identifiers are allowed.",
+   "cite": "extensions__overview.md L13"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Official (Anthropic/MCP org) extensions use the io.modelcontextprotocol vendor prefix.",
+   "cite": "extensions__overview.md L13"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Third-party extension authors should use a reversed domain name they own as the vendor prefix (Java-package-style) to avoid collisions, e.g. com.example/my-extension for a company owning example.com.",
+   "cite": "extensions__overview.md L15-17 (Tip)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Official extension repositories live in the modelcontextprotocol GitHub org with an `ext-` prefix (e.g. ext-auth, ext-apps).",
+   "cite": "extensions__overview.md L21"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Experimental extension repositories live in the MCP GitHub org with an `experimental-ext-` prefix (e.g. experimental-ext-interceptors).",
+   "cite": "extensions__overview.md L70"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Every experimental extension must be associated with a Working Group or Interest Group.",
+   "cite": "extensions__overview.md L74"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Experimental extension repositories and published packages must clearly indicate experimental status (e.g., in README and package name).",
+   "cite": "extensions__overview.md L75"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "An extension must go through the SEP process (Extensions Track) to be promoted from experimental to official status.",
+   "cite": "extensions__overview.md L78-80"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Extension specifications must use RFC 2119 language (MUST, SHOULD, MAY).",
+   "cite": "extensions__overview.md L94"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Extensions must have an associated working group or interest group.",
+   "cite": "extensions__overview.md L95"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "At least one reference implementation in an official SDK is required before an Extensions-Track SEP can be reviewed.",
+   "cite": "extensions__overview.md L87"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "SDKs can choose whether to implement any given extension; implementing extensions is not required for protocol conformance.",
+   "cite": "extensions__overview.md L99"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Where an SDK does support extensions, its documentation should list which extensions are supported.",
+   "cite": "extensions__overview.md L99"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extensions must always be disabled by default and require explicit opt-in from the developer (application/host developer, not just protocol negotiation).",
+   "cite": "extensions__overview.md L101-103 (Note)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "When changing an extension, prefer capability flags or versioning within the extension's settings object rather than minting a new extension identifier.",
+   "cite": "extensions__overview.md L109"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "If a breaking change to an extension is unavoidable, a new extension identifier must be used (e.g. io.modelcontextprotocol/my-extension-v2).",
+   "cite": "extensions__overview.md L109"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Treat as a breaking change (requiring a new identifier per above): removing/renaming fields, changing field types, altering semantics of existing behavior, or adding new required fields to an extension's settings/schema.",
+   "cite": "extensions__overview.md L111-116"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients advertise extension support in `_meta[\"io.modelcontextprotocol/clientCapabilities\"].extensions` within each request (not a one-time init field) — a map of extension identifier -> settings object.",
+   "cite": "extensions__overview.md L120-152"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers advertise extension support in the `server/discover` response under `result.capabilities.extensions` — a map of extension identifier -> settings/capability object; an empty object {} means the extension is supported with no configurable settings.",
+   "cite": "extensions__overview.md L154-183"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Each extension itself specifies the schema of its settings object.",
+   "cite": "extensions__overview.md L183"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "If one side supports an extension but the other doesn't, the supporting side MUST either (a) fall back to core protocol behavior, or (b) reject the request with an appropriate error if the extension is mandatory for that request.",
+   "cite": "extensions__overview.md L185-189"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Extension authors should document expected fallback behavior in the extension spec (example given: a server offering UI-enhanced tools should still return meaningful text content for clients without the UI extension).",
+   "cite": "extensions__overview.md L189"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A server that requires a specific (e.g. auth) extension may reject connections/requests from clients that don't support it.",
+   "cite": "extensions__overview.md L189"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Extensions are always opt-in: a client only uses an extension if BOTH client and server declare support for it in their respective `extensions` capability fields.",
+   "cite": "extensions__client-matrix.md L13"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "To add extension support to a client: (1) review the target extension spec, (2) declare support in `extensions` field of `io.modelcontextprotocol/clientCapabilities` sent in each request's `_meta`, and read the server's `extensions` from its server/discover response, (3) implement the extension's protocol requirements, (4) submit a PR updating the community support matrix.",
+   "cite": "extensions__client-matrix.md L52-57"
+  }
+ ],
+ "wire_details": [
+  "_meta key: `io.modelcontextprotocol/clientCapabilities` — object placed in every request's params._meta, containing an `extensions` map keyed by extension identifier -> per-request settings object. Example location: tools/call request params._meta. [extensions__overview.md L124-151]",
+  "_meta key: `io.modelcontextprotocol/protocolVersion` — string value e.g. \"2026-07-28\", shown co-located inside params._meta alongside clientCapabilities in the example (not itself an extensions mechanism but part of the same _meta block). [extensions__overview.md L137]",
+  "_meta key: `io.modelcontextprotocol/clientInfo` — object {name, version}, shown in the same request _meta block. [extensions__overview.md L145-148]",
+  "_meta key: `io.modelcontextprotocol/serverInfo` — object {name, version}, shown in the server/discover result._meta. [extensions__overview.md L172-174]",
+  "Capability field name: `extensions` — nested under both client capability declarations (`_meta[\"io.modelcontextprotocol/clientCapabilities\"].extensions`) and server capabilities (`result.capabilities.extensions` in server/discover). Value in both cases: map of extension-identifier-string -> settings-object (empty object {} = supported, no settings).",
+  "Extension identifier syntax: `{vendor-prefix}/{extension-name}` — mandatory prefix (unlike optional-prefix core _meta keys). Official prefix constant: `io.modelcontextprotocol`. Example identifiers with exact spellings from the client-matrix table: `io.modelcontextprotocol/ui` (MCP Apps), `io.modelcontextprotocol/oauth-client-credentials` (OAuth Client Credentials), `io.modelcontextprotocol/enterprise-managed-authorization` (Enterprise-Managed Authorization), `io.modelcontextprotocol/skills` (Skills over MCP). [extensions__client-matrix.md L21-26]",
+  "Example MIME type constant used as an extension setting value: `text/html;profile=mcp-app` (value of `mimeTypes` array in the io.modelcontextprotocol/ui extension's client-side settings object). [extensions__overview.md L141]",
+  "server/discover result fields shown: `resultType` (e.g. \"complete\"), `supportedVersions` (string array, e.g. [\"2026-07-28\"]), `capabilities` (object with `tools`, `extensions`, etc.), `_meta`, `ttlMs` (number, e.g. 3600000), `cacheScope` (e.g. \"public\"). [extensions__overview.md L158-180]",
+  "GitHub repo naming constants: official extension repos prefixed `ext-` (e.g. ext-auth, ext-apps); experimental extension repos prefixed `experimental-ext-` (e.g. experimental-ext-interceptors); repos live under the `modelcontextprotocol` GitHub org. [extensions__overview.md L21, 37, 55, 70]",
+  "No HTTP header names, status codes, or JSON-RPC error codes are defined on either of these two pages — extensions negotiation is carried entirely inside JSON-RPC `_meta` and `capabilities`/`result` fields, not via transport headers or dedicated error codes."
+ ],
+ "sdk_implications": [
+  "SDK must define a canonical extension identifier type/validator enforcing `{vendor-prefix}/{extension-name}` shape with a MANDATORY prefix (stricter than generic _meta key validation, which allows unprefixed reserved keys) — reject identifiers lacking a `/`-separated vendor prefix.",
+  "SDK should ship the official constant `io.modelcontextprotocol` as the reserved/official vendor prefix, and expose the four known official extension identifiers as named constants for convenience (io.modelcontextprotocol/ui, /oauth-client-credentials, /enterprise-managed-authorization, /skills) without hardcoding their semantics — the SDK core should treat extension bodies as opaque settings objects unless a specific extension package is implemented.",
+  "Client-side API: must provide a way to register, per outgoing request (not once at session/init time), the set of supported extensions and each extension's settings object, and have the transport layer inject these into params._meta[\"io.modelcontextprotocol/clientCapabilities\"].extensions on every request (or at least ones the SDK consumer opts into per-call) — a static once-per-connection capabilities object is insufficient per spec wording (\"within each request\").",
+  "Server-side API: must expose an `extensions` capability map that the server/discover handler serializes into result.capabilities.extensions, where an empty object {} is a meaningful value (means 'supported, no settings') distinct from absence (not supported) — SDK should distinguish 'key present with {}' vs 'key absent' rather than collapsing both to a default/null.",
+  "SDK must implement extensions as OFF by default; enabling any extension (client or server side) must require an explicit, discoverable opt-in API call/config flag from the developer — no extension should activate merely because both peers happen to advertise it, without the local developer having opted in first.",
+  "SDK should provide an extensible registration mechanism (e.g., an 'extension provider'/plugin interface) so third-party extension packages can plug their identifier + settings schema + fallback logic into both client and server pipelines without modifying SDK core, since extensions evolve independently of the core protocol and SDK maintainers have full autonomy over which to support.",
+  "SDK must implement graceful-degradation logic hooks: when the local side supports an extension the peer doesn't (or vice versa), the SDK must let the implementer choose between (a) falling back to core-protocol-only behavior for that request, and (b) raising/returning an appropriate error when the extension is mandatory — this decision point should be surfaced per extension, not hardcoded.",
+  "Because settings-object schemas are extension-defined, the SDK's extension registration API should accept an opaque JSON object (or generic type param) per extension identifier rather than a fixed schema, and should support extension-internal versioning/capability flags so extension authors can evolve behavior without forcing new identifiers (per the non-breaking-change guidance).",
+  "SDK documentation must list exactly which extensions the SDK implements out-of-the-box (if any), per the spec's SHOULD that SDK docs enumerate supported extensions.",
+  "No new JSON-RPC methods, headers, or error codes are introduced by the extensions framework itself (beyond server/discover, which is a core method, not extension-specific) — SDK extension support is purely a metadata/capability convention layered on existing request/response plumbing; do not implement a separate 'extension negotiation handshake' RPC."
+ ],
+ "legacy_delta": [
+  "The extensions framework (identifier format, `extensions` capability field, `_meta[\"io.modelcontextprotocol/clientCapabilities\"]` per-request declaration mechanism, server/discover-based server declaration) is new in 2026-07-28 and has no equivalent described in these two pages for 2025-11-25 or 2025-06-18 — those prior schemas predate the SEP-2133 Extensions mechanism as documented here (not independently verified against the prior schema.ts files in this pass; only the two target pages were read per task scope).",
+  "The `server/discover` method itself (with resultType/supportedVersions/ttlMs/cacheScope) appears to be part of a newer discovery/capability-negotiation design; earlier MCP revisions used `initialize`/`initialized` handshake for capability exchange rather than a per-request _meta-based client capability declaration — this page's model of advertising client capabilities 'within each request' rather than once at initialization is a notable structural shift, but the two read pages do not themselves describe the older initialize-based mechanism for comparison."
+ ],
+ "open_questions": [
+  "Exact JSON Schema / TypeScript type for the `extensions` capability field (is it Record<string, object> with no further base schema, or does schema.ts define a base ExtensionCapability type?) — not shown on these two pages; must cross-check /tmp/.../spec/schema.ts and 2026-07-28_schema.json for the authoritative type definitions of ClientCapabilities.extensions / ServerCapabilities.extensions and the server/discover result shape (resultType, supportedVersions, ttlMs, cacheScope) since these pages only show example JSON, not the schema.",
+  "Whether `io.modelcontextprotocol/clientCapabilities`, `io.modelcontextprotocol/protocolVersion`, and `io.modelcontextprotocol/clientInfo` under _meta are themselves part of this extensions mechanism or a separate, more general 2026-07-28 change to how capabilities/protocol version are negotiated (replacing a top-level `initialize` request) — this affects how central 'per-request capability declaration' is to the SDK's transport layer versus being extension-specific. Needs checking against basic/index and lifecycle pages (out of scope for this extraction pass).",
+  "What error code/type is 'appropriate' for rejecting a request when a mandatory extension is unsupported (JSON-RPC error code, MCP-specific error data shape) — the pages say only 'reject ... with an appropriate error' without naming a code; must check core error-handling spec pages.",
+  "Whether `server/discover` is transport-agnostic (works over stdio) or HTTP-specific (given `cacheScope`/`ttlMs` suggest HTTP caching semantics) — not addressed on these two pages.",
+  "Full parameter shape for the `server/discover` request itself (its `params`) was not shown on these pages — only the result was illustrated."
+ ],
+ "source": "extensions__overview.md and extensions__client-matrix.md (both read in full)",
+ "summary": "Extensions are optional, always-opt-in additions to MCP beyond the core protocol, identified as `{vendor-prefix}/{extension-name}` (mandatory prefix, unlike generic _meta keys); official ones use `io.modelcontextprotocol`, third parties should use a reversed domain. Official extension repos live in the modelcontextprotocol GitHub org as `ext-*` (ext-auth: oauth-client-credentials, enterprise-managed-authorization; ext-apps: ui/MCP Apps; MCP Tasks; ext-skills: skills-over-mcp), each with its own identifier per the client-matrix table. Experimental extensions live as `experimental-ext-*`, must have a WG/IG sponsor and marked experimental status; graduation to official goes through SEP (Extensions Track), requiring a reference SDK implementation before review, Core Maintainer approval, then a PR to the extension repo. SDK support for any extension is fully optional per SDK; SDKs should document what they support. Extensions must default to disabled and require explicit developer opt-in. Negotiation: clients declare support via `_meta[\\\"io.modelcontextprotocol/clientCapabilities\\\"].extensions` (identifier -> settings object) on each request; servers declare support via `capabilities.extensions` in the `server/discover` result (identifier -> settings object, {} = supported/no settings). Both sides must actually support an extension for it to be used. On mismatch, the supporting side must fall back to core behavior or reject with an error if the extension is mandatory; authors should document fallback behavior. Non-breaking extension evolution should use versioning/flags inside the settings object; breaking changes require a new identifier. The community-maintained client-matrix currently shows MCP Apps supported by most listed clients (Claude web/desktop, VS Code Copilot, M365 Copilot, Goose, Postman, MCPJam, ChatGPT, Cursor, Archestra.AI, PostHog Code); Enterprise Auth only by Archestra.AI; Skills partially by ChatGPT, fast-agent, MCP Inspector; OAuth Client Credentials supported by none listed."
+}

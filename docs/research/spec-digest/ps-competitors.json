@@ -1,0 +1,229 @@
+{
+ "source": "Competitive landscape of PowerShell MCP implementations (Sept 2026): READMEs + manifests + source fetched via raw.githubusercontent.com for KevinMarquette/pwsh.mcp.sdk, dfinke/PSMCP, warm-snow-13/pwsh-mcp, cezarypiatek/PoshMCP, yotsuda/PowerShell.MCP, PowerShell/AIShell (Microsoft), modelcontextprotocol/csharp-sdk (main); gap derivation against local 2026-07-28 spec pages (basic/index, basic/versioning, transports/stdio, transports/streamable-http, patterns/mrtr, patterns/subscriptions, server/discover, changelog), conformance_README.md, conformance_SDK_INTEGRATION.md, community__sdk-tiers.md.",
+ "summary": "Five community projects exist; none is a 2026-07-28 implementation and none ships a client. (1) KevinMarquette/pwsh.mcp.sdk (MCP.SDK 0.1.0-alpha, MIT 2026): folder-convention discovery (tools/ prompts/ resources/ instructions.md), tools+prompts+resources, stdio and a minimal POST-only HttpListener \"Streamable HTTP\" (JSON only, 202 for notifications, 405 GET/DELETE, no Origin check, no 2026 headers), protocolVersion default 2025-06-18 but echoes whatever the client sends, Pester tests, no tags. (2) dfinke/PSMCP 0.1.2 (MIT 2025, PSGallery): stdio, tools only, returns protocolVersion \"0.3.0\" (invalid), VS Code scaffolding (New-MCP), tests skipped, CI disabled. (3) warm-snow-13/pwsh-mcp (pwsh.mcp 0.1.6, 2026-08-27, MIT, PSGallery): best-engineered pure-PS server, stdio, tools only, 2025-11-25 with 2025-06-18 fallback, C# [Annotations]/[McpTool] attributes via Add-Type, injectable TextReader/Writer, Pester 6.1 + PSScriptAnalyzer CI on 3 OSes. (4) cezarypiatek/PoshMCP (MIT 2025, PSGallery): JSON whitelist config, stdio, tools only, hard-coded 2024-11-05, camelCase renaming, wrong error codes, no tests found. (5) yotsuda/PowerShell.MCP 1.14.1 (MIT, very active, signed): not an SDK; .NET 9 proxy built on official ModelContextProtocol NuGet 1.1.0 + named pipes into a live pwsh console exposing six shell tools and prompts. Microsoft: AIShell had an MCP client (C# SDK 0.2 preview) but is unmaintained since Jan 2026; no PowerShell-native SDK. The official C# SDK main already carries July2026ProtocolVersion/RequiresPerRequestMetadata (dual-era) and serves 2026-07-28 at /stateless. Gaps a new SDK must close: stateless per-request _meta, server/discover, resultType/CacheableResult, MRTR, subscriptions/listen, Streamable HTTP header validation + SSE, dual-era, a client, conformance/tiering. Ideas worth adopting: schema-from-metadata, attribute/folder discovery, Register-*ToClient cmdlets, injectable streams, release-time version/syntax gates.",
+ "methods": [
+  {
+   "name": "initialize (legacy era, what all five competitors implement)",
+   "direction": "client->server",
+   "capability_gate": "none (legacy handshake, 2025-11-25 and earlier)",
+   "params": "protocolVersion: string; capabilities: ClientCapabilities; clientInfo: Implementation. Competitors read only params.protocolVersion (pwsh.mcp.sdk echoes it unvalidated: MCP.SDK/Private/Invoke-JsonRpcRequest.ps1 + Get-Initialization.ps1; pwsh-mcp checks for '2025-06-18' only: src/pwsh.mcp/psmcp.core.ps1 mcp.requestHandler).",
+   "result": "protocolVersion: string (PoshMCP hard-codes '2024-11-05'; PSMCP returns '0.3.0' which is not a valid MCP version; pwsh-mcp '2025-11-25'; pwsh.mcp.sdk '2025-06-18' default); capabilities: object (all advertise tools={} or tools.listChanged=false; pwsh.mcp.sdk adds prompts/resources by folder presence); serverInfo{name,version[,title]}; instructions (pwsh.mcp.sdk from instructions.md). Not one emits resultType or _meta serverInfo.",
+   "notes": "2026-07-28 removes initialize/notifications/initialized (changelog §Major 2). A dual-era server must still answer it for legacy clients (versioning.md §Backward Compatibility) and a modern-only server SHOULD name its supported versions in the error it returns to initialize (versioning.md)."
+  },
+  {
+   "name": "server/discover",
+   "direction": "client->server",
+   "capability_gate": "none; servers MUST implement (server/discover.md; versioning.md §Protocol Version Negotiation)",
+   "params": "only _meta: io.modelcontextprotocol/protocolVersion (string, required), io.modelcontextprotocol/clientCapabilities (ClientCapabilities, required), io.modelcontextprotocol/clientInfo (Implementation, optional) (basic/index.md §Per-request protocol fields)",
+   "result": "resultType: 'complete' (required); supportedVersions: string[]; capabilities: ServerCapabilities; instructions?: string; _meta['io.modelcontextprotocol/serverInfo']?: Implementation (SHOULD); ttlMs, cacheScope ('public'|'private') via CacheableResult (server/discover.md 'supports caching'; changelog §Minor 5)",
+   "notes": "No competitor implements it. Also the stdio era probe: client SHOULD send it first; fallback to initialize on any non-modern error or timeout (stdio.md §Backward Compatibility)."
+  },
+  {
+   "name": "tools/call (with MRTR)",
+   "direction": "client->server",
+   "capability_gate": "server capabilities.tools; server MUST NOT emit inputRequests for capabilities absent from _meta clientCapabilities (mrtr.md Server Req. 7)",
+   "params": "name: string; arguments?: object; inputResponses?: InputResponses (map key->ElicitResult|CreateMessageResult|ListRootsResult); requestState?: string (opaque, echoed verbatim); _meta required fields as above plus optional io.modelcontextprotocol/logLevel. HTTP: mirrored headers MCP-Protocol-Version, Mcp-Method, Mcp-Name(=params.name), Mcp-Param-{x-mcp-header name} (streamable-http.md §Request Metadata).",
+   "result": "Either CallToolResult{resultType:'complete', content: ContentBlock[], structuredContent?: any, isError?: bool} or InputRequiredResult{resultType:'input_required', inputRequests?: InputRequests, requestState?: string} (at least one of the two present, mrtr.md Server Req. 6). Competitors return content[text] only (pwsh-mcp, PSMCP, PoshMCP) or text+structuredContent without any outputSchema (pwsh.mcp.sdk Invoke-Tool.ps1); PoshMCP turns tool exceptions into JSON-RPC error -32601 (wrong), PSMCP drops the response entirely on exception.",
+   "notes": "Retry MUST use a new JSON-RPC id (mrtr.md Client Req. 3). requestState MUST be treated as attacker-controlled; HMAC/AEAD when it influences authz (Server Req. 4-5)."
+  },
+  {
+   "name": "subscriptions/listen",
+   "direction": "client->server (long-lived); notifications s->c on its stream",
+   "capability_gate": "server listChanged/subscribe capabilities implied by acknowledged filter subset (subscriptions.md §Acknowledgment)",
+   "params": "notifications: { toolsListChanged?: bool, promptsListChanged?: bool, resourcesListChanged?: bool, resourceSubscriptions?: string[] } + _meta required fields (subscriptions.md §Opening a Stream)",
+   "result": "First message MUST be notifications/subscriptions/acknowledged with _meta io.modelcontextprotocol/subscriptionId = the listen request id and the honored filter subset; subsequent notifications carry the same subscriptionId; graceful server-side close = response {resultType:'complete', _meta.subscriptionId} (subscriptions.md §Graceful Closure). HTTP: response is an SSE stream that stays open; stdio: interleaved on the single channel, correlated by subscriptionId (stdio.md §Receiving Messages).",
+   "notes": "Replaces resources/subscribe/unsubscribe and the HTTP GET stream (changelog §Major 4). No competitor supports any subscription or listChanged notification (all advertise listChanged=false or omit)."
+  },
+  {
+   "name": "tools/list, prompts/list, resources/list, resources/templates/list, resources/read (CacheableResult)",
+   "direction": "client->server",
+   "capability_gate": "respective server capability",
+   "params": "cursor?: string (pagination) + required _meta",
+   "result": "resultType:'complete'; tools/prompts/resources/resourceTemplates/contents; ttlMs: number and cacheScope: 'public'|'private' REQUIRED (changelog §Minor 5); tools SHOULD be in deterministic order (changelog §Minor 3); lists no longer vary per connection (changelog §Major 1).",
+   "notes": "pwsh.mcp.sdk re-scans the folder and re-runs Get-Help on every tools/list and every tools/call (Invoke-Tool.ps1 calls Get-ToolList) — deterministic but slow; pwsh-mcp builds the tool array once at New-MCPServer (good for ttlMs semantics)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implement the 2026-07-28 stateless model natively: parse/validate _meta io.modelcontextprotocol/protocolVersion and clientCapabilities on every request (-32602 when missing, -32022 UnsupportedProtocolVersion with data.supported/requested, -32021 MissingRequiredClientCapability), emit resultType on every result and serverInfo in result _meta. No competitor does any of this.",
+   "cite": "spec/pages/specification__2026-07-28__basic__index.md §_meta Per-request protocol fields; basic__versioning.md §Protocol Version Negotiation; changelog.md §Major 2, 8"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement server/discover (supportedVersions, capabilities, serverInfo, instructions, ttlMs/cacheScope). Required by spec; absent in all five projects.",
+   "cite": "spec/pages/specification__2026-07-28__server__discover.md; basic__versioning.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Ship a Streamable HTTP server transport that: accepts POST only; validates Origin (403); binds 127.0.0.1 by default; requires and cross-checks MCP-Protocol-Version, Mcp-Method, Mcp-Name and Mcp-Param-* headers against the body incl. =?base64?...?= decoding (-32020 HeaderMismatch, HTTP 400); returns 404 + -32601 for unknown methods; 202 for notifications; can answer with application/json or a per-request text/event-stream (with X-Accel-Buffering: no and ':' keep-alive comments); treats stream close as cancellation; answers GET/DELETE 405 and ignores Mcp-Session-Id/Last-Event-ID. pwsh.mcp.sdk's HttpListener variant does POST/202/405 only and validates nothing.",
+   "cite": "spec/pages/specification__2026-07-28__basic__transports__streamable-http.md §Security & Endpoint, §Sending/Receiving Messages, §Request Metadata, §Server Validation, §Earlier Streamable HTTP Revisions; contrast KevinMarquette/pwsh.mcp.sdk main: MCP.SDK/Private/Start-McpHttpListener.ps1"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement MRTR: allow tool/prompt/resource handlers to yield elicitation/sampling/roots input requests as InputRequiredResult with requestState, reconstitute on retry, verify HMAC/AEAD-protected state, and never emit inputRequests the client did not declare capability for. Server-initiated JSON-RPC requests are no longer permitted on either transport.",
+   "cite": "spec/pages/specification__2026-07-28__basic__patterns__mrtr.md §Server Requirements 1-8; transports__stdio.md §Receiving Messages; transports__streamable-http.md §Receiving Messages"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement subscriptions/listen with acknowledged-first ordering, io.modelcontextprotocol/subscriptionId tagging, filter subsetting, graceful-close response, and stdio cancellation via notifications/cancelled referencing the listen id.",
+   "cite": "spec/pages/specification__2026-07-28__basic__patterns__subscriptions.md §Acknowledgment, §Receiving Notifications, §Cancellation, §Graceful Closure"
+  },
+  {
+   "level": "MUST",
+   "actor": "transport",
+   "text": "stdio: newline-delimited UTF-8 JSON on stdout only; all diagnostics to stderr; exit promptly on stdin EOF (ReadLine returns null). pwsh.mcp.sdk's loop never exits on EOF (Start-McpStdioListener.ps1 `while ($Wait)` + `if ($null -ne $inputJson)` spins), PSMCP polls the parent PID instead; PoshMCP does it right (`if ($null -eq $line) { break }`).",
+   "cite": "spec/pages/specification__2026-07-28__basic__transports__stdio.md §Sending/Receiving Messages, §Shutdown"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Ship a client (no competitor has one) with stdio and Streamable HTTP transports, era detection (stdio: server/discover probe; HTTP: inspect 400 body), MRTR retry loop, x-mcp-header mirroring and rejection of invalid tool definitions, Accept: application/json, text/event-stream, and per-request _meta. Conformance client mode passes the server URL as last argv and sets MCP_CONFORMANCE_SCENARIO / MCP_CONFORMANCE_CONTEXT / MCP_CONFORMANCE_PROTOCOL_VERSION.",
+   "cite": "spec/pages/specification__2026-07-28__basic__transports__streamable-http.md §Sending Messages, §Custom Headers §Client Behavior, §Backward Compatibility; transports__stdio.md §Backward Compatibility; conformance_SDK_INTEGRATION.md §Client Testing; conformance_README.md §Client Testing"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Integrate @modelcontextprotocol/conformance in CI (server mode needs a running HTTP endpoint; client mode a command) with an expected-failures baseline and --requirements 2025-11-25,2026-07-28 if dual-era is claimed; Tier 1 = 100% of required scenarios, Tier 2 = 80%. None of the five projects runs conformance; PSMCP's CI has Invoke-Pester commented out.",
+   "cite": "conformance_README.md §Conformance Requirements, §Expected Failures, §GitHub Action, §SDK Tier Assessment; community__sdk-tiers.md §Tier Requirements; dfinke/PSMCP main .github/workflows/ci.yml"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Target PowerShell 7.4+ (Core edition) and declare it truthfully in the manifest (PowerShellVersion, CompatiblePSEditions='Core', #Requires). pwsh.mcp.sdk and PSMCP declare 5.1/Desktop but use ConvertFrom-Json -AsHashtable, -Depth, ternary `?:` and throw below 7.",
+   "cite": "KevinMarquette/pwsh.mcp.sdk main: MCP.SDK/MCP.SDK.psd1 vs MCP.SDK.psm1 (#Requires -Version 7.1) and Private/Invoke-JsonRpcRequest.ps1; dfinke/PSMCP main: PSMCP.psd1 vs Public/Register-MCPTool.ps1"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Implement a dual-era server (initialize handshake + legacy Streamable HTTP with Mcp-Session-Id/GET stream for 2025-11-25 clients, stateless modern path for 2026-07-28) because every shipping MCP client today speaks legacy (pwsh-mcp had to add a 2025-06-18 fallback for Copilot CLI). A dual-era server selects era from how the client opens; may serve both concurrently.",
+   "cite": "spec/pages/specification__2026-07-28__basic__versioning.md §Compatibility Matrix, last two paragraphs; warm-snow-13/pwsh-mcp main: src/pwsh.mcp/psmcp.core.ps1 mcp.requestHandler (copilot-cli issue #1490 workaround)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Generate inputSchema from PowerShell metadata as competitors do, but complete: Get-Command parameter types incl. [switch]→boolean (pwsh-mcp excludes switches), int types→integer (PSMCP maps ints to number), ValidateSet→enum (pwsh.mcp.sdk), ValidateRange/ValidateLength/ValidatePattern→minimum/maximum/minLength/maxLength/pattern (nobody emits them), HelpMessage or .PARAMETER help→description, Mandatory→required, DontShow and [PSCmdlet]::CommonParameters+OptionalCommonParameters excluded, arrays with items (PoshMCP emits 'array' without items), DateTime→string format date-time, enums→string enum values.",
+   "cite": "KevinMarquette/pwsh.mcp.sdk main: MCP.SDK/Private/Get-ToolSignature.ps1; warm-snow-13/pwsh-mcp main: docs/pwsh.mcp.ug.md §Supported parameter types; dfinke/PSMCP main: Public/Register-MCPTool.ps1; cezarypiatek/PoshMCP main: posh-mcp.psm1 ConvertTo-JsonSchemaType"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Offer three registration styles observed in the field: explicit (New-McpServer -Function/-Command like pwsh-mcp's -FunctionInfo and PSMCP's Start-McpServer <names>), attribute discovery ([McpTool()] like pwsh-mcp), and folder convention (tools/ prompts/ resources/ instructions.md like pwsh.mcp.sdk); plus an allowlist config file (PoshMCP mcp-config.json) for exposing existing modules without editing them.",
+   "cite": "warm-snow-13/pwsh-mcp main: docs/pwsh.mcp.ug.md §Server Implementation; KevinMarquette/pwsh.mcp.sdk main: README.md §How it works; cezarypiatek/PoshMCP main: README.md §Tool Configuration"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Preserve PowerShell tool/parameter names as-is (case-sensitive, 1-128 chars, [A-Za-z0-9_.-]) instead of camelCase rewriting; PoshMCP's Get-SystemUptime→getSystemUptime and reverse first-letter upper-casing is lossy (e.g. 'URL' parameter). Provide an optional explicit -Name/-Alias override.",
+   "cite": "cezarypiatek/PoshMCP main: posh-mcp.psm1 Get-CmdletToolSchema/Invoke-McpTool; warm-snow-13/pwsh-mcp main: docs/pwsh.mcp.ug.md §Best Practices Name conventions"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Map failures correctly: tool exceptions → CallToolResult isError=true (not JSON-RPC -32601 as PoshMCP, not a dropped response as PSMCP); schema violations → -32602; unknown method → -32601; internal → -32603; never allocate new codes in -32000..-32019; never emit -32002 or -32042.",
+   "cite": "spec/pages/specification__2026-07-28__basic__index.md §Error Codes; cezarypiatek/PoshMCP main: posh-mcp.psm1 tools/call catch; dfinke/PSMCP main: Public/Start-McpServer.ps1 catch {}"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Adopt yotsuda-style client-registration cmdlets (Register-McpServerWithClaudeCode / -ClaudeDesktop / -VSCode writing the JSON config or the vscode:mcp/install?{json} link as pwsh-mcp's Add-MCPServer does) and a New-McpServerProject scaffolder with templates (PSMCP New-MCP -template).",
+   "cite": "yotsuda/PowerShell.MCP main: README.md §Quick Start, Staging/PowerShell.MCP.psd1 FunctionsToExport; warm-snow-13/pwsh-mcp main: docs/pwsh.mcp.ug.md §GitHub Copilot with VS Code Extension; dfinke/PSMCP main: Public/New-MCP.ps1"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Copy yotsuda's release gates: version consistency across psd1/csproj/tag, Parser::ParseFile syntax check of every ps1/psm1, an Invoke-Expression ban, Authenticode signing of shipped binaries, CHANGELOG-section-per-tag contract; copy pwsh-mcp's PSScriptAnalyzer + Pester matrix (ubuntu/macos/windows).",
+   "cite": "yotsuda/PowerShell.MCP main: .github/workflows/release.yml; warm-snow-13/pwsh-mcp main: .github/workflows/ci.yml, docs/pwsh.mcp.dg.md §CI/CD"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "transport",
+   "text": "Make transports testable in-process: stdio loop over injectable TextReader/TextWriter (pwsh-mcp mcp.core.stdio.main -In/-Out; pwsh.mcp.sdk Get-Console/Out-Console mock seams) and an in-memory transport for Pester round-trips.",
+   "cite": "warm-snow-13/pwsh-mcp main: src/pwsh.mcp/psmcp.core.ps1 mcp.core.stdio.main; KevinMarquette/pwsh.mcp.sdk main: MCP.SDK/Private/Start-McpStdioListener.ps1"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Publish under a name not already on PowerShell Gallery: PSMCP, pwsh.mcp, PoshMCP and PowerShell.MCP are taken (per their README badges/Install-Module lines); MCP.SDK (Kevin) is not published but the name collides with the C# 'ModelContextProtocol' style. Gallery itself could not be queried (blocked).",
+   "cite": "dfinke/PSMCP README §Install PSMCP; warm-snow-13/pwsh-mcp README badges; cezarypiatek/PoshMCP README §Installation; yotsuda/PowerShell.MCP README badges"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Provide a 'shell tool' sample like PowerShell.MCP (execute_command in a persistent runspace, cancel, wait_for_completion, timeout ceiling) built on the SDK — the most downloaded PowerShell MCP artifact is exactly this shape — but keep it out of the core module for security.",
+   "cite": "yotsuda/PowerShell.MCP main: README.md §Architecture, §Timeout ceiling, SECURITY.md"
+  },
+  {
+   "level": "MAY",
+   "actor": "transport",
+   "text": "Offer a named-pipe/Unix-socket variant of the stdio framing as a custom transport (yotsuda uses NamedPipeServerStream between proxy and console).",
+   "cite": "spec/pages/specification__2026-07-28__basic__transports__stdio.md opening paragraphs on custom transports; yotsuda/PowerShell.MCP main: PowerShell.MCP/PowerShell.MCP.csproj (System.IO.Pipes.AccessControl), SECURITY.md §Security Architecture"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Do not add Roots, Sampling or Logging (notifications/message via _meta logLevel) as first-class SDK features beyond what dual-era legacy support needs; they are deprecated in 2026-07-28. Elicitation stays and must be MRTR-based.",
+   "cite": "spec/pages/specification__2026-07-28__changelog.md §Deprecated 1; §Major 5"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "host",
+   "text": "Do not depend on the official C# SDK assemblies inside pwsh for the core module (yotsuda avoids it by running the C# SDK in a separate .NET 9 proxy process). Loading ModelContextProtocol.Core + Microsoft.Extensions.* + System.Text.Json into pwsh conflicts with pwsh's bundled versions unless isolated in a custom AssemblyLoadContext; treat as optional binary accelerator only.",
+   "cite": "yotsuda/PowerShell.MCP main: PowerShell.MCP.Proxy/PowerShell.MCP.Proxy.csproj + Program.cs; PowerShell/AIShell main: shell/AIShell.Kernel/AIShell.Kernel.csproj (ModelContextProtocol.Core 0.2.0-preview.3, net8.0)"
+  }
+ ],
+ "wire_details": [
+  "Competitor protocolVersion strings on initialize: PoshMCP '2024-11-05' (posh-mcp.psm1); PSMCP '0.3.0' invalid (Public/Invoke-HandleRequest.ps1); pwsh.mcp.sdk '2025-06-18' default, echoes params.protocolVersion (Private/Get-Initialization.ps1, Private/Invoke-JsonRpcRequest.ps1); pwsh-mcp '2025-11-25' with '2025-06-18' fallback (psmcp.core.ps1 mcp.requestHandler); PowerShell.MCP: negotiated by ModelContextProtocol NuGet 1.1.0 (legacy era; exact set unverified).",
+  "Competitor public cmdlets: pwsh.mcp.sdk Start-McpServer -Path <root> [-Wait] | -HttpPort <int> (endpoint http://localhost:<port>/mcp/), launcher MCP.SDK/Start.ps1; PSMCP New-MCP -Path -ServerName -template {server|youtube} -Force, Start-McpServer <string[] Tools>, Register-MCPTool -FunctionName -ParameterSet -DoNotCompress, Set-LogFile, Write-Log, Get-MCPTemplate, Invoke-HandleRequest; pwsh-mcp New-MCPServer -FunctionInfo <FunctionInfo[]>, Add-MCPServer -McpServerFullName (emits vscode:mcp/install?{urlencoded-json}); PoshMCP Start-PoshMcp -ConfigPath; PowerShell.MCP Get-MCPProxyPath [-Escape], Get-MCPOwner, Stop-AllPwsh, Register-PwshToClaudeDesktop, Register-PwshToClaudeCode, Restart-MCPServer + cmdlets Show-TextFiles, Add-LinesToFile, Update-LinesInFile, Update-MatchInFile, Remove-LinesFromFile.",
+  "Competitor attribute types: pwsh-mcp compiles src/pwsh.mcp/classes/AnnotationsAttribute.cs (public sealed class AnnotationsAttribute : Attribute { Title; ReadOnlyHint; OpenWorldHint; DestructiveHint; IdempotentHint }, AttributeUsage Method) and McpToolAttribute.cs via Add-Type -Path at module import; discovery: Get-Command | Where-Object { $_.ScriptBlock.Attributes | Where-Object { $_ -is [McpToolAttribute] } }.",
+  "Competitor stdio I/O: [Console]::In.ReadLine() / [Console]::WriteLine + [Console]::Out.Flush() (PSMCP, PoshMCP); [Console]::Out.WriteLine (pwsh.mcp.sdk); injectable $In=[Console]::In / $Out=[Console]::Out TextReader/TextWriter (pwsh-mcp). Encoding: PoshMCP `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)`; pwsh-mcp `[Console]::OutputEncoding = [Console]::InputEncoding = [System.Text.Encoding]::UTF8` (BOM-capable encoding object; verify no preamble is written when stdout is redirected). pwsh.mcp.sdk sets $PSStyle.OutputRendering='PlainText', $ErrorActionPreference='Stop', $WarningPreference='Stop' to keep ANSI/noise out of captured text.",
+  "Competitor HTTP: System.Net.HttpListener, Prefixes.Add(\"http://localhost:$Port/mcp/\"), GetContext() blocking loop, StreamReader over Request.InputStream with Request.ContentEncoding, Response.ContentType='application/json', StatusCode 200/202/405/204(OPTIONS)/500, AddHeader('Allow','POST'), CORS headers 'Access-Control-Allow-Headers: Content-Type, Mcp-Session-Id' (pwsh.mcp.sdk Private/Start-McpHttpListener.ps1). Missing: Origin check (spec 403), MCP-Protocol-Version/Mcp-Method/Mcp-Name/Mcp-Param-* validation (-32020), SSE (needs Response.SendChunked=$true, ContentType 'text/event-stream', X-Accel-Buffering: no, OutputStream.Flush per event), 404+-32601 for unknown methods.",
+  "2026-07-28 constants the SDK must emit/parse: header names MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Param-{name}; Base64 sentinel `=?base64?<b64>?=` (case-sensitive markers); error codes -32020 HeaderMismatch, -32021 MissingRequiredClientCapability, -32022 UnsupportedProtocolVersion, -32602 for missing _meta fields and resource-not-found (was -32002), -32601 unknown method (HTTP 404); _meta keys io.modelcontextprotocol/protocolVersion, clientInfo, clientCapabilities, logLevel, subscriptionId, serverInfo; resultType 'complete'|'input_required'; CacheableResult ttlMs (ms) + cacheScope 'public'|'private'; HTTP statuses 200/202/400/403/404/405; Accept: application/json, text/event-stream; SSE keep-alive comment line ':' (streamable-http.md, basic/index.md, subscriptions.md).",
+  "Legacy 2025-11-25 wire the dual-era server must also speak: initialize / notifications/initialized / ping / logging/setLevel / resources/subscribe / notifications/roots/list_changed; Mcp-Session-Id header + HTTP DELETE; standalone GET SSE stream; server-initiated JSON-RPC requests on SSE; Last-Event-ID resumability; -32002 resource not found; -32042 URL elicitation (changelog.md §Major 1,4,5,9; §Minor 6,12; streamable-http.md §Earlier Streamable HTTP Revisions).",
+  "Conformance CLI: `npx @modelcontextprotocol/conformance server --url http://localhost:<port>/mcp [--suite active|all|draft|pending] [--requirements 2026-07-28] [--expected-failures conformance-baseline.yml]`; `... client --command \"pwsh -NoProfile -File tests/conformance/client.ps1\" --scenario <name>|--suite core|auth|...`; env MCP_CONFORMANCE_SCENARIO, MCP_CONFORMANCE_CONTEXT (JSON), MCP_CONFORMANCE_PROTOCOL_VERSION; synthetic checks wire-schema-valid / wire-schema-harness-error; per-check baseline syntax `<scenario>:<check-id>`; GitHub Action modelcontextprotocol/conformance@v0.1.11 (mode/url/command/expected-failures/suite/scenario/timeout/node-version); tier-check --requirements 2025-11-25,2026-07-28.",
+  "Official C# SDK (modelcontextprotocol/csharp-sdk main, Apache-2.0): packages ModelContextProtocol.Core / ModelContextProtocol / ModelContextProtocol.AspNetCore / .Extensions.Apps / .Extensions.Tasks; src/ModelContextProtocol.Core/McpSessionHandler.cs references McpProtocolVersions.July2026ProtocolVersion, McpProtocolVersions.November2025ProtocolVersion, McpProtocolVersions.RequiresPerRequestMetadata(version), SupportsNaturalOutputSchemas(version); conformance README: csharp-sdk serves 2026-07-28 at a '/stateless' endpoint. yotsuda pins ModelContextProtocol 1.1.0 (net9.0, RuntimeFrameworkVersion 9.0.19); AIShell pins ModelContextProtocol.Core 0.2.0-preview.3 (net8.0) with McpClientFactory.CreateAsync(IClientTransport, options), StdioClientTransport{Name,Command,Arguments,EnvironmentVariables}, EnumerateToolsAsync, McpClientTool.CallAsync(AIFunctionArguments).",
+  "AIShell mcp.json shape (Microsoft, unmaintained since Jan 2026): {\"servers\": {\"<name>\": {\"type\": \"stdio\"|<http types>, \"command\", \"args\", \"env\", \"url\", \"headers\"}}} validated in shell/AIShell.Kernel/MCP/McpConfig.cs; tool names namespaced '<server>___<tool>' (ServerToolSeparator). VS Code mcp.json: {\"servers\": {..., \"type\":\"stdio\",\"command\":\"pwsh\",\"args\":[\"-NoLogo\",\"-NoProfile\",\"-File\",\"${workspaceFolder}/server.ps1\"],\"dev\":{\"watch\":\"src/**/*.ps1\"}}}; Claude Desktop/Gemini/Copilot CLI use {\"mcpServers\": {...}} (pwsh-mcp user guide).",
+  "Recommended .NET/PowerShell surface for the new SDK (from expert knowledge; verify in implementation): stdio via [Console]::OpenStandardInput()/OpenStandardOutput() wrapped in System.IO.StreamReader/StreamWriter with [System.Text.UTF8Encoding]::new($false) and AutoFlush=$true; HTTP via System.Net.HttpListener (in-box on pwsh 7.4/7.5/7.6; Windows non-admin only for http://localhost:<port>/ or http://127.0.0.1:<port>/ prefixes, wildcard prefixes need `netsh http add urlacl`); BeginGetContext/EndGetContext + a RunspacePool ([runspacefactory]::CreateRunspacePool) or Start-ThreadJob (ThreadJob bundled since 7.0) for concurrent requests and open SSE streams; System.Text.Json (bundled 8.0 in 7.4, 9.0 in 7.5, 10.0 in 7.6) with JsonNode/JsonSerializer for lossless numbers/nesting instead of ConvertTo-Json (Newtonsoft-based, -Depth default 2, unwraps single-element arrays unless -AsArray or -InputObject); System.Text.Json.Schema.JsonSchemaExporter (System.Text.Json 9.0+ → pwsh 7.5+/7.6, absent on 7.4) for outputSchema from [OutputType] .NET types; Test-Json -Schema (JsonSchema.Net-based since 7.4, 2020-12) for validating arguments and MRTR inputResponses; [System.Management.Automation.Language.Parser]::ParseFile/ParseInput + FunctionDefinitionAst.GetHelpContent() (CommentHelpInfo: Synopsis, Description, Parameters) to read comment-based help without Get-Help cost; [System.Management.Automation.PSCmdlet]::CommonParameters/OptionalCommonParameters; System.Security.Cryptography.HMACSHA256 / AesGcm for requestState; System.Threading.CancellationTokenSource + PowerShell.BeginStop() for cancellation."
+ ],
+ "sdk_implications": [
+  "Positioning: every competitor is a server-only, legacy-era (initialize handshake), tools-first module; the new SDK's differentiators are (a) native 2026-07-28 statelessness, (b) a client, (c) MRTR-capable handlers, (d) a real Streamable HTTP transport with header validation and SSE, (e) conformance-driven CI. Plan the public API around those, not around a stdio loop.",
+  "Handler model must support MRTR: a tool handler needs a way to say 'I need elicitation X' and to resume with inputResponses on the retry. In PowerShell the natural shape is a throwable/returnable [McpInputRequired] object (or an `Invoke-McpElicitation` helper that throws a control-flow exception caught by the dispatcher) plus a requestState envelope the SDK HMAC-signs (key from server options), containing principal/TTL/method+argument digest per mrtr.md §5. Do not model server-to-client requests as awaitable callbacks; that is the removed 2025-11-25 pattern.",
+  "Dual-era is a per-server-process/per-endpoint mode switch, not per request only: keep a small legacy session layer (Mcp-Session-Id minting, GET SSE stream, ping, logging/setLevel, resources/subscribe, server-initiated elicitation over SSE) behind a `-Legacy`/`-SupportedVersions` option, selected by whether the first message is `initialize` or carries modern _meta (versioning.md). Expect conformance to run each revision twice at its own wire (conformance_README §Conformance Requirements).",
+  "Conformance server mode is URL-based, so a stdio-only SDK cannot be scored at all; the HttpListener transport is on the critical path for tiering, not a nice-to-have. Also plan a `tests/conformance/everything-server.ps1` and `everything-client.ps1` mirroring the TypeScript SDK layout.",
+  "Schema generation: reuse the field-proven recipe (Get-Command parameters + comment-based help + attributes) but fix the observed defects: int→integer, switch→boolean, arrays with items, validation attributes → JSON Schema constraints, DateTime→string/date-time, enums→enum, [object]/[hashtable]→object, untyped→no type. Cache per command (pwsh.mcp.sdk re-runs Get-Help on every tools/call; Get-Help on a script path is slow and can trigger help-update prompts). Prefer AST GetHelpContent() over Get-Help for speed and determinism (verify parity).",
+  "Discovery styles to support: explicit registration (pipeline of FunctionInfo/CommandInfo), [McpTool] attribute scan (pwsh-mcp), folder convention with instructions.md (pwsh.mcp.sdk), and an allowlist config (PoshMCP). Decide whether tool attributes are PowerShell classes deriving from [Attribute] (no Add-Type compile, ConstrainedLanguage-friendly) or C# via Add-Type (pwsh-mcp: Roslyn compile at import, ~hundreds of ms, fails under ConstrainedLanguage/AppLocker) — needs experiment.",
+  "Result shaping pitfalls seen in competitors: ConvertTo-Json default -Depth 2 truncation; single-object results unwrapped so `content` ceases to be an array (use [array]/-AsArray/-InputObject); Out-String adds trailing newlines and ANSI unless $PSStyle.OutputRendering='PlainText'; structuredContent emitted without outputSchema (pwsh.mcp.sdk) — generate outputSchema from [OutputType] or omit structuredContent; exceptions must become isError results, never swallowed (PSMCP) or -32601 (PoshMCP). Note 'SupportsNaturalOutputSchemas' era switch in the C# SDK: pre-2026 clients expect {\"result\": value} envelopes for non-object outputs (verify against spec/server/tools).",
+  "Process/stream hygiene: launch guidance `pwsh -NoLogo -NoProfile -File server.ps1` (all projects); redirect all Write-Host/Verbose/Warning/Progress to stderr inside the SDK (set $ProgressPreference='SilentlyContinue'; $InformationPreference; wrap handler output streams); PoshMCP's `Import-Module -Global` + dot-sourcing into the caller scope is a scope leak to avoid — run handlers in an SDK-owned runspace or module scope.",
+  "Concurrency: PowerShell script cannot service HttpListener callbacks on thread-pool threads; use a dispatcher runspace pool sized by option, one PowerShell instance per request, SSE writers kept open per request; stdio needs a reader thread + a synchronized writer ([System.Threading.Monitor] or a ConcurrentQueue drained by one thread) so listen-stream notifications, progress and responses interleave without tearing lines. yotsuda solved the 'busy console' problem with a polling engine; the SDK should use runspaces, not a shared console.",
+  "Error-code discipline: implement a central mapper (ArgumentException→-32602, NotImplemented→-32601, else -32603, plus -32020/-32021/-32022) like pwsh.mcp.sdk's ConvertTo-JsonRpcResponse, but never map tool failures to JSON-RPC errors.",
+  "Client DX to copy: Register-McpServer -Client ClaudeCode|ClaudeDesktop|VSCode|Copilot|Gemini writing the correct JSON shape (mcpServers vs servers; -Escape path output), Add-McpServer producing a vscode:mcp/install link, `New-McpServerProject -Template`, Docker sample with mcr.microsoft.com/powershell, MCP Inspector recipes (`npx @modelcontextprotocol/inspector pwsh -NoProfile -File server.ps1 --cli --method tools/list`).",
+  "Security posture to document (from yotsuda SECURITY.md): transcript/Script Block Logging (event 4104, PowerShellCore/Operational) as audit trail, no Invoke-Expression, allowlist-only exposure, localhost binding + Origin validation on HTTP, Authenticode-signed binaries for WDAC shops.",
+  "Release engineering: PSGallery publish via CI (PoshMCP auto-bumps Major.Minor.CommitCount; yotsuda tag-driven with consistency checks); use Install-PSResource-compatible metadata (PSResourceGet ships in 7.4+) and a Prerelease tag until conformance is green (Tier rules require a stable non-prerelease version).",
+  "Naming: pick an unused PSGallery name and PascalCase Verb-Noun commands with approved verbs (New-McpServer, Add-McpTool, Start-McpServer, Connect-McpServer, Invoke-McpTool, Get-McpResource, Register-McpClientConfig, Test-McpConformance). Competitors' mixed casing (Start-McpServer vs New-MCPServer vs Start-PoshMcp) shows the field has no convention; choose 'Mcp' casing consistently."
+ ],
+ "legacy_delta": [
+  "Windows PowerShell 5.1: no ConvertFrom-Json -AsHashtable/-Depth, no ConvertTo-Json -AsArray/-EnumsAsStrings/-EscapeHandling, ConvertTo-Json uses JavaScriptSerializer (DateTime as '/Date(n)/', maxJsonLength limits), no ternary/`??`/`?.`/pipeline-chain operators, no $PSStyle, no Test-Json, no System.Text.Json in-box, no ThreadJob module, Add-Type compiles with CodeDom C# 5 only, console encodings default to the OEM code page, (Get-Process).Parent absent. All five competitors are de facto 7.x-only even where manifests say 5.1 (pwsh.mcp.sdk, PSMCP). Recommendation: do not support 5.1.",
+  "PowerShell 7.4 (LTS, .NET 8; support ends Nov 2026 per PowerShell lifecycle — verify): baseline for the SDK; System.Text.Json 8 (no JsonSchemaExporter), Test-Json on JsonSchema.Net (2020-12) from 7.4, PSResourceGet bundled, $PSStyle, ThreadJob, -AsHashtable, Parser/AST APIs all available.",
+  "PowerShell 7.5 (.NET 9; STS, support ended ~May 2026 — verify): adds ConvertFrom-Json -DateKind, System.Text.Json 9 with JsonSchemaExporter (outputSchema from .NET types), minor Test-Json fixes; pwsh-mcp requires 7.5.0 and pins CI to 7.5. Do not make 7.5-only APIs mandatory.",
+  "PowerShell 7.6 (.NET 10 LTS; GA status/date to verify — expected the current LTS in Sept 2026): System.Text.Json 10, newer PSResourceGet; likely the primary CI target alongside 7.4. Any 7.6-specific behavior changes (e.g. ConvertTo-Json/Out-String tweaks) must be re-validated.",
+  "Cross-version pitfalls independent of edition: [Console]::OutputEncoding assignment and BOM behavior when stdout is redirected; HttpListener URL ACLs on Windows; HttpListener on Linux/macOS is a managed implementation with different keep-alive/chunking behavior; Get-Help first-run behavior; PSReadLine is not loaded with -File/-NoProfile (competitors rely on that)."
+ ],
+ "open_questions": [
+  "Does System.Net.HttpListener in pwsh 7.4/7.6 reliably stream SSE (SendChunked, Flush per event, long-lived connections for subscriptions/listen) on Windows (http.sys) and Linux/macOS (managed listener), and can it be driven concurrently from PowerShell without blocking GetContext()? If not, is a small C# helper (or Pode-style listener) required?",
+  "Can PowerShell class-based attributes (`class McpTool : System.Attribute`) be applied to functions and read back via ScriptBlock.Attributes without Add-Type, on 7.4/7.6 and under ConstrainedLanguage? pwsh-mcp chose C# + Add-Type; measure import-time cost of both.",
+  "Exact protocol versions negotiated by ModelContextProtocol NuGet 1.1.0 (yotsuda) and whether the C# SDK main (July2026ProtocolVersion present) has shipped a stable release with 2026-07-28; this decides whether a PowerShell binary module could delegate to it inside an isolated AssemblyLoadContext without System.Text.Json/Microsoft.Extensions version conflicts.",
+  "Does Test-Json in 7.4+ (JsonSchema.Net) fully cover 2020-12 keywords needed for inputSchema/outputSchema/elicitation requestedSchema validation, and is it fast enough per tools/call?",
+  "Does FunctionDefinitionAst/ScriptBlockAst.GetHelpContent() return the same Synopsis/Description/Parameter text as Get-Help for scripts and functions (incl. .PARAMETER vs inline comments), so Get-Help can be dropped from schema generation?",
+  "Behavior of [Console]::OutputEncoding = UTF8 (with vs without BOM object) when stdout is a pipe on Windows pwsh 7.4/7.6: is a preamble ever emitted (breaking the first JSON line)?",
+  "Whether (Get-Process -Id $PID).Parent (used by PSMCP) is available/reliable on all three OSes in 7.4+, or whether stdin-EOF plus optional parent watchdog is sufficient.",
+  "Current lifecycle dates: is 7.5 already out of support and has 7.6 reached GA (LTS) as of 2026-09-16? Decide CI matrix (7.4 + 7.6 vs 7.4/7.5/7.6).",
+  "Which conformance scenarios in requirements/2026-07-28.yaml are required vs not_scored for server and client legs (the local docs list categories but not the frozen scenario names) — needed to size the initial expected-failures baseline.",
+  "Are the PSGallery names 'PSMCP', 'pwsh.mcp', 'PoshMCP', 'PowerShell.MCP' actually published (gallery was unreachable); which name is free for the new SDK?",
+  "Whether any Microsoft PowerShell-team MCP effort exists beyond AIShell (discussion #25718 not fetchable) that the SDK should align naming/config with."
+ ]
+}

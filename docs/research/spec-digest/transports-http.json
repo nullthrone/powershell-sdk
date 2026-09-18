@@ -1,0 +1,664 @@
+{
+ "source": "/tmp/claude-0/-home-user-powershell-sdk/bad9595c-6f25-522a-b220-c209ad0ab850/scratchpad/spec/pages/specification__2026-07-28__basic__transports__streamable-http.md (primary, cited as SH:<line>); cross-checked against schema.ts (lines 30, 63-134, 407-526, 1261-1401, 1990-1997), specification__2026-07-28__basic__index.md (369-416), specification__2026-07-28__basic__versioning.md, specification__2026-07-28__basic__patterns__cancellation.md, specification__2026-07-28__basic__patterns__subscriptions.md (118-165), specification__2026-07-28__server__tools.md (297-398), specification__2026-07-28__changelog.md (14,20,26,30,37,65-69), and the 2025-11-25 Streamable HTTP section fetched via curl from modelcontextprotocol.io/specification/2025-11-25/basic/transports.md.",
+ "summary": "Streamable HTTP (2026-07-28) is a stateless, POST-only transport: the server exposes one MCP endpoint (e.g. https://example.com/mcp) that accepts POST; every client JSON-RPC request or notification is its own POST; the client MUST NOT send JSON-RPC responses. Each request is answered either with a single JSON object (Content-Type: application/json) or a request-scoped SSE stream (text/event-stream) carrying only request-related notifications (progress, message) followed by the final response, which SHOULD end the stream. Servers MUST NOT send JSON-RPC requests on any stream; sampling/elicitation/roots use MRTR (InputRequiredResult with inputRequests, client retries with inputResponses). Change notifications flow only on the SSE response of a subscriptions/listen request. There are no sessions (Mcp-Session-Id gone), no GET/DELETE (respond 405), no Last-Event-ID resumability. Closing the response stream is the cancellation signal. Every POST MUST carry MCP-Protocol-Version (must equal _meta io.modelcontextprotocol/protocolVersion), Mcp-Method (= method), and Mcp-Name (= params.name/params.uri) for tools/call, resources/read, prompts/get; tool parameters annotated with x-mcp-header are mirrored as Mcp-Param-{Name}. Non-header-safe values use the =?base64?...?= sentinel. Servers that read the body MUST validate headers against body and reject mismatches/missing/malformed with HTTP 400 + JSON-RPC -32020 HeaderMismatch; unsupported version → 400 + -32022 with data.supported/requested; unknown method → 404 + -32601. Origin MUST be validated (403 on invalid), local servers SHOULD bind 127.0.0.1, auth SHOULD be implemented. Dual-era clients probe with a modern request and inspect a 400 body: recognized modern JSON-RPC error = modern server (retry), otherwise fall back to legacy initialize / HTTP+SSE.",
+ "methods": [
+  {
+   "name": "HTTP POST <MCP endpoint> carrying a JSON-RPC request",
+   "direction": "client->server",
+   "params": "HTTP headers: Accept (MUST list both application/json and text/event-stream, SH:75-76); MCP-Protocol-Version: <version> (MUST, SH:252-253); Mcp-Method: <method> (REQUIRED for all requests, SH:289-294); Mcp-Name: <params.name|params.uri> (REQUIRED for tools/call, resources/read, prompts/get, SH:292); Mcp-Param-{Name}: <encoded value> for each x-mcp-header-annotated argument that has a non-null value (SH:359-368, 523-538); Content-Type: application/json (shown in all examples SH:303-307, not stated as a MUST in prose); Origin (browser-supplied; validated by server SH:57-61). Body: exactly one JSON-RPC request object (SH:79) whose params._meta MUST contain io.modelcontextprotocol/protocolVersion (string) and io.modelcontextprotocol/clientCapabilities (ClientCapabilities) and SHOULD contain io.modelcontextprotocol/clientInfo (Implementation) (basic index:375-387; schema.ts:63-98). Batches are not mentioned; body is 'a single JSON-RPC request or notification' (SH:79).",
+   "result": "Either HTTP 200 with Content-Type: application/json and a single JSON-RPC response object, or HTTP 200 with Content-Type: text/event-stream and an SSE stream scoped to that request: zero or more JSON-RPC notifications related to the request (e.g. notifications/progress, notifications/message), then the final JSON-RPC response which SHOULD terminate the stream (SH:87-90, 106-122). Error statuses: 400 + HeaderMismatchError(-32020) on header/body mismatch or missing/malformed required header (SH:596-602); 400 + UnsupportedProtocolVersionError(-32022, data.supported: string[], data.requested: string) for unsupported version (SH:263-269, schema.ts:483-501); 400 + MissingRequiredClientCapabilityError(-32021, data.requiredCapabilities: ClientCapabilities) (basic index:389-394); 400 + -32602 for missing required _meta fields (basic index:382-384); 404 + -32601 for unknown RPC method (SH:271-275); 403 for invalid Origin, body MAY be JSON-RPC error with no id (SH:59-61). Results carry resultType 'complete' | 'input_required' (changelog:28); an InputRequiredResult is how server-to-client interactions are surfaced (SH:195-213).",
+   "capability_gate": "None at transport level. Client capabilities are declared per request in _meta io.modelcontextprotocol/clientCapabilities; servers MUST NOT infer capabilities from prior requests (schema.ts:92-98).",
+   "notes": "Server chooses JSON vs SSE per request (SH:169-171). Servers SHOULD send X-Accel-Buffering: no when starting SSE (SH:133-139). Server MUST NOT send JSON-RPC requests on the stream (SH:114-121). Closing the stream = cancellation (SH:235-239)."
+  },
+  {
+   "name": "HTTP POST <MCP endpoint> carrying a JSON-RPC notification",
+   "direction": "client->server",
+   "params": "Body: a single JSON-RPC notification (SH:79). The page states 'This revision of the core protocol defines no client-to-server notifications over Streamable HTTP' and 'header requirements for notification POSTs are not defined by this revision' (SH:92-102). notifications/cancelled is stdio-only (SH:94-99).",
+   "result": "If accepted: HTTP 202 Accepted with no body (MUST, SH:81-83). If not accepted: an HTTP error status (e.g. 400 Bad Request); body MAY be a JSON-RPC error response with no id (SH:84-86).",
+   "capability_gate": "None.",
+   "notes": "Practically unused in core 2026-07-28 over HTTP; an SDK must still implement the 202 path for extensions/custom notifications."
+  },
+  {
+   "name": "HTTP GET <MCP endpoint>",
+   "direction": "client->server",
+   "params": "None defined in this revision (GET stream endpoint removed, SH:18, 665-673).",
+   "result": "A server supporting only this revision SHOULD respond 405 Method Not Allowed (SH:678-679). Legacy HTTP+SSE (2024-11-05) detection: a dual-era client issues GET expecting an SSE stream whose first event is `endpoint` (SH:728-732).",
+   "capability_gate": "None.",
+   "notes": "Removed from the transport by SEP-2575 (changelog:20)."
+  },
+  {
+   "name": "HTTP DELETE <MCP endpoint>",
+   "direction": "client->server",
+   "params": "None defined (session termination removed, SH:19, 669-673).",
+   "result": "A server supporting only this revision SHOULD respond 405 Method Not Allowed (SH:678-679).",
+   "capability_gate": "None.",
+   "notes": "Removed with protocol-level sessions (SEP-2567, changelog:14)."
+  },
+  {
+   "name": "subscriptions/listen (as carried on Streamable HTTP)",
+   "direction": "client->server",
+   "params": "JSON-RPC request; params.notifications: SubscriptionFilter { toolsListChanged?: boolean; promptsListChanged?: boolean; resourcesListChanged?: boolean; resourceSubscriptions?: string[] } plus standard _meta (schema.ts:1270-1317). Sent as an ordinary POST with the standard headers (Mcp-Method: subscriptions/listen; Mcp-Name not required).",
+   "result": "The HTTP response is itself an SSE stream that stays open (SH:124-131, 215-231). First message MUST be notifications/subscriptions/acknowledged { params.notifications: SubscriptionFilter (honored subset) } (schema.ts:1371-1401). Then only opted-in notifications (notifications/tools/list_changed, notifications/prompts/list_changed, notifications/resources/list_changed, notifications/resources/updated {uri}), each with _meta io.modelcontextprotocol/subscriptionId = the listen request id (schema.ts:120-134; basic index:414-416). Graceful server teardown: SubscriptionsListenResult { resultType: 'complete', _meta: { io.modelcontextprotocol/subscriptionId: RequestId } } as the JSON-RPC response then stream close (SHOULD, subscriptions.md:124-156; schema.ts:1326-1364). Abrupt transport close carries no response. Request-scoped notifications (progress, message) are NOT delivered on this stream (SH:129-131).",
+   "capability_gate": "Not stated on this page; opt-in is per filter field, server MUST NOT send unrequested types (schema.ts:1265-1266).",
+   "notes": "Client cancels by closing the SSE stream (subscriptions.md:122). Keep-alive SSE comment lines (':\\r\\n') encouraged on this stream (SH:141-150)."
+  },
+  {
+   "name": "notifications/progress and notifications/message (on a request's SSE response stream)",
+   "direction": "notification s->c",
+   "params": "As defined in progress/logging pages; on HTTP they MAY be sent before the final response and MUST relate to the originating client request (SH:109-113). notifications/message only if the request's _meta included io.modelcontextprotocol/logLevel (schema.ts:99-110; deprecated as of 2026-07-28 per SEP-2577).",
+   "result": "n/a",
+   "capability_gate": "None at transport level.",
+   "notes": "Never delivered on the subscriptions/listen stream (SH:129-131)."
+  },
+  {
+   "name": "notifications/cancelled",
+   "direction": "notification c->s / notification s->c",
+   "params": "params.requestId, params.reason? (cancellation.md:20-35).",
+   "result": "n/a",
+   "capability_gate": "None.",
+   "notes": "NOT used by clients on Streamable HTTP: closing the SSE response stream is the cancellation signal and no notifications/cancelled is expected (SH:94-99; cancellation.md:41-43). Server-sent only on stdio to terminate a subscriptions/listen stream (schema.ts:637; cancellation.md:13-16)."
+  },
+  {
+   "name": "tools/call, resources/read, prompts/get (header mirroring subset)",
+   "direction": "client->server",
+   "params": "These three methods additionally require the Mcp-Name header sourced from params.name (tools/call, prompts/get) or params.uri (resources/read) (SH:289-294). tools/call additionally mirrors x-mcp-header-annotated arguments as Mcp-Param-{Name} (SH:357-368).",
+   "result": "On mismatch: 400 + -32020 (SH:596-602). Client SHOULD re-fetch tools/list and retry when Mcp-Param-* mismatch is reported (SH:540-545).",
+   "capability_gate": "None.",
+   "notes": "Tool names are only SHOULD-constrained to header-safe chars, hence Base64 sentinel for Mcp-Name (SH:491-497; tools.md:311-315)."
+  },
+  {
+   "name": "server/discover (referenced)",
+   "direction": "client->server",
+   "params": "Not defined on this page; versioning.md:75-80 says servers MUST implement it and clients MAY call it up front to learn supported versions.",
+   "result": "DiscoverResult (versioning.md:170).",
+   "capability_gate": "None.",
+   "notes": "On HTTP era detection uses any modern request + 400-body inspection, not necessarily server/discover (versioning.md:141-143)."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Provide a single HTTP endpoint path (the MCP endpoint) that supports POST.",
+   "cite": "SH:45-47"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Validate the Origin header on all incoming connections to prevent DNS rebinding.",
+   "cite": "SH:57-58"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "If Origin is present and invalid, respond HTTP 403 Forbidden; body MAY be a JSON-RPC error response with no id.",
+   "cite": "SH:59-61"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When running locally, bind only to localhost (127.0.0.1), not 0.0.0.0.",
+   "cite": "SH:62-63"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Implement proper authentication for all connections.",
+   "cite": "SH:64"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Send every JSON-RPC message as a new HTTP POST to the MCP endpoint.",
+   "cite": "SH:71-74"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Include an Accept header listing both application/json and text/event-stream.",
+   "cite": "SH:75-76"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Include the request metadata headers (MCP-Protocol-Version, Mcp-Method, Mcp-Name where applicable, Mcp-Param-*) on each POST.",
+   "cite": "SH:77-78, 252-253, 289-294"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "POST body is a single JSON-RPC request or notification.",
+   "cite": "SH:79"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Send JSON-RPC responses to the server.",
+   "cite": "SH:80"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return 202 Accepted with no body when a JSON-RPC notification is accepted.",
+   "cite": "SH:81-83"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return an HTTP error status (e.g. 400) when a notification cannot be accepted; body MAY be a JSON-RPC error with no id.",
+   "cite": "SH:84-86"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "For a JSON-RPC request, return either Content-Type: application/json (single JSON object) or Content-Type: text/event-stream (SSE stream).",
+   "cite": "SH:87-89"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Support both application/json and text/event-stream responses to a request.",
+   "cite": "SH:89-90"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Send JSON-RPC notifications (e.g. notifications/progress, notifications/message) on the SSE stream before the final response.",
+   "cite": "SH:109-112"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Notifications on a request's SSE stream relate to the originating client request.",
+   "cite": "SH:112-113"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send independent JSON-RPC requests on the response stream (or any stream); sampling/elicitation/roots go via InputRequiredResult (MRTR).",
+   "cite": "SH:114-121"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "The final JSON-RPC response terminates the SSE stream.",
+   "cite": "SH:122"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Deliver request-scoped notifications (notifications/progress, notifications/message) on the subscriptions/listen stream; they flow only on the related request's response stream. (Stated as 'are not delivered'.)",
+   "cite": "SH:129-131"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Include X-Accel-Buffering: no in the HTTP response when initiating an SSE stream.",
+   "cite": "SH:133-139"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Periodically emit an SSE comment line (line beginning with ':' e.g. ':\\r\\n') as keep-alive on long-lived streams (encouraged).",
+   "cite": "SH:141-150"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Ignore SSE comment lines (lines beginning with ':') and not treat them as malformed input (per SSE spec, stated lowercase 'must').",
+   "cite": "SH:147-149"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "both",
+   "text": "Rely on resumable SSE streams via Last-Event-ID; not supported in this revision.",
+   "cite": "SH:152, 665-682"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat closing of the SSE response stream by the client as cancellation of that request.",
+   "cite": "SH:235-236; cancellation.md:41-43"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Stop work on a cancelled request as soon as practical.",
+   "cite": "SH:237-238"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Send any further messages for a cancelled request.",
+   "cite": "SH:238-239"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Include MCP-Protocol-Version header on every POST to the MCP endpoint.",
+   "cite": "SH:252-253"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP-Protocol-Version header value equals the io.modelcontextprotocol/protocolVersion value in the body's _meta.",
+   "cite": "SH:257-259; schema.ts:69-76"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Reject with 400 Bad Request and a HeaderMismatch (-32020) JSON-RPC error when the MCP-Protocol-Version header and _meta protocolVersion differ.",
+   "cite": "SH:259-261"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Respond 400 Bad Request with UnsupportedProtocolVersionError (-32022) listing supported versions (data.supported, data.requested) when the requested protocol version is not implemented (unknown or intentionally unsupported).",
+   "cite": "SH:263-269; schema.ts:472-501"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Respond 404 Not Found with JSON-RPC error code -32601 (Method not found) when the RPC method is not implemented.",
+   "cite": "SH:271-275"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A server that supports pre-2025-06-18 clients may treat a request lacking MCP-Protocol-Version as protocol version 2025-03-26.",
+   "cite": "SH:277-279"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "A server that does not support pre-2025-06-18 clients rejects a request without MCP-Protocol-Version per Server Validation (400 + -32020).",
+   "cite": "SH:279-281, 621-624"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Send Mcp-Method header (value = JSON-RPC method) on all requests (REQUIRED for compliance).",
+   "cite": "SH:289-294"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Send Mcp-Name header (value = params.name or params.uri) on tools/call, resources/read and prompts/get requests.",
+   "cite": "SH:289-294"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Encode Mcp-Name using the Base64 sentinel format when the value cannot be safely represented as plain ASCII header value.",
+   "cite": "SH:296-298, 491-497"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "Designate tool parameters for header mirroring via the x-mcp-header extension property in inputSchema.",
+   "cite": "SH:359-363"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Support x-mcp-header: when a tool definition carries x-mcp-header annotations, mirror the designated parameter values into Mcp-Param-{name} headers.",
+   "cite": "SH:365-368"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "x-mcp-header value must not be empty.",
+   "cite": "SH:379"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "x-mcp-header value matches HTTP field-name token syntax (1*tchar, RFC 9110 §5.1).",
+   "cite": "SH:380"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "x-mcp-header value must not contain control characters including CR or LF.",
+   "cite": "SH:381-382"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "x-mcp-header values are case-insensitively unique within the inputSchema.",
+   "cite": "SH:383-384"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "x-mcp-header only on primitive types integer, string, boolean; type number not permitted; integers within JavaScript safe range (-(2^53-1) .. 2^53-1).",
+   "cite": "SH:385-388"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "x-mcp-header only on properties statically reachable from the schema root via a chain consisting solely of `properties` keys; never through items/array keywords, oneOf/anyOf/allOf/not, if/then/else, or $ref; an annotation anywhere else makes the tool definition invalid.",
+   "cite": "SH:389-396"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Extract header values by reading the instance value at the exact property path of the annotated property; omit the header when no value is present at that path.",
+   "cite": "SH:398-401, 532-535"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On Streamable HTTP, reject tool definitions where any x-mcp-header value violates the constraints; rejection means excluding the invalid tool from the tools/list result.",
+   "cite": "SH:403-405"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Log a warning when rejecting a tool definition, including tool name and reason.",
+   "cite": "SH:406-408"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "Clients on other transports (e.g. stdio) may ignore x-mcp-header annotations entirely.",
+   "cite": "SH:409-410"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Encode parameter values before including them in headers: string as-is; integer as decimal string (e.g. 42, -7); boolean as lowercase 'true'/'false'.",
+   "cite": "SH:470-477"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When a value cannot be safely represented as a plain ASCII header value (non-ASCII, control chars, leading/trailing whitespace), use Base64 of the UTF-8 bytes in the form =?base64?{Base64}?= for Mcp-Param-{Name} and Mcp-Name.",
+   "cite": "SH:479-497"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "The sentinel prefix '=?base64?' and suffix '?=' are case-sensitive and appear exactly as shown (lowercase).",
+   "cite": "SH:499-501"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Servers and intermediaries that inspect Mcp-Name / Mcp-Param-{Name} decode sentinel-encoded values; servers decode before comparing to the body during validation.",
+   "cite": "SH:501-505, 626-628"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Also Base64-encode any plain-ASCII value that itself matches the sentinel pattern (starts with =?base64? and ends with ?=).",
+   "cite": "SH:507-509"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When constructing a tools/call over HTTP: (1) extract method/params.name/params.uri, (2) append Mcp-Method and if applicable Mcp-Name, (3) inspect inputSchema for x-mcp-header properties and extract at exact path (omit when absent), (4) encode per Value Encoding, (5) append Mcp-Param-{Name}: {Value}.",
+   "cite": "SH:523-538"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If the server returns HeaderMismatch because required Mcp-Param-* headers are missing or mismatched, call tools/list to refresh the inputSchema, then retry with correct headers.",
+   "cite": "SH:540-545"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Intermediate servers that do not recognize an Mcp-Param-{Name} header forward it and otherwise ignore it (RFC 9110).",
+   "cite": "SH:549-551"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Reject requests whose recognized Mcp-Param-{Name} header contains invalid characters.",
+   "cite": "SH:553-554"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Any server processing the body validates that header values (after Base64 decoding) match the corresponding body values; reject with 400 Bad Request and JSON-RPC error -32020 HeaderMismatch on any failure.",
+   "cite": "SH:556-560, 583-588, 596-602"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Include the Mcp-Param header when the parameter value is provided; omit it when the value is null or the parameter is absent from arguments.",
+   "cite": "SH:562-566"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Expect an Mcp-Param header when the parameter value is null or absent from arguments.",
+   "cite": "SH:565-566"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Reject the request when the client omits an Mcp-Param header but the value is present in the body.",
+   "cite": "SH:567"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Compare header names case-insensitively; header values (e.g. method names) are case-sensitive.",
+   "cite": "SH:573-577"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Compare integer header vs body values numerically rather than as strings (42.0 == 42).",
+   "cite": "SH:590-594"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Treat as validation failure: missing required standard header (MCP-Protocol-Version, Mcp-Method, Mcp-Name), header/body value mismatch, or header value with invalid characters.",
+   "cite": "SH:621-629"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Intermediaries return an appropriate HTTP error status (e.g. 400) for validation failures; a JSON-RPC error body is not required from them.",
+   "cite": "SH:631-635"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Intermediaries enforcing policy on mirrored headers verify MCP-Protocol-Version indicates a version requiring header-body validation; reject requests with older/absent version rather than trusting unvalidated headers.",
+   "cite": "SH:637-643"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "A dual-era client may detect the server era by attempting a modern request first.",
+   "cite": "SH:647-650"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "On 400 Bad Request, inspect the response body before falling back: a recognized modern JSON-RPC error (UnsupportedProtocolVersionError, MissingRequiredClientCapabilityError, HeaderMismatch) means modern server → retry with advertised supported versions or correct the request; empty/unrecognized body → fall back to initialize and legacy semantics.",
+   "cite": "SH:650-660"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Cache the era determination per origin (HTTP) for the lifetime of the server; MAY persist across restarts, re-probing if the assumption later fails.",
+   "cite": "versioning.md:150-154"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "A server supporting only this revision responds 405 Method Not Allowed to GET or DELETE on the MCP endpoint.",
+   "cite": "SH:675-679"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ignore an Mcp-Session-Id request header; do not mint or echo session IDs.",
+   "cite": "SH:680-681"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "Ignore a Last-Event-ID header; streams are not resumable.",
+   "cite": "SH:682"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "both",
+   "text": "New implementations adopt the deprecated HTTP+SSE (2024-11-05) transport; existing ones SHOULD migrate to Streamable HTTP.",
+   "cite": "SH:692-703"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "To support legacy HTTP+SSE servers: POST first; if it fails with 400/404/405 AND the body is not a recognized modern JSON-RPC error, issue GET expecting an SSE stream whose first event is `endpoint`, then use the old transport.",
+   "cite": "SH:716-732"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Reject a request missing a required _meta field (io.modelcontextprotocol/protocolVersion or io.modelcontextprotocol/clientCapabilities) with -32602 Invalid params; on HTTP the status MUST be 400.",
+   "cite": "basic index:369-384"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "Return MissingRequiredClientCapabilityError (-32021, data.requiredCapabilities) with HTTP 400 when a request requires an undeclared client capability; never rely on undeclared capabilities.",
+   "cite": "basic index:389-394; schema.ts:503-526"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "Infer client capabilities from prior requests (capabilities are per request).",
+   "cite": "schema.ts:92-98"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Include io.modelcontextprotocol/clientInfo in _meta on every request unless configured not to.",
+   "cite": "basic index:386-387; schema.ts:77-90"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "When a response stream breaks before the response arrives, re-issue the request as a new request with a new request ID (no redelivery).",
+   "cite": "changelog.md:30"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "Establish timeouts for all sent requests; on HTTP timeout is realized by closing the response stream; SDKs SHOULD allow per-request timeout configuration and SHOULD enforce a maximum timeout even when progress notifications reset the clock.",
+   "cite": "cancellation.md:47-66"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "On a subscriptions/listen stream, send notifications/subscriptions/acknowledged first and include io.modelcontextprotocol/subscriptionId in _meta of every notification delivered on it; never send notification types the client did not opt in to.",
+   "cite": "subscriptions.md:56-93; schema.ts:120-134, 1265-1266, 1386-1391; basic index:414-416"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "When tearing down a subscriptions/listen stream on its own initiative, send the SubscriptionsListenResult (with _meta subscriptionId) as the JSON-RPC response before closing the stream.",
+   "cite": "subscriptions.md:124-138; schema.ts:1337-1351"
+  },
+  {
+   "level": "SHOULD NOT",
+   "actor": "server",
+   "text": "Mark sensitive parameters (passwords, API keys, tokens, PII) with x-mcp-header because header values are visible to intermediaries.",
+   "cite": "tools.md:395-398"
+  },
+  {
+   "level": "MAY",
+   "actor": "server",
+   "text": "A dual-era server may implement both legacy (initialize handshake, sessions) and modern behaviour, selecting by how the client opens; may serve both concurrently on the same endpoint.",
+   "cite": "versioning.md:130-132, 176-185"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "A modern-only server names its supported protocol versions in any error returned to a legacy initialize request.",
+   "cite": "versioning.md:156-159"
+  }
+ ],
+ "wire_details": [
+  "Endpoint: single path supporting POST, e.g. https://example.com/mcp (SH:45-47). Conformance harness defaults to http://localhost:3000/mcp or :3001/mcp (conformance_README.md:23, 272-277).",
+  "HTTP methods: POST only. GET/DELETE → 405 Method Not Allowed for modern-only servers (SH:678-679).",
+  "Request headers: Accept: application/json, text/event-stream (both MUST be listed, SH:75-76); Content-Type: application/json (in every example, SH:303-307,333-337,439-445; no explicit MUST in prose); MCP-Protocol-Version: 2026-07-28 (SH:255); Mcp-Method: <method> (SH:291); Mcp-Name: <params.name|params.uri> (SH:292); Mcp-Param-{Name}: <value> (SH:374-375, 488); Origin (validated, SH:57-61). Header names case-insensitive, values case-sensitive (SH:573-577).",
+  "Legacy headers to ignore: Mcp-Session-Id (do not mint/echo), Last-Event-ID (SH:680-682).",
+  "Response headers: Content-Type: application/json (single JSON object) or Content-Type: text/event-stream (SSE) (SH:87-89); X-Accel-Buffering: no SHOULD accompany SSE (SH:133-134).",
+  "HTTP status codes: 200 (implied for JSON/SSE responses, mermaid SH:180); 202 Accepted, empty body, for accepted notifications (SH:82-83); 400 Bad Request for header mismatch/missing/malformed headers (-32020), unsupported protocol version (-32022), missing required client capability (-32021), missing required _meta (-32602) (SH:259-267, 596-598; basic index:382-394); 403 Forbidden for invalid Origin (SH:59-61); 404 Not Found + -32601 for unknown method (SH:271-275); 405 Method Not Allowed for GET/DELETE (SH:678-679).",
+  "JSON-RPC error codes: -32020 HeaderMismatch (HEADER_MISMATCH), -32021 MissingRequiredClientCapability (data.requiredCapabilities: ClientCapabilities), -32022 UnsupportedProtocolVersion (data.supported: string[], data.requested: string), -32601 Method not found, -32602 Invalid params (schema.ts:434-526; SH:600-602; basic index:131-137). Range -32020..-32099 reserved for spec; -32000..-32019 implementation-defined; -32002 and -32042 reserved-never-reused (schema.ts:407-425). Changelog:65-69: HeaderMismatch moved -32001→-32020, MissingRequiredClientCapability -32003→-32021, UnsupportedProtocolVersion -32004→-32022.",
+  "Example HeaderMismatch body: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32020,\"message\":\"Header mismatch: Mcp-Name header value 'foo' does not match body value 'bar'\"}} (SH:610-619). Example UnsupportedProtocolVersion body: {\"code\":-32022,\"message\":\"Unsupported protocol version\",\"data\":{\"supported\":[\"2026-07-28\",\"2025-11-25\"],\"requested\":\"1900-01-01\"}} (versioning.md:56-69).",
+  "_meta keys on requests: io.modelcontextprotocol/protocolVersion (string, required), io.modelcontextprotocol/clientCapabilities (ClientCapabilities, required; {} = none), io.modelcontextprotocol/clientInfo (Implementation {name, version,...}, SHOULD), io.modelcontextprotocol/logLevel (LoggingLevel, optional, deprecated SEP-2577), progressToken (schema.ts:63-111; basic index:375-380). Results: io.modelcontextprotocol/serverInfo (SHOULD, basic index:398-404). Notifications/results on listen streams: io.modelcontextprotocol/subscriptionId = RequestId of the listen request (schema.ts:120-134, 1326-1335).",
+  "Base64 sentinel: `=?base64?{Base64(UTF-8 bytes)}?=`, prefix/suffix lowercase and case-sensitive; applies to Mcp-Name and Mcp-Param-{Name}; also applied to plain-ASCII values that themselves match the sentinel pattern (SH:487-509). Examples: \"Hello, 世界\" → =?base64?SGVsbG8sIOS4lueVjA==?= ; \" padded \" → =?base64?IHBhZGRlZCA=?= ; \"line1\\nline2\" → =?base64?bGluZTEKbGluZTI=?= ; \"=?base64?literal?=\" → =?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?= (SH:513-519).",
+  "Header-safe value definition: visible ASCII 0x21-0x7E, space 0x20, HTAB 0x09 per RFC 9110; unsafe if non-ASCII, control chars, or leading/trailing whitespace (SH:479-485). Type conversion: string as-is; integer decimal (42, -7); boolean lowercase true/false (SH:473-477).",
+  "x-mcp-header: JSON Schema extension keyword on a property schema inside tool.inputSchema; value is the {name} portion of Mcp-Param-{name}; constraints: non-empty, 1*tchar (RFC 9110 §5.1), no CR/LF/control chars, case-insensitively unique per inputSchema, only integer|string|boolean (not number), integers within ±(2^53-1), only on properties reachable purely via `properties` chain (no items, oneOf/anyOf/allOf/not, if/then/else, $ref) (SH:374-396; tools.md:344-357; schema.ts:1990-1993).",
+  "Standard header table: Mcp-Method ← method (all requests); Mcp-Name ← params.name or params.uri (tools/call, resources/read, prompts/get) (SH:289-292).",
+  "SSE framing: stream is per-request; carries JSON-RPC notifications then final response; keep-alive comment lines `:\\r\\n` allowed and must be ignored; no SSE event ids / Last-Event-ID / retry semantics in this revision (SH:106-152). Event name field not specified on this page.",
+  "Cancellation on HTTP = client closes the SSE response stream; no notifications/cancelled (SH:235-239; cancellation.md:41-43). Timeout realized the same way (cancellation.md:55-56).",
+  "subscriptions/listen constants: method \"subscriptions/listen\"; params.notifications: SubscriptionFilter {toolsListChanged?, promptsListChanged?, resourcesListChanged?, resourceSubscriptions?: string[]}; ack method \"notifications/subscriptions/acknowledged\" with params.notifications: SubscriptionFilter; delivered notifications: notifications/tools/list_changed, notifications/prompts/list_changed, notifications/resources/list_changed, notifications/resources/updated {uri} (schema.ts:1270-1418).",
+  "MRTR on HTTP: server returns InputRequiredResult (resultType \"input_required\", inputRequests: elicitation/create | sampling/createMessage | roots/list) and the client POSTs a retry of the original request with a new id carrying inputResponses (SH:195-213; changelog:26-28; schema.ts:536-538).",
+  "Protocol version constants: LATEST_PROTOCOL_VERSION = \"2026-07-28\" (schema.ts:30); 2025-11-25 schema LATEST = \"2025-11-25\"; fallback assumption for header-less requests when supporting old clients: \"2025-03-26\" (SH:277-279).",
+  "Backward-compat detection: on 400/404/405 inspect body; 'recognized modern JSON-RPC error' = UnsupportedProtocolVersionError (-32022), MissingRequiredClientCapabilityError (-32021), HeaderMismatch (-32020), and -32601 for unknown method (SH:650-660, 724-727).",
+  "Legacy HTTP+SSE (2024-11-05) probe: GET server URL → SSE stream whose first event is named `endpoint` (SH:728-732)."
+ ],
+ "sdk_implications": [
+  "Server transport (PowerShell HttpListener/Kestrel-equivalent): expose one configurable endpoint path; route POST only; reply 405 to GET/DELETE; ignore Mcp-Session-Id and Last-Event-ID; never emit session headers (SH:45-47, 675-682).",
+  "Server: Origin validation middleware with an allow-list (and a mode for non-browser clients where Origin is absent); on invalid Origin return 403 with optional id-less JSON-RPC error body; default bind address 127.0.0.1 when local; pluggable authentication hook (SH:57-64).",
+  "Server: parse exactly one JSON-RPC request or notification per POST; reject JSON-RPC responses and batches (treat as not accepted → 400 with id-less JSON-RPC error) (SH:79-86).",
+  "Server: header-validation layer executed before dispatch: require MCP-Protocol-Version, Mcp-Method, and (for tools/call, resources/read, prompts/get) Mcp-Name; decode =?base64?…?= sentinel; compare case-sensitively for strings, numerically for integers; validate every Mcp-Param-{Name} against the value at the annotated property path in params.arguments, including 'header present but body value null/absent' and 'body value present but header missing'; reject invalid characters; on any failure respond 400 + {code:-32020, message} preserving the request id (SH:553-629).",
+  "Server: protocol-version gate: compare header vs _meta.protocolVersion (mismatch → 400/-32020); unsupported version → 400 + -32022 with data.supported (server's list) and data.requested; optional legacy-fallback flag treating missing header as 2025-03-26 only when dual-era mode is enabled (SH:257-281).",
+  "Server: unknown method → HTTP 404 with JSON-RPC -32601 body (not 200) (SH:271-275). Missing required _meta → 400/-32602; missing client capability → 400/-32021 with data.requiredCapabilities (basic index:382-394).",
+  "Server: per-request response strategy: buffered JSON (application/json) when the handler emits no notifications, or SSE (text/event-stream, X-Accel-Buffering: no, optional periodic ':' keep-alive) when the handler emits progress/log notifications; the final response closes the stream. Never write a JSON-RPC request onto a stream; server→client needs are surfaced as InputRequiredResult (SH:87-139, 195-213).",
+  "Server: wire client disconnect of the response stream to a CancellationToken for the handler; suppress any further writes after cancellation; do not expect notifications/cancelled over HTTP (SH:235-239).",
+  "Server: subscriptions/listen handler returns a long-lived SSE stream: first message notifications/subscriptions/acknowledged with the honored SubscriptionFilter; tag every notification and the closing result with _meta io.modelcontextprotocol/subscriptionId = listen request id; on shutdown send SubscriptionsListenResult then close; only opted-in types (subscriptions.md; schema.ts:1261-1401).",
+  "Server tool registration: validate x-mcp-header annotations at registration time against the constraint list (non-empty, tchar syntax, no CR/LF, case-insensitive uniqueness, primitive type not number, safe-integer range, properties-only reachability) and fail fast; warn against annotating sensitive params (SH:377-396; tools.md:395-398).",
+  "Client transport: one HttpClient POST per message; always set Accept: application/json, text/event-stream, Content-Type: application/json, MCP-Protocol-Version, Mcp-Method, Mcp-Name (for the three methods), Mcp-Param-* derived from the cached tool inputSchema; encoder implementing type conversion + Base64 sentinel (including sentinel-pattern escaping) (SH:74-78, 470-538).",
+  "Client: on tools/list, validate every tool's x-mcp-header annotations and drop invalid tools from the returned list with a logged warning (Write-Warning) (SH:403-408). Cache inputSchema per tool for header mirroring; on -32020 caused by Mcp-Param-* re-fetch tools/list and retry once (SH:540-545).",
+  "Client: response reader must branch on Content-Type: parse a single JSON object, or an SSE parser that ignores comment lines, dispatches interim notifications (progress/message) to per-request callbacks, and resolves on the JSON-RPC response with matching id; handle stream end without response as failure and re-issue with a new id (no Last-Event-ID resume) (SH:106-152; changelog:30).",
+  "Client: cancellation and timeout = abort the HTTP request/dispose the response stream; per-request configurable timeout with a hard maximum; optionally reset on progress (cancellation.md:47-66).",
+  "Client: MRTR loop — when result.resultType == 'input_required', service inputRequests (elicitation/sampling/roots via host callbacks) and re-POST the original request with a new id plus inputResponses (SH:195-213).",
+  "Client: subscriptions/listen support — keep a long-lived SSE reader, surface acknowledged filter, correlate via _meta subscriptionId, treat abrupt close as reconnect trigger by re-sending subscriptions/listen (subscriptions.md:118-165).",
+  "Client: dual-era detection — send a modern request; on 400/404/405 parse the body; if it is a JSON-RPC error with code -32020/-32021/-32022/-32601 stay modern (retry with a version from data.supported); else fall back to legacy initialize (2025-11-25 transport with Mcp-Session-Id, GET stream, Last-Event-ID) and optionally to HTTP+SSE via GET `endpoint` event; cache the era per origin (SH:647-732; versioning.md:150-154).",
+  "Both: header-name comparisons case-insensitive; PowerShell/.NET header collections already do this, but the Mcp-Param-{Name} uniqueness check must be case-insensitive explicitly (SH:383-384, 573-577).",
+  "Both: expose error types/constants HEADER_MISMATCH=-32020, MISSING_REQUIRED_CLIENT_CAPABILITY=-32021, UNSUPPORTED_PROTOCOL_VERSION=-32022 and typed error classes mirroring schema.ts HeaderMismatchError, UnsupportedProtocolVersionError, MissingRequiredClientCapabilityError (schema.ts:434-526).",
+  "Conformance: the harness drives `conformance server --url http://localhost:3000/mcp` and `--requirements 2026-07-28`; SDK must run a Streamable HTTP everything-server on a configurable port and an everything-client reading MCP_CONFORMANCE_SCENARIO / MCP_CONFORMANCE_CONTEXT (conformance_README.md:23-26,149; conformance_SDK_INTEGRATION.md:40-41)."
+ ],
+ "legacy_delta": [
+  "Sessions: 2025-11-25 servers MAY assign Mcp-Session-Id on the InitializeResult response; clients MUST then send it on every request; servers requiring it SHOULD 400 without it; server MAY terminate → 404, after which the client MUST re-initialize; client SHOULD DELETE to end a session (server MAY 405). 2026-07-28 removes sessions entirely; modern-only servers SHOULD ignore Mcp-Session-Id and not mint/echo it (SEP-2567; 2025-11-25 transports §Session Management; SH:19, 665-682; changelog:14).",
+  "GET stream: 2025-11-25 clients MAY GET the MCP endpoint (Accept: text/event-stream) to open a server-initiated stream; server MUST return text/event-stream or 405. 2026-07-28 removes GET; replaced by subscriptions/listen POST whose response is the long-lived stream; modern-only servers SHOULD 405 GET (SH:18, 124-131, 678; changelog:20).",
+  "Server-initiated requests: 2025-11-25 servers MAY send JSON-RPC requests (sampling, elicitation, roots) on POST-response or GET SSE streams and clients POST the JSON-RPC responses back (202). 2026-07-28: servers MUST NOT send requests on any stream; clients MUST NOT POST responses; replaced by MRTR InputRequiredResult/inputResponses (SH:80, 114-121, 195-213; changelog:26).",
+  "Resumability: 2025-11-25 servers MAY attach SSE event ids, SHOULD prime with an empty-data event, MAY close the connection and send `retry`, clients resume via GET + Last-Event-ID, server MAY replay per-stream. 2026-07-28: none of this; Last-Event-ID ignored; broken stream = lost request, client MUST re-issue with new id (SEP-2575; SH:152, 682; changelog:30).",
+  "Cancellation: 2025-11-25 says disconnection SHOULD NOT be interpreted as cancellation and clients SHOULD send notifications/cancelled. 2026-07-28: closing the SSE response stream MUST be treated as cancellation; notifications/cancelled is not used by clients on HTTP (SH:92-102, 235-239).",
+  "POST body: 2025-11-25 allows a single request, notification, or response (batching already removed in 2025-06-18). 2026-07-28 allows only request or notification (SH:79-80).",
+  "Protocol version header: 2025-11-25 requires MCP-Protocol-Version on 'all subsequent requests' after initialize, value SHOULD be the negotiated one; missing header → server SHOULD assume 2025-03-26; invalid/unsupported → 400 (no defined JSON-RPC code). 2026-07-28 requires it on every POST, it MUST equal _meta protocolVersion, mismatch → 400/-32020, unsupported → 400/-32022 with data.supported/requested; header-less requests are only tolerated (as 2025-03-26) by servers that opt to support pre-2025-06-18 clients, otherwise rejected (SH:252-281).",
+  "Header mirroring: Mcp-Method, Mcp-Name, Mcp-Param-{Name}, x-mcp-header and the Base64 sentinel are new in 2026-07-28 (SEP-2243); absent from 2025-11-25 and 2025-06-18 (SH:244-643; changelog:37).",
+  "Error codes renumbered: HeaderMismatch -32001→-32020, MissingRequiredClientCapability -32003→-32021, UnsupportedProtocolVersion -32004→-32022; HeaderMismatchError added to schema (changelog:65-69). 2025-11-25-only codes: -32002 resource not found (now -32602), -32042 URL elicitation required (schema.ts:422-424; 2025-11-25_schema.ts:181).",
+  "Initialize/lifecycle: legacy era uses initialize / notifications/initialized handshake and connection-scoped capabilities; modern era declares protocolVersion, clientInfo, clientCapabilities per request in _meta with no handshake; server/discover is the modern discovery method (versioning.md:14-15, 36-41, 75-80; 2025-11-25_schema.ts:251-301).",
+  "Subscriptions/logging: 2025-11-25 resources/subscribe, resources/unsubscribe, logging/setLevel RPCs are replaced by subscriptions/listen resourceSubscriptions and _meta io.modelcontextprotocol/logLevel (the latter itself deprecated as of 2026-07-28) (schema.ts:99-110, 1283-1287; 2025-11-25_schema.ts:738-764, 1503-1520).",
+  "Backward-compat probe: 2025-11-25 clients probe with POST InitializeRequest and fall back to HTTP+SSE GET on any 400/404/405. 2026-07-28 dual-era clients probe with any modern request and MUST first distinguish a recognized modern JSON-RPC error body (stay modern) from a non-modern 4xx (fall back to initialize, then possibly HTTP+SSE) (SH:645-732; versioning.md:161-185).",
+  "Security section (Origin/403, localhost binding, authentication) is unchanged between 2025-11-25 and 2026-07-28 (SH:53-67 vs 2025-11-25 §Security Warning).",
+  "HTTP+SSE 2024-11-05 transport: deprecated since 2025-03-26, now formally classified Deprecated under the feature-lifecycle policy (SEP-2596) and eligible for removal; a dual-era SDK may still implement it for legacy servers (SH:690-732; changelog:84-87)."
+ ],
+ "open_questions": [
+  "Accept header on notification POSTs: SH:75-78 says every POST MUST include Accept and the metadata headers, but the Note at SH:92-102 says header requirements for notification POSTs are 'not defined by this revision'. SDK should send the full header set on notification POSTs anyway and servers should not reject notifications for missing Mcp-* headers.",
+  "Content-Type on the request: every example uses Content-Type: application/json but no MUST is stated; charset parameter handling (e.g. application/json; charset=utf-8) is unspecified. Recommend servers accept any application/json media type with optional parameters.",
+  "HTTP status for ordinary JSON-RPC error responses (e.g. tool execution errors, -32602 for bad tool args, -32603): the page only mandates 400 for -32020/-32021/-32022/missing _meta and 404 for -32601. Presumably 200 for other JSON-RPC errors; not stated. Also unstated: status for the JSON/SSE success path (200 implied by mermaid diagram).",
+  "SSE event format details are not specified on this page: whether an `event:` name is used, whether one JSON-RPC message per `data:` event is required, and how multi-line data is handled. Check the TypeScript SDK v2 for the de-facto framing (likely `event: message` + `data: <json>`).",
+  "Mcp-Name for prompts/get: source is params.name; for resources/read the source is params.uri. Whether resources/templates or completion/complete require Mcp-Name is not stated (only the three listed methods).",
+  "Origin validation when the Origin header is absent (non-browser clients): the MUST only covers 'present and invalid'; behavior for absent Origin is left to the implementation.",
+  "Interaction between MCP-Protocol-Version fallback (treat missing header as 2025-03-26) and the required Mcp-Method/Mcp-Name headers: a 2025-03-26 request would lack all Mcp-* headers, so a dual-era server must skip header validation entirely for legacy-era requests; the page does not spell this out.",
+  "Whether a server MUST validate Mcp-Param-* headers for tools it defines without x-mcp-header (i.e. unknown Mcp-Param headers sent by a misbehaving client): the page requires rejecting recognized headers with invalid characters and forwarding unrecognized ones at intermediaries, but not whether an origin server must ignore or reject unrecognized Mcp-Param-* headers.",
+  "Keep-alive: recommended interval for ':' comment lines is not specified.",
+  "Whether the id of the final JSON-RPC response on an SSE stream may be followed by trailing data before close, and how clients should treat additional events after the response (SHOULD terminate, not MUST).",
+  "Multiple concurrent subscriptions/listen streams per client and any server-side limits are not addressed on this page (subscriptions.md:111 says a client MAY have multiple).",
+  "No local copy of the 2025-11-25 transports page exists in the scratchpad; the legacy delta above relies on a curl fetch of modelcontextprotocol.io/specification/2025-11-25/basic/transports.md performed during this extraction."
+ ]
+}

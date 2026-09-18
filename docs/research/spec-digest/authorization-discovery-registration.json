@@ -1,0 +1,457 @@
+{
+ "source": "MCP 2026-07-28: specification/basic/authorization/authorization-server-discovery.md; specification/basic/authorization/client-registration.md; specification/basic/authorization/security-considerations.md (all read in full). Cross-referenced for the focus topics: specification/basic/authorization/index.md lines 61-254 (Overview, Scope Selection Strategy, Authorization Response Validation / RFC 9207, Resource Parameter Implementation); specification/changelog.md (Minor changes 7-9, Deprecated 4); specification/deprecated.md (DCR row); conformance_README.md (auth suites, requirement sets). schema.ts contains no OAuth types (only an extension-key example \"io.modelcontextprotocol/oauth-client-credentials\" at line 776), so everything here is HTTP/OAuth wire behavior, not JSON-RPC.",
+ "summary": "These three pages define the HTTP-level OAuth 2.1 plumbing around MCP, not JSON-RPC methods. Discovery: MCP servers MUST serve RFC 9728 Protected Resource Metadata (PRM) with a non-empty `authorization_servers`, advertised either via `WWW-Authenticate: Bearer resource_metadata=\"...\"` on 401 or at `/.well-known/oauth-protected-resource[/<mcp-path>]`; clients MUST support both, prefer the header, and fall back path-inserted-then-root. AS metadata discovery uses RFC 8414's default `oauth-authorization-server` suffix plus OIDC discovery in a fixed priority order (3 URLs for path-bearing issuers, 2 otherwise); the returned `issuer` MUST equal the issuer used to build the URL or the document MUST be rejected. Registration: priority is pre-registered creds > Client ID Metadata Documents (CIMD, gated by `client_id_metadata_document_supported`) > Dynamic Client Registration (deprecated, gated by `registration_endpoint`) > prompt user. CIMD `client_id` is an https URL with a path whose document contains at least `client_id`, `client_name`, `redirect_uris`, with `client_id` byte-equal to the URL. DCR requests MUST carry `application_type` (`native` for desktop/CLI/localhost, `web` for remote). Pre-registered/DCR credentials MUST be keyed by AS `issuer`, never reused across ASes, and re-registered when the AS changes; CIMD ids are portable. Security: PKCE (S256) mandatory with refusal if `code_challenge_methods_supported` is absent; RFC 9207 `iss` validation before code redemption (mix-up defense); `resource` parameter in authorization and token requests; exact redirect-URI matching, `state` verification; servers MUST validate token audience and MUST NOT pass tokens through to upstream APIs; proxy servers MUST obtain per-client consent (confused deputy); HTTPS everywhere except `localhost` redirects.",
+ "methods": [
+  {
+   "name": "HTTP GET <resource_metadata URL> / GET /.well-known/oauth-protected-resource[/<mcp-endpoint-path>] (RFC 9728 PRM fetch; NOT a JSON-RPC method)",
+   "direction": "client->server",
+   "params": "None (plain HTTPS GET). URL source, in order: (1) `resource_metadata` parameter parsed from the `WWW-Authenticate` header of a 401 response; (2) constructed `https://<host>/.well-known/oauth-protected-resource/<path-of-MCP-endpoint>`; (3) constructed `https://<host>/.well-known/oauth-protected-resource`.",
+   "result": "JSON PRM document (RFC 9728). Field named by the spec: `authorization_servers` (array of issuer URLs, MUST contain >= 1). Also referenced by the index page: `scopes_supported` (optional; used by scope-selection fallback) and `resource` (RFC 9728 resource identifier; aligns with canonical server URI). Other RFC 9728 fields are not enumerated by the MCP spec.",
+   "capability_gate": "None (server-side MUST for any MCP server that uses authorization). Server MUST implement at least one of the two advertisement mechanisms; client MUST support both.",
+   "notes": "authorization-server-discovery.md §Authorization Server Location, §Protected Resource Metadata Discovery Requirements. Multiple `authorization_servers` entries are independent ASes; client selects per RFC 9728 §7.6 and keeps per-AS state. Sequence diagram: if neither well-known URI is found, client aborts or uses pre-configured values."
+  },
+  {
+   "name": "HTTP GET authorization server metadata (RFC 8414 / OIDC Discovery; NOT a JSON-RPC method)",
+   "direction": "client->server",
+   "params": "None. For issuer WITH path (e.g. https://auth.example.com/tenant1), try in order: (1) https://auth.example.com/.well-known/oauth-authorization-server/tenant1 (2) https://auth.example.com/.well-known/openid-configuration/tenant1 (3) https://auth.example.com/tenant1/.well-known/openid-configuration. For issuer WITHOUT path: (1) https://auth.example.com/.well-known/oauth-authorization-server (2) https://auth.example.com/.well-known/openid-configuration.",
+   "result": "JSON AS metadata. Fields the MCP spec depends on: `issuer` (string, REQUIRED for validation: MUST be identical to the issuer used to build the URL), `code_challenge_methods_supported` (array; MUST be present or client MUST refuse to proceed; MUST contain S256 for MCP clients to use S256), `client_id_metadata_document_supported` (boolean; true => CIMD accepted), `registration_endpoint` (string; presence => DCR available), `authorization_response_iss_parameter_supported` (boolean; drives `iss` handling), `scopes_supported` (referenced only for the PRM document, not AS metadata, in MCP text), plus standard `authorization_endpoint`, `token_endpoint` (implied by OAuth 2.1 use; not named in these three pages).",
+   "capability_gate": "AS MUST provide at least one of RFC 8414 or OIDC Discovery (index.md Overview item 5); client MUST support both.",
+   "notes": "authorization-server-discovery.md §Authorization Server Metadata Discovery. MCP does not define an application-specific well-known suffix. Validation per RFC 8414 §3.3 / OIDC Discovery §4.3; example: document at https://attacker.example/.well-known/oauth-authorization-server with \"issuer\":\"https://honest.example\" MUST be rejected."
+  },
+  {
+   "name": "HTTP GET <client_id URL> (Client ID Metadata Document fetch; performed by the AS, hosted by the client; NOT a JSON-RPC method)",
+   "direction": "server->client",
+   "params": "None. The `client_id` is itself the https URL with a path component (e.g. https://example.com/client.json).",
+   "result": "JSON document. REQUIRED: `client_id` (string, MUST equal the document URL exactly), `client_name` (string), `redirect_uris` (array of strings). Shown in example (optional): `client_uri`, `logo_uri`, `grant_types` ([\"authorization_code\"]), `response_types` ([\"code\"]), `token_endpoint_auth_method` (\"none\"). `private_key_jwt` with JWKS config MAY be used per draft §6.2 (field names for JWKS not given in MCP text).",
+   "capability_gate": "AS advertises `\"client_id_metadata_document_supported\": true` in AS metadata. Client SHOULD check it and MAY fall back to DCR or pre-registration.",
+   "notes": "client-registration.md §Client ID Metadata Documents. AS SHOULD fetch on URL-formatted client_ids, SHOULD cache respecting HTTP cache headers, MUST validate document is valid JSON with required fields, MUST validate redirect_uri in authorization request against `redirect_uris`. On validation failure AS returns `error=invalid_client` or `invalid_request` (sequence diagram). AS MUST/SHOULD consider SSRF and domain trust policies (security-considerations.md §Client ID Metadata Document Security)."
+  },
+  {
+   "name": "HTTP POST <registration_endpoint> (RFC 7591 Dynamic Client Registration; DEPRECATED; NOT a JSON-RPC method)",
+   "direction": "client->server",
+   "params": "RFC 7591 registration JSON. MCP-specific: `application_type` (string, MUST be specified: \"native\" SHOULD be used for desktop/mobile/CLI/localhost-hosted web apps; \"web\" SHOULD be used for remote browser apps). Omitting defaults to \"web\" under OIDC. Other RFC 7591 fields (e.g. redirect_uris) not enumerated by MCP.",
+   "result": "RFC 7591 client credentials (client_id and, if applicable, client secret; field names not enumerated in MCP text). Registration may be rejected due to OIDC redirect-URI constraints; client MUST handle failure, SHOULD surface meaningful error, MAY retry with adjusted `application_type` or conforming redirect URIs.",
+   "capability_gate": "Presence of `registration_endpoint` in AS metadata. Client and AS MAY support DCR.",
+   "notes": "client-registration.md §Dynamic Client Registration, §Application Type and Redirect URI Constraints. Deprecated in 2026-07-28 (PR #2858), earliest removal: first revision released on or after 2027-07-28. Persisted DCR credentials MUST be keyed by AS `issuer`."
+  },
+  {
+   "name": "OAuth 2.1 Authorization Request (browser redirect to authorization_endpoint; NOT a JSON-RPC method)",
+   "direction": "client->server",
+   "params": "`client_id` (pre-registered id, CIMD https URL, or DCR id), `redirect_uri` (MUST be registered; MUST be localhost or https), `code_challenge` + `code_challenge_method=S256` (MUST), `resource` (MUST; canonical MCP server URI, RFC 8707), `scope` (SHOULD: from WWW-Authenticate `scope` if present, else PRM `scopes_supported`, else omitted), `state` (SHOULD use and verify). Before redirect the client MUST record the validated `issuer` in the same per-request record as the code verifier and state.",
+   "result": "Authorization response on redirect_uri (application/x-www-form-urlencoded query): `code`, `state`, optional `iss` (RFC 9207), or `error`/`error_description`/`error_uri`. Client MUST validate `iss` per table before sending the code to any token endpoint; on mismatch MUST NOT act on or display error fields.",
+   "capability_gate": "Client MUST refuse to proceed if `code_challenge_methods_supported` is absent from AS metadata. If AS metadata has `authorization_response_iss_parameter_supported: true` and `iss` is absent, client MUST reject the response.",
+   "notes": "security-considerations.md §Authorization Code Protection, §Mix-Up Attacks, §Open Redirection; index.md §Authorization Response Validation, §Resource Parameter Implementation, §Scope Selection Strategy."
+  },
+  {
+   "name": "OAuth 2.1 Token Request (POST token_endpoint; NOT a JSON-RPC method)",
+   "direction": "client->server",
+   "params": "`code`, `code_verifier` (PKCE), `client_id`, `redirect_uri`, `resource` (MUST be included, same canonical URI as in authorization request), client authentication if confidential (CIMD clients MAY use `private_key_jwt`).",
+   "result": "Access token (+ refresh token). AS SHOULD issue short-lived access tokens; for public clients AS MUST rotate refresh tokens (OAuth 2.1 §4.3.1). Client then sends `Authorization: Bearer <token>` on every MCP HTTP request; tokens MUST NOT go in the URI query string.",
+   "capability_gate": "None beyond successful registration and PKCE verification.",
+   "notes": "security-considerations.md §Token Audience Binding and Validation, §Token Theft, §Access Token Privilege Restriction; index.md §Access Token Usage."
+  },
+  {
+   "name": "Inbound access-token validation at MCP server (resource-server side; NOT a JSON-RPC method)",
+   "direction": "client->server",
+   "params": "`Authorization: Bearer <access-token>` header on every request.",
+   "result": "On missing/invalid token: HTTP 401 Unauthorized with `WWW-Authenticate: Bearer resource_metadata=\"<url>\"` and optional `scope=\"...\"`. On success: normal MCP processing. Server MUST verify token was issued for this server (audience claim or equivalent) per OAuth 2.1 §5.2 and MUST NOT forward the token to upstream APIs.",
+   "capability_gate": "None; MUST for any authorized MCP server.",
+   "notes": "security-considerations.md §Access Token Privilege Restriction, §Token Audience Binding; discovery §Protected Resource Metadata Discovery Requirements."
+  }
+ ],
+ "requirements": [
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP servers MUST implement OAuth 2.0 Protected Resource Metadata (RFC 9728) to indicate authorization server locations.",
+   "cite": "authorization-server-discovery.md §Authorization Server Location"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "The PRM document returned by the MCP server MUST include the `authorization_servers` field containing at least one authorization server.",
+   "cite": "authorization-server-discovery.md §Authorization Server Location"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST maintain separate registration state (client credentials, tokens) per authorization server when multiple are listed in `authorization_servers`.",
+   "cite": "authorization-server-discovery.md §Authorization Server Location"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "Clients MUST NOT assume that credentials valid for one authorization server will be accepted by another.",
+   "cite": "authorization-server-discovery.md §Authorization Server Location"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP servers MUST implement at least one PRM discovery mechanism: (1) `resource_metadata` in the `WWW-Authenticate` header on `401 Unauthorized` (RFC 9728 §5.1), or (2) well-known URI at `/.well-known/oauth-protected-resource/<mcp-endpoint-path>` or at root `/.well-known/oauth-protected-resource`.",
+   "cite": "authorization-server-discovery.md §Protected Resource Metadata Discovery Requirements"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST support both discovery mechanisms, MUST use the resource metadata URL from the parsed `WWW-Authenticate` header when present, and otherwise MUST fall back to constructing and requesting the well-known URIs in order: endpoint-path-inserted first, then root.",
+   "cite": "authorization-server-discovery.md §Protected Resource Metadata Discovery Requirements"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST be able to parse `WWW-Authenticate` headers and respond appropriately to HTTP 401 Unauthorized responses from the MCP server.",
+   "cite": "authorization-server-discovery.md §Protected Resource Metadata Discovery Requirements"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "server",
+   "text": "MCP servers SHOULD include a `scope` parameter in the `WWW-Authenticate` header (RFC 6750 §3) indicating required scopes; clients MUST treat challenged scopes as authoritative for the current operation and MUST NOT assume any set relationship with `scopes_supported`.",
+   "cite": "authorization-server-discovery.md §Protected Resource Metadata Discovery Requirements; index.md §Scope Selection Strategy"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST attempt multiple well-known endpoints when discovering AS metadata, using RFC 8414's default `oauth-authorization-server` suffix (MCP defines no application-specific suffix).",
+   "cite": "authorization-server-discovery.md §Authorization Server Metadata Discovery"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For issuer URLs with path components, clients MUST try in priority order: (1) `<origin>/.well-known/oauth-authorization-server/<path>`, (2) `<origin>/.well-known/openid-configuration/<path>`, (3) `<origin>/<path>/.well-known/openid-configuration`.",
+   "cite": "authorization-server-discovery.md §Authorization Server Metadata Discovery"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "For issuer URLs without path components, clients MUST try: (1) `<origin>/.well-known/oauth-authorization-server`, (2) `<origin>/.well-known/openid-configuration`.",
+   "cite": "authorization-server-discovery.md §Authorization Server Metadata Discovery"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "After retrieving AS metadata, clients MUST validate it per RFC 8414 §3.3 / OIDC Discovery §4.3: the `issuer` value MUST be identical to the issuer identifier used to construct the well-known URL; if they differ the client MUST NOT use the metadata.",
+   "cite": "authorization-server-discovery.md §Authorization Server Metadata Discovery"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Authorization servers MUST provide at least one of RFC 8414 metadata or OIDC Discovery 1.0; MCP clients MUST support both discovery mechanisms.",
+   "cite": "index.md §Overview item 5"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Before initiating the authorization flow, MCP clients MUST obtain a client ID via one of: Client ID Metadata Documents, pre-registration, or Dynamic Client Registration.",
+   "cite": "index.md §Client Registration"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Clients supporting all registration options SHOULD use priority: (1) pre-registered client information if available, (2) CIMD if AS advertises `client_id_metadata_document_supported`, (3) DCR if AS advertises `registration_endpoint`, (4) prompt user to enter client information.",
+   "cite": "client-registration.md intro"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "both",
+   "text": "MCP clients and authorization servers SHOULD support OAuth Client ID Metadata Documents (draft-ietf-oauth-client-id-metadata-document-00).",
+   "cite": "client-registration.md §Client ID Metadata Documents; index.md §Overview item 2"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementations supporting CIMD MUST follow the requirements of draft-ietf-oauth-client-id-metadata-document-00.",
+   "cite": "client-registration.md §Implementation Requirements"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "CIMD clients MUST host their metadata document at an HTTPS URL; the `client_id` URL MUST use the \"https\" scheme and contain a path component (e.g. https://example.com/client.json).",
+   "cite": "client-registration.md §Implementation Requirements (For MCP Clients)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "The CIMD document MUST include at least `client_id`, `client_name`, `redirect_uris`.",
+   "cite": "client-registration.md §Implementation Requirements (For MCP Clients)"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST ensure the `client_id` value in the metadata document matches the document URL exactly.",
+   "cite": "client-registration.md §Implementation Requirements (For MCP Clients)"
+  },
+  {
+   "level": "MAY",
+   "actor": "client",
+   "text": "CIMD clients MAY use `private_key_jwt` for client authentication (e.g. at the token endpoint) with appropriate JWKS configuration per CIMD draft §6.2.",
+   "cite": "client-registration.md §Implementation Requirements (For MCP Clients)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Authorization servers SHOULD fetch metadata documents when encountering URL-formatted client_ids and SHOULD cache them respecting HTTP cache headers. (Actor: authorization server.)",
+   "cite": "client-registration.md §Implementation Requirements (For Authorization Servers)"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Authorization servers MUST validate that the fetched CIMD's `client_id` matches the URL exactly, MUST validate redirect URIs in the authorization request against `redirect_uris` in the document, and MUST validate the document is valid JSON containing the required fields. (Actor: authorization server.)",
+   "cite": "client-registration.md §Implementation Requirements (For Authorization Servers)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "MCP clients SHOULD check for `client_id_metadata_document_supported` in AS metadata and MAY fall back to DCR or pre-registration if unavailable.",
+   "cite": "client-registration.md §Advertising CIMD Support"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "MCP clients SHOULD support an option for static (pre-registered) client credentials: hardcoded client ID (and credentials if applicable) per AS, or a UI for the user to enter them.",
+   "cite": "client-registration.md §Pre-registration"
+  },
+  {
+   "level": "MAY",
+   "actor": "both",
+   "text": "MCP clients and authorization servers MAY support RFC 7591 Dynamic Client Registration (deprecated; retained for backwards compatibility; new implementations SHOULD NOT adopt it).",
+   "cite": "client-registration.md §Dynamic Client Registration; deprecated.md"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST specify an appropriate `application_type` during Dynamic Client Registration (omitting defaults to \"web\" under OIDC; non-OIDC servers ignore it).",
+   "cite": "client-registration.md §Application Type and Redirect URI Constraints"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "Native applications (desktop, mobile, CLI tools, locally-hosted web apps accessed via localhost) SHOULD use `application_type: \"native\"`; web applications served from a non-local host SHOULD use `application_type: \"web\"`.",
+   "cite": "client-registration.md §Application Type and Redirect URI Constraints"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST be prepared to handle DCR failures due to redirect URI constraints when the AS implements OIDC; on rejection clients SHOULD surface a meaningful error and MAY retry with adjusted `application_type` or conforming redirect URIs.",
+   "cite": "client-registration.md §Application Type and Redirect URI Constraints"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients using pre-registered credentials or persisting DCR credentials MUST associate them with the specific authorization server that issued them, keyed by the AS `issuer` identifier.",
+   "cite": "client-registration.md §Authorization Server Binding"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "When the authorization server changes (detected via updated PRM), clients MUST NOT reuse client credentials from a different AS and MUST re-register with the new AS.",
+   "cite": "client-registration.md §Authorization Server Binding"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "If the AS indicated by PRM no longer matches the one the pre-registered credentials were registered with, clients SHOULD surface an error rather than silently attempting mismatched credentials.",
+   "cite": "client-registration.md §Authorization Server Binding"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementors MUST follow OAuth 2.1 Section 7 security best practices.",
+   "cite": "security-considerations.md intro"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST include the `resource` parameter (RFC 8707) in both authorization and token requests, identifying the MCP server by its canonical URI, regardless of whether the AS supports it.",
+   "cite": "security-considerations.md §Token Audience Binding and Validation, §Access Token Privilege Restriction; index.md §Resource Parameter Implementation"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP servers MUST validate that tokens presented to them were specifically issued for their use.",
+   "cite": "security-considerations.md §Token Audience Binding and Validation"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Clients and servers MUST implement secure token storage and follow OAuth 2.1 §7.1.",
+   "cite": "security-considerations.md §Token Theft"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "Authorization servers SHOULD issue short-lived access tokens; for public clients they MUST rotate refresh tokens (OAuth 2.1 §4.3.1). (Actor: authorization server.)",
+   "cite": "security-considerations.md §Token Theft"
+  },
+  {
+   "level": "MUST",
+   "actor": "both",
+   "text": "Implementations MUST follow OAuth 2.1 §1.5: all AS endpoints MUST be served over HTTPS; all redirect URIs MUST be either `localhost` or HTTPS.",
+   "cite": "security-considerations.md §Communication Security"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST implement PKCE (OAuth 2.1 §7.5.2) and MUST verify PKCE support before proceeding with authorization.",
+   "cite": "security-considerations.md §Authorization Code Protection"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST use the `S256` code challenge method when technically capable.",
+   "cite": "security-considerations.md §Authorization Code Protection"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Clients MUST rely on AS metadata to verify PKCE: if `code_challenge_methods_supported` is absent (from RFC 8414 metadata OR from OIDC provider metadata) the client MUST refuse to proceed.",
+   "cite": "security-considerations.md §Authorization Code Protection"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Authorization servers providing OIDC Discovery 1.0 MUST include `code_challenge_methods_supported` in their metadata. (Actor: authorization server.)",
+   "cite": "security-considerations.md §Authorization Code Protection"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Before redirecting the user-agent, the client MUST record the `issuer` from the selected AS's validated metadata and associate it with the per-request record holding the PKCE code verifier (and `state`).",
+   "cite": "index.md §Authorization Response Validation (referenced by security-considerations.md §Mix-Up Attacks)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "host",
+   "text": "MCP authorization servers SHOULD include the `iss` parameter in authorization responses (including error responses) per RFC 9207 §2; those that do MUST set `authorization_response_iss_parameter_supported: true` in metadata. (Actor: authorization server.)",
+   "cite": "index.md §Authorization Response Validation"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "On receiving the authorization response, clients MUST apply RFC 9207 §2.4 validation before sending the code to any token endpoint: supported=true & iss present -> simple string compare with recorded issuer; supported=true & iss absent -> reject; supported=false/absent & iss present -> simple string compare; supported=false/absent & iss absent -> proceed.",
+   "cite": "index.md §Authorization Response Validation"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "client",
+   "text": "After decoding `iss` from the application/x-www-form-urlencoded response, clients MUST NOT apply scheme/host case folding, default-port elision, trailing-slash, or percent-encoding normalization before comparison; on mismatch the client MUST NOT act on or display `error`, `error_description`, or `error_uri`.",
+   "cite": "index.md §Authorization Response Validation"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "MCP clients MUST have redirect URIs registered with the authorization server.",
+   "cite": "security-considerations.md §Open Redirection"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Authorization servers MUST validate exact redirect URIs against pre-registered values, MUST take precautions against redirecting to untrusted URIs (OAuth 2.1 §7.12.2), SHOULD only auto-redirect to trusted URIs and MAY otherwise inform the user. (Actor: authorization server.)",
+   "cite": "security-considerations.md §Open Redirection"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "MCP clients SHOULD use and verify `state` parameters in the authorization code flow and discard any results that lack or mismatch the original state.",
+   "cite": "security-considerations.md §Open Redirection"
+  },
+  {
+   "level": "MUST",
+   "actor": "host",
+   "text": "Authorization servers implementing CIMD MUST consider CIMD draft §6 security implications; SHOULD consider SSRF risks when fetching; SHOULD display additional warnings for localhost-only redirect URIs; MAY require additional attestation; MUST clearly display the redirect URI hostname during authorization; MAY implement domain-based trust policies. (Actor: authorization server.)",
+   "cite": "security-considerations.md §Client ID Metadata Document Security"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP proxy servers using static client IDs MUST obtain user consent for each dynamically registered client before forwarding to third-party authorization servers (confused deputy mitigation).",
+   "cite": "security-considerations.md §Confused Deputy Problem"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP servers MUST validate access tokens before processing the request, ensuring the token was issued specifically for the MCP server, follow OAuth 2.1 §5.2, and ensure no data is returned to unauthorized parties.",
+   "cite": "security-considerations.md §Access Token Privilege Restriction"
+  },
+  {
+   "level": "MUST",
+   "actor": "server",
+   "text": "MCP servers MUST only accept tokens intended for themselves and MUST reject tokens that do not include them in the audience claim or otherwise verify they are the intended recipient.",
+   "cite": "security-considerations.md §Access Token Privilege Restriction"
+  },
+  {
+   "level": "MUST NOT",
+   "actor": "server",
+   "text": "An MCP server acting as an OAuth client to upstream APIs MUST NOT pass through the token it received from the MCP client; the upstream token is a separate token from the upstream AS.",
+   "cite": "security-considerations.md §Access Token Privilege Restriction"
+  },
+  {
+   "level": "MUST",
+   "actor": "client",
+   "text": "Access tokens MUST be sent in the `Authorization: Bearer <token>` header on every HTTP request and MUST NOT be included in the URI query string.",
+   "cite": "index.md §Access Token Usage (context for the 401/WWW-Authenticate handling in discovery)"
+  },
+  {
+   "level": "SHOULD",
+   "actor": "client",
+   "text": "For scope selection clients SHOULD use the `scope` from the initial WWW-Authenticate 401 header if provided; otherwise all `scopes_supported` from the PRM document, omitting `scope` if `scopes_supported` is undefined; when re-authorizing SHOULD include challenged scopes alongside previously granted ones.",
+   "cite": "index.md §Scope Selection Strategy (referenced from discovery page)"
+  }
+ ],
+ "wire_details": [
+  "HTTP status: `401 Unauthorized` from MCP server when token missing/invalid; must carry or be followed by PRM discovery.",
+  "Header: `WWW-Authenticate: Bearer resource_metadata=\"<absolute URL>\"` optionally with `scope=\"<space-delimited scopes>\"` (RFC 9728 §5.1, RFC 6750 §3). Example: `WWW-Authenticate: Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource\", scope=\"files:read\"`.",
+  "Header: `Authorization: Bearer <access-token>` on every client->server HTTP request; never in query string.",
+  "Well-known PRM paths: `/.well-known/oauth-protected-resource/<mcp-endpoint-path>` (tried first) then `/.well-known/oauth-protected-resource` (root). Example: endpoint https://example.com/public/mcp -> https://example.com/.well-known/oauth-protected-resource/public/mcp.",
+  "Well-known AS metadata suffixes: `oauth-authorization-server` (RFC 8414 §3.1, path-insertion form `<origin>/.well-known/oauth-authorization-server/<issuer-path>`), `openid-configuration` (path-insertion `<origin>/.well-known/openid-configuration/<issuer-path>` and path-appending `<issuer>/.well-known/openid-configuration`). MCP defines no custom suffix.",
+  "PRM JSON fields named by MCP: `authorization_servers` (array, >=1 required), `scopes_supported` (optional), `resource`.",
+  "AS metadata JSON fields named by MCP: `issuer`, `code_challenge_methods_supported`, `client_id_metadata_document_supported` (boolean, `true` advertises CIMD), `registration_endpoint` (presence advertises DCR), `authorization_response_iss_parameter_supported` (boolean).",
+  "CIMD document JSON: required `client_id` (https URL with path, byte-identical to document URL), `client_name`, `redirect_uris` (array); example optional fields `client_uri`, `logo_uri`, `grant_types: [\"authorization_code\"]`, `response_types: [\"code\"]`, `token_endpoint_auth_method: \"none\"`. Client auth option: `private_key_jwt`.",
+  "CIMD validation failure error codes (from AS, per sequence diagram): `error=invalid_client` or `error=invalid_request`.",
+  "DCR request field: `application_type` with enum values `\"native\"` | `\"web\"` (OIDC Dynamic Client Registration 1.0); default when omitted under OIDC is `\"web\"`.",
+  "PKCE: `code_challenge_method=S256` mandatory when capable; discovery via `code_challenge_methods_supported` (absence => refuse).",
+  "RFC 9207: authorization response parameter `iss`; decoded from `application/x-www-form-urlencoded`; compared by simple string comparison (RFC 3986 §6.2.1) with no normalization; applies also to error responses (`error`, `error_description`, `error_uri` must be ignored on mismatch).",
+  "RFC 8707: `resource` parameter in authorization and token requests; canonical URI = scheme+host(+port)(+path), no fragment, prefer no trailing slash; example encoding `&resource=https%3A%2F%2Fmcp.example.com`.",
+  "Redirect URIs: MUST be `localhost` (http allowed, e.g. http://127.0.0.1:3000/callback, http://localhost:3000/callback in CIMD example) or HTTPS; AS matches exactly against registered values.",
+  "`state` parameter: SHOULD be generated, stored per-request with code_verifier and recorded issuer, and verified on callback.",
+  "Token endpoint: for public clients AS MUST rotate refresh tokens; access tokens SHOULD be short-lived.",
+  "No JSON-RPC methods, `_meta` keys, or JSON-RPC error codes are defined by these pages. The only auth-adjacent schema mention is the extension-key example `io.modelcontextprotocol/oauth-client-credentials` (schema.ts line 776).",
+  "Conformance: client suite `auth` includes scenarios `auth/basic-dcr`, `auth/basic-metadata-var1`, `auth/client-credentials-jwt`, `auth/dpop` (extension); per-revision requirement sets cover MCP server as OAuth resource server and MCP client as OAuth client only, not authorization servers (conformance_README.md)."
+ ],
+ "sdk_implications": [
+  "Client SDK: a 401 handler that parses `WWW-Authenticate` (RFC 6750/9728 auth-param grammar, quoted strings, multiple challenges), extracts `resource_metadata` and `scope`, and triggers the OAuth flow; fall back to constructing `/.well-known/oauth-protected-resource/<endpoint-path>` then root when the header lacks `resource_metadata`.",
+  "Client SDK: PRM fetcher/validator requiring non-empty `authorization_servers`; AS selection hook (default: first entry, overridable) and per-AS (per-issuer) storage of client credentials and tokens.",
+  "Client SDK: AS metadata discovery that builds the 3-URL (issuer with path) or 2-URL (no path) candidate list in the exact priority order, stops at first success, and rejects any document whose `issuer` is not byte-identical to the issuer used to build the URL.",
+  "Client SDK: PKCE generator (S256, verifier+challenge) and a hard gate that aborts if `code_challenge_methods_supported` is absent or lacks S256 in either RFC 8414 or OIDC metadata.",
+  "Client SDK: per-request authorization state record {code_verifier, state, expected_issuer, resource, redirect_uri, client_id} persisted until callback; callback validator implementing the RFC 9207 four-row table with strict string comparison and suppression of error fields on mismatch; `state` verification with discard on mismatch.",
+  "Client SDK: registration strategy selector implementing the SHOULD priority: injected pre-registered credentials -> CIMD when `client_id_metadata_document_supported === true` -> DCR when `registration_endpoint` present -> user-prompt callback; CIMD requires the host app to supply an https client_id URL with path and to host the document (SDK may provide a helper to generate the JSON with required fields and a validator that client_id == URL).",
+  "Client SDK: DCR (marked deprecated in docs/API) that always sends `application_type` (default \"native\" for a local PowerShell process; configurable \"web\"), handles registration rejection with a typed error and optional retry with adjusted application_type/redirect_uris.",
+  "Client SDK: credential store keyed by AS `issuer`; on PRM change to a different issuer, refuse to reuse stored DCR/pre-registered credentials, re-register (DCR) or error (pre-registered), while CIMD ids may be reused as-is.",
+  "Client SDK: always add `resource=<canonical MCP server URI>` (no fragment, no trailing slash by default, lowercase scheme/host, accept uppercase input) to authorization and token requests; scope selection: challenge `scope` > PRM `scopes_supported` > omit; merge with previously granted scopes on step-up.",
+  "Client SDK: enforce HTTPS for all AS endpoints and for redirect URIs except `localhost`/loopback; loopback redirect listener (e.g. HttpListener on 127.0.0.1/localhost) for native flows; secure token storage abstraction (e.g. DPAPI/SecretManagement on Windows, file with restricted ACL elsewhere) with refresh-token rotation handling.",
+  "Server SDK (resource server): serve PRM at `/.well-known/oauth-protected-resource[/<path>]` with `authorization_servers`, optional `scopes_supported`, `resource`; emit `401` with `WWW-Authenticate: Bearer resource_metadata=\"...\"[, scope=\"...\"]`; pluggable token validator (JWT/introspection) that MUST check audience == this server's canonical URI and reject others; never forward inbound bearer tokens upstream (separate upstream OAuth client credentials).",
+  "Server SDK: for proxy/intermediary servers with static upstream client IDs, provide a per-client consent hook before forwarding to third-party ASes (confused deputy).",
+  "Both: no JSON-RPC surface changes; but the HTTP transport layer must expose hooks for 401 handling and Authorization header injection on every request (stateless 2026-07-28 wire, no session id).",
+  "Testing: target conformance client suite `auth` (auth/basic-dcr, auth/basic-metadata-var1, auth/client-credentials-jwt) and server scenarios in `requirements/2026-07-28.yaml`; no AS implementation is required for MCP conformance."
+ ],
+ "legacy_delta": [
+  "vs 2025-11-25 (changelog Minor 7, SEP-2468): RFC 9207 `iss` handling is new. AS SHOULD emit `iss`; clients MUST validate a present `iss` against the recorded issuer before redeeming the code, and MUST reject an absent `iss` when `authorization_response_iss_parameter_supported` is true. A 2025-11-25-only client need not implement this; a dual-era client can apply it unconditionally since the table is safe against older ASes (absent flag + absent iss => proceed).",
+  "vs 2025-11-25 (changelog Minor 8, SEP-837): `application_type` MUST now be sent in DCR requests (native/web). Older revision did not require it; sending it is harmless to older ASes (non-OIDC ignore it).",
+  "vs 2025-11-25 (changelog Minor 9, SEP-2352): explicit issuer-keyed binding of client credentials, MUST NOT reuse across ASes, MUST re-register on AS change, and the discovery-page statement that clients MUST keep separate registration state per listed AS are new normative text.",
+  "vs 2025-11-25 (changelog Deprecated 4, PR #2858; deprecated.md): Dynamic Client Registration is now Deprecated (earliest removal: first revision on or after 2027-07-28). In 2025-11-25 and 2025-06-18 DCR was the primary/fallback SHOULD mechanism. Dual-era SDK must keep DCR functional but mark it deprecated and prefer CIMD.",
+  "Client ID Metadata Documents: present in 2026-07-28 as SHOULD for clients and ASes. CIMD was introduced in the 2025-11-25 revision (not in 2025-06-18); the 2025-11-25 page text was not available locally, so field-level differences to 2025-11-25 could not be verified (see open questions). A client talking to a 2025-06-18-era AS cannot rely on `client_id_metadata_document_supported` and must fall back to DCR or pre-registration.",
+  "Discovery mechanics (PRM via RFC 9728, WWW-Authenticate `resource_metadata`, the 3-URL/2-URL AS-metadata priority order, RFC 8707 `resource`, PKCE with S256, refusal when `code_challenge_methods_supported` is absent) are carried over from 2025-06-18/2025-11-25 in substance; unchanged behavior for dual-era support.",
+  "Non-auth but relevant to the HTTP layer these pages sit on: 2026-07-28 removed `Mcp-Session-Id`, the initialize handshake, GET SSE endpoint and `Last-Event-ID` (changelog Major 1,2,4,9) and requires `Mcp-Method`/`Mcp-Name` headers on POST (Minor 4). A dual-era transport must add `Authorization: Bearer` on every request in both wire modes.",
+  "schema.ts/schema.json for 2026-07-28, 2025-11-25 and 2025-06-18 contain no OAuth/authorization types; all auth behavior is prose-only in every revision."
+ ],
+ "open_questions": [
+  "The 2025-11-25 and 2025-06-18 authorization page texts are not in the local scratchpad; only their schemas are. Whether the 'issuer MUST be identical to the URL-construction issuer, else MUST NOT use metadata' sentence and the OIDC `code_challenge_methods_supported` refusal rule were already present verbatim in 2025-11-25 could not be confirmed locally (fetchable via curl from modelcontextprotocol.io/specification/2025-11-25/basic/authorization.md if the parent wants exact diffs).",
+  "The spec says clients MUST parse `WWW-Authenticate` but does not define behavior when multiple challenges or a non-Bearer scheme are present, nor which challenge's `resource_metadata` wins. SDK must pick a policy (suggest: first `Bearer` challenge).",
+  "When `authorization_servers` lists multiple entries, selection is delegated to RFC 9728 §7.6 with no MCP default. SDK needs a documented default (first entry) plus an override hook.",
+  "For the well-known PRM fallback, the spec does not say whether the endpoint path should include query strings or be normalized (trailing slash). SDK must define canonicalization of the MCP endpoint path used in `/.well-known/oauth-protected-resource/<path>`.",
+  "CIMD requires the client to host an HTTPS document; a locally-run PowerShell client has no natural hosting location. Decision needed: ship a documented per-distribution CIMD URL, require user-supplied URL, or default to pre-registration/DCR with CIMD opt-in.",
+  "`private_key_jwt` for CIMD clients references draft §6.2 JWKS configuration; the exact JWKS-related field names (`jwks`/`jwks_uri`) are not stated in the MCP text and must be taken from the draft.",
+  "Scope of 'MCP proxy servers using static client IDs MUST obtain user consent per dynamically registered client' after DCR deprecation is unclear for CIMD-registered clients; the text still says 'dynamically registered client'.",
+  "The index page's `iss` table keys rejection on `authorization_response_iss_parameter_supported`, and notes a future revision will upgrade AS inclusion of `iss` to MUST; SDK should make the strictness configurable.",
+  "Token validation on the server side (JWT vs introspection, audience claim shape `aud` vs `resource`) is left to OAuth 2.1 §5.2; the MCP text names no claim except 'audience claim'."
+ ]
+}
