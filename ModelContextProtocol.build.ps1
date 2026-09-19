@@ -60,9 +60,9 @@ function Invoke-BuildScriptAnalysis {
         PSScriptAnalyzer 1.25 occasionally fails while initialising its internal command-info cache and the runspace
         that runs custom rules: either with "The term 'Get-Command' is not recognized" or with a
         NullReferenceException ("Object reference not set to an instance of an object"). Neither failure is
-        reproducible on demand and both disappear on the next run, so the analysis (idempotent, a few seconds) is
-        retried up to three times before it counts as an error. A retry is reported as a build warning so that it
-        stays visible in the logs.
+        reproducible on demand, and once it has happened the analyzer's process-wide cache can stay broken, so
+        the first attempt runs in-process and up to two further attempts run the same analysis in fresh pwsh
+        processes. A retry is reported as a build warning so that it stays visible in the logs.
     #>
     param(
         [Parameter(Mandatory)]
@@ -72,7 +72,10 @@ function Invoke-BuildScriptAnalysis {
     $maximumAttempts = 3
     for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
         try {
-            return Invoke-ScriptAnalyzer -Path $Path -Recurse -Settings $script:AnalyzerSettings -CustomRulePath $script:CustomRulePath -IncludeDefaultRules -ErrorAction Stop
+            if ($attempt -eq 1) {
+                return Invoke-ScriptAnalyzer -Path $Path -Recurse -Settings $script:AnalyzerSettings -CustomRulePath $script:CustomRulePath -IncludeDefaultRules -ErrorAction Stop
+            }
+            return Invoke-BuildScriptAnalysisInChildProcess -Path $Path
         } catch {
             $message = $_.Exception.Message
             $transient = $_.Exception -is [System.NullReferenceException]
@@ -80,13 +83,66 @@ function Invoke-BuildScriptAnalysis {
                 if ($message -like $pattern) { $transient = $true }
             }
             if ($attempt -lt $maximumAttempts -and $transient) {
-                Write-Warning ("PSScriptAnalyzer failed transiently on '{0}' (attempt {1} of {2}): {3} Retrying." -f $Path, $attempt, $maximumAttempts, $message.Split("`n")[0].Trim())
+                Write-Warning ("PSScriptAnalyzer failed transiently on '{0}' (attempt {1} of {2}): {3} Retrying in a fresh process." -f $Path, $attempt, $maximumAttempts, $message.Split("`n")[0].Trim())
                 Start-Sleep -Seconds 2
                 continue
             }
             throw
         }
     }
+}
+
+function Invoke-BuildScriptAnalysisInChildProcess {
+    <#
+    .SYNOPSIS
+        Runs the analysis of one path in a fresh pwsh process and returns the findings (deserialised).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $resultFile = Join-Path ([System.IO.Path]::GetTempPath()) ('mcp-analyze-' + [guid]::NewGuid().ToString('n') + '.xml')
+    $command = @(
+        'Import-Module -Name PSScriptAnalyzer -MinimumVersion 1.25.0 -ErrorAction Stop'
+        "`$findings = @(Invoke-ScriptAnalyzer -Path '$Path' -Recurse -Settings '$($script:AnalyzerSettings)' -CustomRulePath '$($script:CustomRulePath)' -IncludeDefaultRules -ErrorAction Stop)"
+        "`$findings | Select-Object -Property Severity, RuleName, ScriptPath, Line, Message | Export-Clixml -Path '$resultFile' -Depth 3"
+        'exit 0'
+    ) -join '; '
+    try {
+        $output = & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -Command $command 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -Path $resultFile)) {
+            throw (($output | ForEach-Object { [string] $_ }) -join "`n")
+        }
+        @(Import-Clixml -Path $resultFile)
+    } finally {
+        Remove-Item -Path $resultFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Synopsis: Format the PowerShell sources in place with Invoke-Formatter and the repository settings.
+task Format {
+    Import-Module -Name PSScriptAnalyzer -MinimumVersion 1.25.0 -ErrorAction Stop
+    $roots = @('src', 'tests', 'tools', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+    $files = foreach ($root in $roots) {
+        if (Test-Path -Path $root -PathType Container) {
+            Get-ChildItem -Path $root -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1'
+        } else {
+            Get-Item -Path $root
+        }
+    }
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $changed = 0
+    foreach ($file in $files) {
+        $text = [System.IO.File]::ReadAllText($file.FullName)
+        $formatted = (Invoke-Formatter -ScriptDefinition $text -Settings $script:AnalyzerSettings).TrimEnd() + "`n"
+        if ($formatted -ne $text) {
+            [System.IO.File]::WriteAllText($file.FullName, $formatted, $utf8)
+            Write-Build Yellow "Format: $(Resolve-Path -Path $file.FullName -Relative)"
+            $changed++
+        }
+    }
+    Write-Build Green "Format: $changed file(s) changed."
 }
 
 # Synopsis: Remove the output directory.

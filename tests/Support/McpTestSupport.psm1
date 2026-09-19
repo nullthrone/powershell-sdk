@@ -151,3 +151,52 @@ function Get-McpPowerShellPath {
 }
 
 Export-ModuleMember -Function Get-McpRepositoryRoot, Get-McpBuiltModuleManifest, Get-McpSpecSchemaPath, Get-McpSpecSchema, Get-McpSpecDefinition, Invoke-McpChildProcess, Get-McpPowerShellPath
+
+function Invoke-McpInModule {
+    <#
+    .SYNOPSIS
+        Runs a script block in the scope of the imported ModelContextProtocol module (access to private functions).
+    #>
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory, Position = 0)]
+        [scriptblock] $ScriptBlock,
+
+        # Named arguments for the script block's param() block; use this for arrays and other enumerables,
+        # which positional binding would unroll.
+        [hashtable] $Parameters = @{},
+
+        [Parameter(Position = 1, ValueFromRemainingArguments)]
+        [object[]] $ArgumentList = @()
+    )
+
+    $module = Get-Module -Name ModelContextProtocol
+    if (-not $module) { throw 'The ModelContextProtocol module is not imported.' }
+    & $module $ScriptBlock @Parameters @ArgumentList
+}
+
+function Test-McpSpecShape {
+    <#
+    .SYNOPSIS
+        Validates a wire object against a definition of the vendored specification schema; returns IsValid and Errors.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Definition,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object] $Instance,
+
+        [string] $Revision = '2026-07-28'
+    )
+
+    $definitions = Get-McpSpecDefinition -Revision $Revision
+    $schema = @{ '$ref' = "#/`$defs/$Definition"; '$defs' = $definitions }
+    Invoke-McpInModule { param($s, $i) Test-McpJsonSchema -Schema $s -Instance $i } -Parameters @{ s = $schema; i = $Instance }
+}
+
+Export-ModuleMember -Function Invoke-McpInModule, Test-McpSpecShape
