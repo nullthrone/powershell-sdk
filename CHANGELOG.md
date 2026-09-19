@@ -11,6 +11,23 @@ support, dependency and breaking-change policy.
 
 ### Added
 
+- Milestone M1 (protocol core, stdio, tools): the stateless 2026-07-28 lifecycle with `server/discover`,
+  per-request `_meta` validation (`-32602`, `-32022` with the supported versions), `tools/list` with cursor
+  pagination and caching hints, `tools/call` with JSON Schema validation of the arguments, typed parameter
+  binding, result shaping (text, JSON, `structuredContent`, `isError`), `outputSchema` checks,
+  `notifications/progress`, `notifications/message` on request and `notifications/cancelled`; handlers run in
+  a hostless runspace pool with per-request cancellation tokens and an optional server-side timeout.
+- Server commands `New-McpServer`, `Register-McpTool` (functions, cmdlets, script files and script blocks;
+  schemas from parameters, validation attributes, comment-based help and defaults), `Start-McpServer`,
+  `Stop-McpServer`, `Invoke-McpToolHandler`; handler commands `New-McpContent`, `New-McpToolResult`,
+  `Write-McpProgress`, `Write-McpLog`, `Test-McpClientCapability`.
+- Client commands `Connect-McpServer` (stdio server processes with captured stderr, or a server object over an
+  in-memory transport), `Disconnect-McpServer`, `Get-McpServerInfo`, `Get-McpTool`, `Invoke-McpTool` with
+  progress callbacks, log notifications, timeouts and cancellation; format views for the result objects.
+- A System.Text.Json codec that keeps wire shapes (ordered, case-sensitive objects, arrays never unrolled,
+  request id types preserved), JSON Schema 2020-12 validation through the bundled JsonSchema.Net with a
+  PowerShell fallback validator, `McpProtocolException` as a type accelerator, `examples/echo-server.ps1`,
+  and a `Format` build task (Invoke-Formatter).
 - Milestone M0 (foundation): the `ModelContextProtocol` module skeleton (PowerShell 7.4+, Core edition only,
   no runtime dependencies), assembled from `src/` with ModuleBuilder; engine enums `McpEra` and
   `McpLoggingLevel` exported through type accelerators.

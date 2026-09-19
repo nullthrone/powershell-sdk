@@ -4,8 +4,11 @@ PowerShell SDK for building and consuming [Model Context Protocol](https://model
 and clients, targeting specification revision **2026-07-28** with dual-era support for 2025-11-25 and
 2025-06-18.
 
-> **Status: milestone M0 (foundation).** The module is a buildable, analysed and tested skeleton without
-> protocol functionality. The milestones are in [ROADMAP.md](ROADMAP.md); the design is in
+> **Status: milestone M1 (protocol core, stdio, tools).** Servers expose PowerShell functions, cmdlets,
+> scripts and script blocks as tools over stdio with the stateless 2026-07-28 lifecycle (`server/discover`,
+> per-request `_meta`, progress, cancellation), and the client side connects to such servers. Streamable
+> HTTP, resources, prompts, input requests (MRTR), subscriptions, the legacy revisions, authorization and the
+> extensions follow in M2 to M7. The milestones are in [ROADMAP.md](ROADMAP.md); the design is in
 > [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Requirements
@@ -13,6 +16,57 @@ and clients, targeting specification revision **2026-07-28** with dual-era suppo
 - PowerShell 7.4 or later on Windows, Linux or macOS (7.4 LTS, 7.5 and 7.6 LTS are tested in CI).
 - `CompatiblePSEditions = Core`; Windows PowerShell 5.1 is not supported and refuses to import the module.
 - No runtime dependencies: a pure script module that only uses assemblies shipped with PowerShell.
+
+## Quick start
+
+A server is a script that registers tools and serves stdio:
+
+```powershell
+#Requires -Version 7.4
+Import-Module ModelContextProtocol
+
+function Get-Weather {
+    <#
+    .SYNOPSIS
+        Current weather for a location.
+    .PARAMETER Location
+        City or postal code.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Location,
+        [ValidateSet('metric', 'imperial')] [string] $Units = 'metric'
+    )
+    [pscustomobject]@{ location = $Location; temperature = 21.5; units = $Units }
+}
+
+New-McpServer -Name weather -Version 1.0.0 -Instructions 'Weather lookups.' -SetDefault
+Register-McpTool -Command (Get-Command Get-Weather)        # schema from the parameters and the help
+Register-McpTool -Name echo -ScriptBlock { param([Parameter(Mandatory)][string] $Text) $Text }
+Start-McpServer                                             # serves stdio until stdin closes
+```
+
+Hosts start it with `pwsh -NoLogo -NoProfile -NonInteractive -File ./weather-server.ps1`. Tool arguments are
+validated against the generated JSON Schema and bound to the parameters; objects become
+`structuredContent`, strings become text, `New-McpContent` builds image, audio and resource blocks, and
+`Write-McpProgress`/`Write-McpLog` reach the client through a `Context` parameter. Handlers run in a worker
+runspace pool, so nothing they write to the host can reach stdout.
+
+The client side:
+
+```powershell
+$session = Connect-McpServer -Command pwsh -Arguments '-NoLogo', '-NoProfile', '-NonInteractive', '-File', './weather-server.ps1'
+Get-McpServerInfo | Format-List
+Get-McpTool | Select-Object Name, Description
+$result = Invoke-McpTool -Name Get-Weather -Arguments @{ Location = 'Berlin' }
+$result.StructuredContent.temperature
+Disconnect-McpServer
+```
+
+`Connect-McpServer -Server $serverObject` runs a server in a background runspace over an in-memory transport,
+which is how the tests exercise servers without child processes. `Invoke-McpToolHandler` calls a registered
+tool directly for unit tests of the tool itself. See `examples/echo-server.ps1` and
+[docs/development.md](docs/development.md) for the Inspector command line.
 
 ## Building from source
 

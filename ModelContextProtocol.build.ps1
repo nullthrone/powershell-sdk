@@ -123,7 +123,7 @@ function Invoke-BuildScriptAnalysisInChildProcess {
 # Synopsis: Format the PowerShell sources in place with Invoke-Formatter and the repository settings.
 task Format {
     Import-Module -Name PSScriptAnalyzer -MinimumVersion 1.25.0 -ErrorAction Stop
-    $roots = @('src', 'tests', 'tools', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+    $roots = @('src', 'tests', 'tools', 'examples', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
     $files = foreach ($root in $roots) {
         if (Test-Path -Path $root -PathType Container) {
             Get-ChildItem -Path $root -Recurse -File -Include '*.ps1', '*.psm1', '*.psd1'
@@ -175,7 +175,7 @@ task Analyze {
     } catch {
         Write-Warning ("PSScriptAnalyzer warm-up failed: {0}" -f $_.Exception.Message.Split("`n")[0].Trim())
     }
-    $paths = @('src', 'tests', 'tools', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+    $paths = @('src', 'tests', 'tools', 'examples', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
     $findings = @(foreach ($path in $paths) { Invoke-BuildScriptAnalysis -Path $path })
     if ($findings.Count -gt 0) {
         $findings |

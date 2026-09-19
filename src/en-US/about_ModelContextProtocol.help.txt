@@ -17,9 +17,25 @@ LONG DESCRIPTION
     Supported transports are stdio and Streamable HTTP.
 
 CURRENT STATUS
-    Milestone M0 (foundation): the module builds, imports without side effects
-    and is tested on PowerShell 7.4, 7.5 and 7.6, but exports no commands yet.
-    See ROADMAP.md in the repository for the milestones.
+    Milestone M1 (protocol core, stdio, tools): servers expose PowerShell
+    commands and script blocks as tools over stdio with the stateless
+    2026-07-28 lifecycle, and clients connect to such servers. Streamable HTTP,
+    resources, prompts, input requests, subscriptions, the legacy revisions,
+    authorization and the extensions follow in later milestones (ROADMAP.md).
+
+COMMANDS
+    Server:   New-McpServer, Register-McpTool, Start-McpServer, Stop-McpServer,
+              Invoke-McpToolHandler
+    Handlers: New-McpContent, New-McpToolResult, Write-McpProgress, Write-McpLog,
+              Test-McpClientCapability
+    Client:   Connect-McpServer, Disconnect-McpServer, Get-McpServerInfo,
+              Get-McpTool, Invoke-McpTool
+
+    A tool handler receives the request context through a parameter named
+    Context (request id, protocol version, client info and capabilities, log
+    level, progress token, cancellation token). Handlers run in a worker
+    runspace pool: pass everything they need as parameters; nothing they write
+    to the host reaches the client.
 
 REQUIREMENTS
     PowerShell 7.4 or later (Core edition). Windows PowerShell 5.1 is not

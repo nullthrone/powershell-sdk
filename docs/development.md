@@ -21,9 +21,10 @@ offline folder `tools/packages/` (`-DependencySource Offline`).
 
 | Task | Does |
 |---|---|
+| `Format` | `Invoke-Formatter` over `src`, `tests`, `tools`, `examples` and the build scripts with the repository settings, in place |
 | `Clean` | removes `output/` |
 | `Build` | ModuleBuilder: `src/{Enums,Classes,Private,Public}` in file-name order + `Suffix.ps1` → `output/ModelContextProtocol/<version>/ModelContextProtocol.psm1`; copies `en-US/`, `Types/`, `Formats/`, `LICENSE`; sets version and prerelease from `-SemVer` (default: manifest) |
-| `Analyze` | PSScriptAnalyzer over `src`, `tests`, `tools` and the build scripts with `PSScriptAnalyzerSettings.psd1` and the custom rules; any finding fails the task |
+| `Analyze` | PSScriptAnalyzer over `src`, `tests`, `tools`, `examples` and the build scripts with `PSScriptAnalyzerSettings.psd1` and the custom rules; any finding fails the task |
 | `Test` | `Build`, then Pester over `tests/Unit`, `tests/Integration`, `tests/Spec`, `tests/Compat` against the built module; NUnit XML under `output/test-results/`; `-TestTag`/`-ExcludeTestTag` filter, `-CodeCoverage` adds JaCoCo under `output/coverage/` |
 | `Coverage` | `Test` with coverage enabled |
 | `Help` | PlatyPS markdown under `docs/help/` and MAML in the built module (no-op while the module exports nothing) |
@@ -41,10 +42,48 @@ built manifest, vendored schema access, a child-process runner with UTF-8 stream
 
 | Folder | Scope | Notes |
 |---|---|---|
-| `tests/Unit` | manifest, import behaviour, type accelerators, enums against the schema, custom analyzer rules | in-process |
-| `tests/Integration` | fresh `pwsh` processes: import must be silent on stdout and stderr, also under `-File` | spawns processes |
+| `tests/Unit` | manifest, import behaviour, type accelerators, enums against the schema, custom analyzer rules, JSON codec, JSON-RPC model, `_meta` validation, JSON Schema generation and validation (both engines), tool registry and in-process invocation, `server/discover` and `tools/list` shapes against the vendored schema | in-process |
+| `tests/Integration` | fresh `pwsh` processes: import must be silent on stdout and stderr, also under `-File`; the client against a server in a background runspace (in-memory transport); `examples/echo-server.ps1` over stdio (encoding, 1 MB payloads, progress, timeouts, stderr capture, BOM-free stdout, EOF shutdown) | spawns processes |
 | `tests/Spec` | vendored schemas: hashes, definition counts, JSON-RPC envelope, checklist | data-driven |
 | `tests/Compat` | Windows PowerShell 5.1 guard (skipped off Windows), pinned version matrix (`MCP_EXPECTED_PWSH_VERSION`) | tags `PS51Guard`, `VersionMatrix` |
+
+## Manual verification with the Inspector
+
+The Inspector CLI (`@modelcontextprotocol/inspector`) defaults to the legacy `initialize` handshake and parses
+single-dash arguments such as `-File` as its own options, so describe the server in a config file:
+
+```json
+{
+  "mcpServers": {
+    "echo": {
+      "command": "pwsh",
+      "args": ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", "/abs/path/examples/echo-server.ps1"],
+      "env": { "MCP_MODULE_MANIFEST": "/abs/path/output/ModelContextProtocol/0.1.0/ModelContextProtocol.psd1" },
+      "protocolEra": "modern"
+    }
+  }
+}
+```
+
+```bash
+npx @modelcontextprotocol/inspector --cli --config inspector.json --server echo --method tools/list --format json
+npx @modelcontextprotocol/inspector --cli --config inspector.json --server echo --method tools/call --tool-name add --tool-args-json '{"A":2,"B":40}'
+```
+
+`MCP_MODULE_MANIFEST` makes the example import the built module instead of an installed one.
+
+## Performance (milestone M1, PowerShell 7.4 on Linux, 4 cores)
+
+| Measurement | Value |
+|---|---|
+| `Connect-McpServer` to `examples/echo-server.ps1` (process start, module import, `server/discover`) | about 1 s |
+| First `tools/call` after start (worker runspace warm-up) | about 200 ms |
+| Sequential `tools/call` round trip, stdio or in-memory | 25 to 30 ms |
+| Four parallel calls that each sleep 2 × 200 ms (`-MaxConcurrency 4`) | about 520 ms in total |
+| Stopping a cancelled handler that sleeps with `Start-Sleep` | about 25 ms |
+
+A handler blocked in a .NET call that ignores the pipeline stop (for example `[Thread]::Sleep`) is only
+stopped when the call returns; handlers should watch `$Context.CancellationToken` in long loops.
 
 ## CI
 

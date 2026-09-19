@@ -60,7 +60,7 @@ function Invoke-McpToolHandler {
     }
     $splat = ConvertTo-McpToolArgument -Registration $Registration -Arguments $Arguments -Context $Context
     $handler = $Registration.Handler
-    $threshold = if ($null -ne $Context -and $Context.PSObject.Properties['LogLevel'] -and $null -ne $Context.LogLevel) { $Context.LogLevel } else { $script:McpDefaultLogLevel }
+    $threshold = if ($null -ne $Context -and $Context.PSObject.Properties['ServerLogLevel'] -and $null -ne $Context.ServerLogLevel) { $Context.ServerLogLevel } else { $script:McpDefaultLogLevel }
 
     $merged = $null
     try {

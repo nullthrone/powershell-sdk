@@ -1,6 +1,11 @@
 # Transports
 
-Implemented in milestones M1 (stdio) and M2 (Streamable HTTP). This page records the design constraints.
+stdio is implemented (milestone M1); Streamable HTTP follows in M2. This page records the design constraints.
+
+Transports are plain data inside the module (a hashtable with a line reader and a line writer per kind) used
+only through a handful of private functions, so the same dispatcher and client code runs in whichever
+runspace hosts it. Besides stdio there is an in-memory transport (a pair of channels) that
+`Connect-McpServer -Server` uses to run a server object in a background runspace of the same process.
 
 ## stdio
 
@@ -13,6 +18,8 @@ Implemented in milestones M1 (stdio) and M2 (Streamable HTTP). This page records
 - Launch contract for hosts: `pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <abs>`.
 - Shutdown: EOF on stdin ends the server; the client closes the child's stdin, waits, then kills the process
   tree.
+- The client captures the server's stderr in a file (`StandardErrorPath` of the session), unbuffered, so that
+  diagnostics can be read while the server runs.
 
 ## Streamable HTTP
 

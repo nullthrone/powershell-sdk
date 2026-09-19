@@ -27,6 +27,7 @@ follow. The design is described in [docs/implementation-plan.md](docs/implementa
 ```powershell
 ./build.ps1 -Bootstrap                 # install build dependencies (once)
 ./build.ps1                            # Build: assemble output/ModelContextProtocol/<version>/
+./build.ps1 -Task Format               # Invoke-Formatter over the sources, in place
 ./build.ps1 -Task Analyze              # PSScriptAnalyzer with the repository settings and custom rules
 ./build.ps1 -Task Test                 # Build + Pester (unit, integration, spec, compat)
 ./build.ps1 -Task Test -CodeCoverage   # same, with JaCoCo coverage under output/coverage/
