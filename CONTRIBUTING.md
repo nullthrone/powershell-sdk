@@ -7,7 +7,7 @@ follow. The design is described in [docs/implementation-plan.md](docs/implementa
 ## Prerequisites
 
 - PowerShell 7.4 or later (7.4, 7.5 and 7.6 are tested in CI). Windows PowerShell 5.1 is not supported.
-- Node.js 20 or later with `npx` for the conformance suite and the MCP Inspector (from milestone M2).
+- Node.js 20 or later with `npx` for the conformance suite and the MCP Inspector.
 - Build and test dependencies are installed by `./build.ps1 -Bootstrap` (see `requirements.psd1`). In
   environments without access to the PowerShell Gallery, drop the `.nupkg` files into `tools/packages/` and
   run `./build.ps1 -Bootstrap -DependencySource Offline` (see `tools/README.md`).
@@ -17,7 +17,7 @@ follow. The design is described in [docs/implementation-plan.md](docs/implementa
 | Path | Content |
 |---|---|
 | `src/` | Module sources: `Enums/`, `Classes/` (numbered for deterministic order), `Private/`, `Public/` (one function per file, file name = function name), `Types/`, `Formats/`, `en-US/`, `Suffix.ps1`, `build.psd1` (ModuleBuilder settings) |
-| `tests/` | Pester tests: `Unit/`, `Integration/`, `Spec/` (vendored schemas), `Compat/`, `Conformance/` (from M2), `Support/` |
+| `tests/` | Pester tests: `Unit/`, `Integration/`, `Spec/` (vendored schemas), `Compat/`, `Conformance/` (fixtures of the conformance suite), `Support/` |
 | `tools/` | Custom PSScriptAnalyzer rules, maintenance scripts, offline package drop folder |
 | `docs/` | Concept documentation, generated command help, the implementation plan and research material |
 | `output/` | Build output (ignored by git) |
@@ -27,6 +27,7 @@ follow. The design is described in [docs/implementation-plan.md](docs/implementa
 ```powershell
 ./build.ps1 -Bootstrap                 # install build dependencies (once)
 ./build.ps1                            # Build: assemble output/ModelContextProtocol/<version>/
+./build.ps1 -Task Format               # Invoke-Formatter over the sources, in place
 ./build.ps1 -Task Analyze              # PSScriptAnalyzer with the repository settings and custom rules
 ./build.ps1 -Task Test                 # Build + Pester (unit, integration, spec, compat)
 ./build.ps1 -Task Test -CodeCoverage   # same, with JaCoCo coverage under output/coverage/
@@ -62,7 +63,7 @@ Tests import the built module, never `src/` directly. Set `MCP_MODULE_MANIFEST` 
 - Integration tests spawn real `pwsh` processes and use loopback HTTP; files go to `$TestDrive`.
 - Specification tests derive expectations from the vendored `schema.json`; every schema definition receives a
   constructor and a parser test as the type model grows (`tests/Spec/definitions-checklist.txt`).
-- Conformance runs (from milestone M2) use the pinned `@modelcontextprotocol/conformance` version and
+- Conformance runs (`./build.ps1 -Task Conformance`) use the pinned `@modelcontextprotocol/conformance` version and
   `conformance-baseline.yml`; the baseline may only shrink.
 
 ## Pull requests

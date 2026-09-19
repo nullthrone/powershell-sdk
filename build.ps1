@@ -42,6 +42,15 @@
 .PARAMETER ExcludeTestTag
     Skip Pester tests with one of these tags.
 
+.PARAMETER ConformanceRequirements
+    Requirement sets of the Conformance task (default: 2026-07-28). Each set runs the server and the client leg.
+
+.PARAMETER ConformanceLeg
+    Restrict the Conformance task to the Server or the Client leg.
+
+.PARAMETER ConformanceScenario
+    Run a single conformance scenario instead of a requirement set.
+
 .EXAMPLE
     ./build.ps1 -Bootstrap -Task CI
 
@@ -67,7 +76,14 @@ param(
 
     [string[]] $TestTag,
 
-    [string[]] $ExcludeTestTag
+    [string[]] $ExcludeTestTag,
+
+    [string[]] $ConformanceRequirements = @('2026-07-28'),
+
+    [ValidateSet('Server', 'Client')]
+    [string[]] $ConformanceLeg,
+
+    [string] $ConformanceScenario
 )
 
 $ErrorActionPreference = 'Stop'
@@ -353,5 +369,8 @@ if ($SemVer) { $invokeBuildParameters['SemVer'] = $SemVer }
 if ($CodeCoverage) { $invokeBuildParameters['CodeCoverage'] = $true }
 if ($TestTag) { $invokeBuildParameters['TestTag'] = $TestTag }
 if ($ExcludeTestTag) { $invokeBuildParameters['ExcludeTestTag'] = $ExcludeTestTag }
+if ($ConformanceRequirements) { $invokeBuildParameters['ConformanceRequirements'] = $ConformanceRequirements }
+if ($ConformanceLeg) { $invokeBuildParameters['ConformanceLeg'] = $ConformanceLeg }
+if ($ConformanceScenario) { $invokeBuildParameters['ConformanceScenario'] = $ConformanceScenario }
 
 Invoke-Build @invokeBuildParameters

@@ -1,9 +1,97 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Format views for the public PSTypeName shapes (Mcp.Tool, Mcp.ToolResult, Mcp.Resource, ...).
-  Empty until the first public objects exist (milestone M1).
+  Format views for the public PSTypeName shapes.
 -->
 <Configuration>
   <ViewDefinitions>
+    <View>
+      <Name>Mcp.Session</Name>
+      <ViewSelectedBy>
+        <TypeName>Mcp.Session</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Kind</Label><Width>9</Width></TableColumnHeader>
+          <TableColumnHeader><Label>ProtocolVersion</Label><Width>16</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Closed</Label><Width>7</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Endpoint</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Kind</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ProtocolVersion</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Closed</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Endpoint</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+    <View>
+      <Name>Mcp.ServerInfo</Name>
+      <ViewSelectedBy>
+        <TypeName>Mcp.ServerInfo</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>Name</PropertyName></ListItem>
+              <ListItem><PropertyName>Version</PropertyName></ListItem>
+              <ListItem><PropertyName>Title</PropertyName></ListItem>
+              <ListItem><PropertyName>ProtocolVersion</PropertyName></ListItem>
+              <ListItem><Label>SupportedVersions</Label><ScriptBlock>$_.SupportedVersions -join ', '</ScriptBlock></ListItem>
+              <ListItem><Label>Capabilities</Label><ScriptBlock>if ($_.Capabilities) { @($_.Capabilities.Keys) -join ', ' }</ScriptBlock></ListItem>
+              <ListItem><PropertyName>Instructions</PropertyName></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+    <View>
+      <Name>Mcp.Tool</Name>
+      <ViewSelectedBy>
+        <TypeName>Mcp.Tool</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Name</Label><Width>28</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Title</Label><Width>20</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Description</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <Wrap />
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Name</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Title</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Description</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+    <View>
+      <Name>Mcp.ToolResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Mcp.ToolResult</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>ToolName</PropertyName></ListItem>
+              <ListItem><PropertyName>IsError</PropertyName></ListItem>
+              <ListItem><PropertyName>Text</PropertyName></ListItem>
+              <ListItem><Label>Content</Label><ScriptBlock>@($_.Content | ForEach-Object { $_.type }) -join ', '</ScriptBlock></ListItem>
+              <ListItem><Label>StructuredContent</Label><ScriptBlock>if ($null -ne $_.StructuredContent) { $_.StructuredContent | ConvertTo-Json -Compress -Depth 20 }</ScriptBlock></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

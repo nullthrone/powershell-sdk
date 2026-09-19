@@ -8,6 +8,7 @@
 $script:McpTypeAccelerators = @(
     @{ Name = 'McpEra'; Type = [McpEra] }
     @{ Name = 'McpLoggingLevel'; Type = [McpLoggingLevel] }
+    @{ Name = 'McpProtocolException'; Type = [McpProtocolException] }
 )
 
 $script:McpTypeAcceleratorRegistry = [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')

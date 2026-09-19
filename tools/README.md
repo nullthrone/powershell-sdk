@@ -4,6 +4,7 @@
 |---|---|
 | `ScriptAnalyzerRules/McpAnalyzerRules.psm1` | Custom PSScriptAnalyzer rules (`Measure-McpStdoutPurity`, `Measure-McpNoInvokeExpression`), loaded by the `Analyze` task and tested in `tests/Unit/ScriptAnalyzerRules.Tests.ps1`. |
 | `Update-SpecSchemas.ps1` | Refreshes the vendored specification schemas in `tests/Spec/` from a pinned commit of the specification repository and regenerates the provenance manifest and the definition checklist. |
+| `Invoke-ScriptAnalyzerWorker.ps1` | Worker of the `Analyze` task: analyses one path in a fresh `pwsh` process and records findings and rule failures, so that the build can retry and re-analyse files on which a PSScriptAnalyzer rule failed. |
 | `Get-ChangelogSection.ps1` | Extracts the section of `CHANGELOG.md` for a version (used by the release workflow for the release notes). |
 | `packages/` | Drop folder for offline dependency packages (`.nupkg`, ignored by git). |
 
