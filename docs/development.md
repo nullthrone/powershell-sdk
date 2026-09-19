@@ -24,7 +24,7 @@ offline folder `tools/packages/` (`-DependencySource Offline`).
 | `Format` | `Invoke-Formatter` over `src`, `tests`, `tools`, `examples` and the build scripts with the repository settings, in place |
 | `Clean` | removes `output/` |
 | `Build` | ModuleBuilder: `src/{Enums,Classes,Private,Public}` in file-name order + `Suffix.ps1` → `output/ModelContextProtocol/<version>/ModelContextProtocol.psm1`; copies `en-US/`, `Types/`, `Formats/`, `LICENSE`; sets version and prerelease from `-SemVer` (default: manifest) |
-| `Analyze` | PSScriptAnalyzer over `src`, `tests`, `tools`, `examples` and the build scripts with `PSScriptAnalyzerSettings.psd1` and the custom rules; any finding fails the task |
+| `Analyze` | PSScriptAnalyzer over `src`, `tests`, `tools`, `examples` and the build scripts with `PSScriptAnalyzerSettings.psd1` and the custom rules; any finding fails the task. Each path is analysed in a fresh `pwsh` process with a timeout (`tools/Invoke-ScriptAnalyzerWorker.ps1`), and files on which a rule failed (PSScriptAnalyzer 1.25 runs its rules in parallel and occasionally loses a command lookup or throws a NullReferenceException) are re-analysed in further fresh processes; retries appear as build warnings |
 | `Test` | `Build`, then Pester over `tests/Unit`, `tests/Integration`, `tests/Spec`, `tests/Compat` against the built module; NUnit XML under `output/test-results/`; `-TestTag`/`-ExcludeTestTag` filter, `-CodeCoverage` adds JaCoCo under `output/coverage/` |
 | `Coverage` | `Test` with coverage enabled |
 | `Help` | PlatyPS markdown under `docs/help/` and MAML in the built module (no-op while the module exports nothing) |

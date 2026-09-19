@@ -63,3 +63,10 @@ support, dependency and breaking-change policy.
   dry run and gated PowerShell Gallery publish; label sync; issue and pull request templates; Dependabot.
 - Governance: roadmap, dependency and support policy, security policy, contributing guide, code of conduct,
   conformance baseline file, documentation skeleton.
+
+### Fixed
+
+- The `Analyze` build task no longer fails or hangs on PSScriptAnalyzer's sporadic rule failures: every path is
+  analysed in a fresh process with a timeout, and files on which a rule failed are re-analysed in further fresh
+  processes.
+

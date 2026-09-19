@@ -28,6 +28,7 @@ $script:BuildSettings = Join-Path $script:SourcePath 'build.psd1'
 $script:TestsPath = Join-Path $PSScriptRoot 'tests'
 $script:AnalyzerSettings = Join-Path $PSScriptRoot 'PSScriptAnalyzerSettings.psd1'
 $script:CustomRulePath = Join-Path $PSScriptRoot 'tools' 'ScriptAnalyzerRules' 'McpAnalyzerRules.psm1'
+$script:AnalyzerWorker = Join-Path $PSScriptRoot 'tools' 'Invoke-ScriptAnalyzerWorker.ps1'
 $script:ModuleOutputRoot = Join-Path $OutputDirectory $script:ModuleName
 $script:PackageDirectory = Join-Path $OutputDirectory 'packages'
 
@@ -58,14 +59,15 @@ function Get-BuildPlatformTag {
 function Invoke-BuildScriptAnalysis {
     <#
     .SYNOPSIS
-        Runs PSScriptAnalyzer over one path with the repository settings and custom rules.
+        Runs PSScriptAnalyzer over one path with the repository settings and custom rules; returns the findings.
     .DESCRIPTION
-        PSScriptAnalyzer 1.25 occasionally fails while initialising its internal command-info cache and the runspace
-        that runs custom rules: either with "The term 'Get-Command' is not recognized" or with a
-        NullReferenceException ("Object reference not set to an instance of an object"). Neither failure is
-        reproducible on demand, and once it has happened the analyzer's process-wide cache can stay broken, so
-        the first attempt runs in-process and up to two further attempts run the same analysis in fresh pwsh
-        processes. A retry is reported as a build warning so that it stays visible in the logs.
+        PSScriptAnalyzer 1.25 runs its rules in parallel tasks that are not entirely thread-safe: now and then a
+        rule fails on a file with a NullReferenceException or, after a lost command lookup, with "The term
+        'Get-Command' is not recognized", the analyzer keeps that state until the process exits, and once in a
+        while an analysis hangs. Every analysis therefore runs in a fresh pwsh process with a timeout
+        (tools/Invoke-ScriptAnalyzerWorker.ps1): a failed or timed-out process is retried, and files on which a
+        rule failed are re-analysed one by one in further fresh processes, so that a failure never hides a
+        finding. Retries are reported as build warnings so that they stay visible in the logs.
     #>
     param(
         [Parameter(Mandatory)]
@@ -74,51 +76,92 @@ function Invoke-BuildScriptAnalysis {
 
     $maximumAttempts = 3
     for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
-        try {
-            if ($attempt -eq 1) {
-                return Invoke-ScriptAnalyzer -Path $Path -Recurse -Settings $script:AnalyzerSettings -CustomRulePath $script:CustomRulePath -IncludeDefaultRules -ErrorAction Stop
-            }
-            return Invoke-BuildScriptAnalysisInChildProcess -Path $Path
-        } catch {
-            $message = $_.Exception.Message
-            $transient = $_.Exception -is [System.NullReferenceException]
-            foreach ($pattern in "*'Get-Command' is not recognized*", '*Object reference not set to an instance of an object*') {
-                if ($message -like $pattern) { $transient = $true }
-            }
-            if ($attempt -lt $maximumAttempts -and $transient) {
-                Write-Warning ("PSScriptAnalyzer failed transiently on '{0}' (attempt {1} of {2}): {3} Retrying in a fresh process." -f $Path, $attempt, $maximumAttempts, $message.Split("`n")[0].Trim())
-                Start-Sleep -Seconds 2
-                continue
-            }
-            throw
+        $result = Invoke-BuildScriptAnalyzerWorker -Path $Path
+        if ($null -eq $result) {
+            if ($attempt -lt $maximumAttempts) { Start-Sleep -Seconds 2; continue }
+            throw "PSScriptAnalyzer could not analyse '$Path' in $maximumAttempts attempts."
         }
+        $findings = @($result.Findings)
+        $affected = @($result.Failures | Select-Object -ExpandProperty File -Unique)
+        if ($affected.Count -eq 0) { return $findings }
+        $detail = ($result.Failures | Select-Object -Property File, Message -Unique | Select-Object -First 3 | ForEach-Object { "{0}: {1}" -f (Resolve-Path -Path $_.File -Relative -ErrorAction SilentlyContinue), $_.Message }) -join '; '
+        if ($affected.Count -gt 3 -and $attempt -lt $maximumAttempts) {
+            # A lost command lookup poisons the process: every file analysed after it fails too. Re-running the
+            # whole path in a fresh process is then cheaper than re-analysing every affected file on its own.
+            Write-Warning ("PSScriptAnalyzer rules failed on {0} file(s) under '{1}' ({2}); re-running the analysis in a fresh process (attempt {3} of {4})." -f $affected.Count, $Path, $detail, ($attempt + 1), $maximumAttempts)
+            Start-Sleep -Seconds 2
+            continue
+        }
+        Write-Warning ("PSScriptAnalyzer rules failed on {0} file(s) under '{1}' ({2}); re-analysing those files in fresh processes." -f $affected.Count, $Path, $detail)
+        $findings = @($findings | Where-Object { $_.ScriptPath -notin $affected })
+        foreach ($file in $affected) {
+            $findings += Invoke-BuildScriptFileAnalysis -Path $file
+        }
+        return $findings
     }
 }
 
-function Invoke-BuildScriptAnalysisInChildProcess {
+function Invoke-BuildScriptFileAnalysis {
     <#
     .SYNOPSIS
-        Runs the analysis of one path in a fresh pwsh process and returns the findings (deserialised).
+        Analyses one file in fresh processes until no rule fails on it (at most three attempts).
     #>
     param(
         [Parameter(Mandatory)]
         [string] $Path
     )
 
+    $maximumAttempts = 3
+    $lastMessage = ''
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+        $result = Invoke-BuildScriptAnalyzerWorker -Path $Path
+        if ($null -ne $result -and @($result.Failures).Count -eq 0) { return @($result.Findings) }
+        $lastMessage = if ($null -eq $result) { 'the process failed or timed out' } else { @($result.Failures)[0].Message }
+        if ($attempt -lt $maximumAttempts) { Start-Sleep -Seconds 2 }
+    }
+    throw "PSScriptAnalyzer failed on '$Path' in $maximumAttempts attempts: $lastMessage"
+}
+
+function Invoke-BuildScriptAnalyzerWorker {
+    <#
+    .SYNOPSIS
+        Runs tools/Invoke-ScriptAnalyzerWorker.ps1 in a fresh pwsh process with a timeout; returns its result or $null.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [int] $TimeoutSeconds = 300
+    )
+
     $resultFile = Join-Path ([System.IO.Path]::GetTempPath()) ('mcp-analyze-' + [guid]::NewGuid().ToString('n') + '.xml')
-    $command = @(
-        'Import-Module -Name PSScriptAnalyzer -MinimumVersion 1.25.0 -ErrorAction Stop'
-        "`$findings = @(Invoke-ScriptAnalyzer -Path '$Path' -Recurse -Settings '$($script:AnalyzerSettings)' -CustomRulePath '$($script:CustomRulePath)' -IncludeDefaultRules -ErrorAction Stop)"
-        "`$findings | Select-Object -Property Severity, RuleName, ScriptPath, Line, Message | Export-Clixml -Path '$resultFile' -Depth 3"
-        'exit 0'
-    ) -join '; '
+    $process = $null
     try {
-        $output = & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -Command $command 2>&1
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -Path $resultFile)) {
-            throw (($output | ForEach-Object { [string] $_ }) -join "`n")
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = (Get-Process -Id $PID).Path
+        foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script:AnalyzerWorker, '-Path', $Path, '-Settings', $script:AnalyzerSettings, '-CustomRulePath', $script:CustomRulePath, '-ResultPath', $resultFile)) {
+            $startInfo.ArgumentList.Add($argument)
         }
-        @(Import-Clixml -Path $resultFile)
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill($true)
+            Write-Warning ("PSScriptAnalyzer did not finish '{0}' within {1} s; the process was stopped and the analysis is retried." -f $Path, $TimeoutSeconds)
+            return $null
+        }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0 -or -not (Test-Path -Path $resultFile)) {
+            $output = (@($stdout.Result, $stderr.Result) -join "`n").Trim()
+            Write-Warning ("PSScriptAnalyzer process failed on '{0}' (exit code {1}): {2}" -f $Path, $process.ExitCode, $output.Split("`n")[0])
+            return $null
+        }
+        Import-Clixml -Path $resultFile
     } finally {
+        if ($null -ne $process) { $process.Dispose() }
         Remove-Item -Path $resultFile -Force -ErrorAction SilentlyContinue
     }
 }
@@ -170,14 +213,6 @@ task Build {
 
 # Synopsis: Run PSScriptAnalyzer (default rules, formatting rules and the repository's custom rules).
 task Analyze {
-    Import-Module -Name PSScriptAnalyzer -MinimumVersion 1.25.0 -ErrorAction Stop
-    # Warm-up on a trivial script: initialises the analyzer's command-info cache and the custom-rule runspace in this
-    # session, where the transient failures described in Invoke-BuildScriptAnalysis originate. Its outcome is ignored.
-    try {
-        $null = Invoke-ScriptAnalyzer -ScriptDefinition 'param() Get-Date' -Settings $script:AnalyzerSettings -CustomRulePath $script:CustomRulePath -IncludeDefaultRules -ErrorAction Stop
-    } catch {
-        Write-Warning ("PSScriptAnalyzer warm-up failed: {0}" -f $_.Exception.Message.Split("`n")[0].Trim())
-    }
     $paths = @('src', 'tests', 'tools', 'examples', 'build.ps1', 'ModelContextProtocol.build.ps1') | ForEach-Object { Join-Path $PSScriptRoot $_ }
     $findings = @(foreach ($path in $paths) { Invoke-BuildScriptAnalysis -Path $path })
     if ($findings.Count -gt 0) {
