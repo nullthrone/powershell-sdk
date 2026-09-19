@@ -15,8 +15,8 @@ support, dependency and breaking-change policy.
   `System.Net.HttpListener`: one JSON-RPC request or notification per POST, responses as a single JSON
   object or as a request-scoped SSE stream (progress and log notifications, keep-alive comments, a closed
   stream cancels the handler), validation of `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and
-  `Mcp-Param-*` against the body including the `=?base64?...?=` sentinel (`-32020`, HTTP 400), `Origin`
-  validation (403, `-AllowedOrigins`), 405 for GET and DELETE, 404 for unknown and removed methods, 202 for
+  `Mcp-Param-*` against the body including the `=?base64?...?=` sentinel (`-32020`, HTTP 400), `Host` (404)
+  and `Origin` validation (403, `-AllowedOrigins`), 405 for GET and DELETE, 404 for unknown and removed methods, 202 for
   notifications, body limits (`-MaxBodyBytes`) and `-KeepAliveSeconds`.
 - `Connect-McpServer -Url` (with `-Headers` and `-NoProxy`): the Streamable HTTP client on `HttpClient` with
   the request metadata headers, an SSE reader, timeouts that close the response stream, and `x-mcp-header`

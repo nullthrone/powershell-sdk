@@ -25,7 +25,7 @@ function Start-McpServer {
         Stdio (default), Http (with -Url) or InMemory (with -Endpoint).
     .PARAMETER Url
         The MCP endpoint of the HTTP transport (default: http://127.0.0.1:8080/mcp/). Clients must use the
-        same host name or address; the listener answers requests for other hosts with 404.
+        same host name or address: requests whose Host header names another host or port are answered with 404.
     .PARAMETER AllowedOrigins
         Origins (scheme://host[:port]) accepted in the Origin header, or '*' for any; the default accepts
         loopback origins and the server's own origin. Requests without an Origin header are always accepted.

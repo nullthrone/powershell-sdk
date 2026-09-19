@@ -30,9 +30,11 @@ runspace hosts it. Besides stdio there is an in-memory transport (a pair of chan
 **Server (`src/Private/HttpServer.ps1`)**
 
 - Host: `System.Net.HttpListener` with exactly the prefix of `-Url` (`scheme://host:port/path/`). The
-  listener only routes requests whose `Host` header matches that host, so clients must use the same host name
-  or address; other hosts get 404 from the listener itself, which is the first line of DNS-rebinding
-  protection. The default binding is the loopback address. TLS is not terminated by the module: put a reverse
+  server answers requests whose `Host` header does not name that host and port with 404, so clients must use
+  the same host name or address; this is the first line of DNS-rebinding protection and is checked by the
+  server itself because the listener implementations differ (the managed listener on Linux and macOS rejects
+  other hosts on its own, http.sys on Windows delivers any `Host` to a prefix bound to an IP address). The
+  default binding is the loopback address. TLS is not terminated by the module: put a reverse
   proxy in front, or use an http.sys certificate binding on Windows. On Windows, users without administrative
   rights need a URL reservation (`netsh http add urlacl`) for the prefix.
 - The dispatcher loop (`Invoke-McpHttpDispatcherLoop`) accepts connections, reads bodies asynchronously

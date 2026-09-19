@@ -198,6 +198,28 @@ Describe 'HTTP status codes and Origin validation' {
         Invoke-McpInModule { param($c) Get-McpHttpStatusCode -ErrorCode $c } -Parameters @{ c = $Code } | Should -Be $Expected
     }
 
+    It 'accepts only Host headers that name the endpoint host and port' {
+        $test = { param($u, $h) Invoke-McpInModule { param($u, $h) Test-McpHttpHost -Transport @{ Url = [uri] $u } -HostHeader $h } -Parameters @{ u = $u; h = $h } }
+        & $test 'http://127.0.0.1:8080/mcp/' '127.0.0.1:8080' | Should -BeTrue
+        & $test 'http://127.0.0.1:8080/mcp/' ' 127.0.0.1:8080 ' | Should -BeTrue
+        & $test 'http://localhost:8080/mcp/' 'LOCALHOST:8080' | Should -BeTrue
+        & $test 'http://localhost/mcp/' 'localhost' | Should -BeTrue
+        & $test 'http://localhost/mcp/' 'localhost:80' | Should -BeTrue
+        & $test 'https://mcp.example.com/mcp/' 'mcp.example.com' | Should -BeTrue
+        & $test 'https://mcp.example.com/mcp/' 'mcp.example.com:443' | Should -BeTrue
+        & $test 'http://[::1]:8080/mcp/' '[::1]:8080' | Should -BeTrue
+        & $test 'http://127.0.0.1:8080/mcp/' '127.0.0.1' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' '127.0.0.1:1' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' 'evil.example.com' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' 'evil.example.com:8080' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' '127.0.0.1:' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' '127.0.0.1:x' | Should -BeFalse
+        & $test 'http://[::1]:8080/mcp/' '[::1' | Should -BeFalse
+        & $test 'http://[::1]:8080/mcp/' '[::1]8080' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' '' | Should -BeFalse
+        & $test 'http://127.0.0.1:8080/mcp/' $null | Should -BeFalse
+    }
+
     It 'accepts loopback and own origins by default and honours an allow list' {
         $transport = @{ Url = [uri] 'http://127.0.0.1:8080/mcp/'; AllowedOrigins = @() }
         $test = { param($t, $o) Invoke-McpInModule { param($t, $o) Test-McpHttpOrigin -Transport $t -Origin $o } -Parameters @{ t = $t; o = $o } }

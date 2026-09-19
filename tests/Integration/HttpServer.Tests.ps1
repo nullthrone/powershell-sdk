@@ -149,8 +149,11 @@ Describe 'Raw Streamable HTTP behaviour' -Tag 'Integration' {
         (Send-Raw -Body $script:listCall -Headers @{ Origin = 'http://localhost:5173'; 'Mcp-Method' = 'tools/list' }).Status | Should -Be 200
     }
 
-    It 'rejects other hosts (DNS rebinding) and unsupported media types' {
-        (Send-Raw -Body $script:listCall -Headers @{ Host = 'evil.example.com'; 'Mcp-Method' = 'tools/list' }).Status | Should -BeIn @(400, 403, 404)
+    It 'rejects other hosts and ports (DNS rebinding) with 404 and unsupported media types with 415' {
+        (Send-Raw -Body $script:listCall -Headers @{ Host = 'evil.example.com'; 'Mcp-Method' = 'tools/list' }).Status | Should -Be 404
+        (Send-Raw -Body $script:listCall -Headers @{ Host = "evil.example.com:$(([uri] $script:url).Port)"; 'Mcp-Method' = 'tools/list' }).Status | Should -Be 404
+        (Send-Raw -Body $script:listCall -Headers @{ Host = '127.0.0.1:1'; 'Mcp-Method' = 'tools/list' }).Status | Should -Be 404
+        (Send-Raw -Body $script:listCall -Headers @{ Host = ([uri] $script:url).Authority; 'Mcp-Method' = 'tools/list' }).Status | Should -Be 200
         (Invoke-McpRawHttp -Url $script:url -Body 'text' -ContentType 'text/plain' -Headers @{ 'MCP-Protocol-Version' = '2026-07-28'; 'Mcp-Method' = 'x' }).Status | Should -Be 415
     }
 

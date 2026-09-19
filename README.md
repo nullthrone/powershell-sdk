@@ -75,7 +75,7 @@ Invoke-McpTool -Name Get-Weather -Arguments @{ Location = 'Berlin' }
 ```
 
 The HTTP server validates the request metadata headers of revision 2026-07-28 (`MCP-Protocol-Version`,
-`Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), the `Origin` header (DNS rebinding protection) and answers with the
+`Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), the `Host` and `Origin` headers (DNS rebinding protection) and answers with the
 HTTP statuses the specification assigns to the JSON-RPC error codes; the client sends those headers,
 mirrors parameters registered with `Register-McpTool -Header` into `Mcp-Param-*` headers and reads JSON or
 SSE responses. See [docs/concepts/transports.md](docs/concepts/transports.md).

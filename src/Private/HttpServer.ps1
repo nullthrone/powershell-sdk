@@ -147,6 +147,55 @@ function Test-McpHttpOrigin {
     $candidate -ieq $own
 }
 
+function Test-McpHttpHost {
+    <#
+    .SYNOPSIS
+        True when a request's Host header names the endpoint the listener was started with (host and port).
+    .DESCRIPTION
+        The managed HttpListener on Linux and macOS only routes requests whose Host header matches the prefix
+        host, but http.sys on Windows delivers requests with any Host header to a prefix bound to an IP
+        address, so the server checks the header itself on every platform: DNS rebinding protection must not
+        depend on the listener implementation. The port may be omitted when it is the default port of the scheme.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $Transport,
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $HostHeader
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HostHeader)) { return $false }
+    $value = $HostHeader.Trim()
+    $expected = $Transport.Url
+    $hostPart = $value
+    $portPart = $null
+    if ($value.StartsWith('[')) {
+        $close = $value.IndexOf(']')
+        if ($close -lt 0) { return $false }
+        $hostPart = $value.Substring(0, $close + 1)
+        $rest = $value.Substring($close + 1)
+        if ($rest.Length -gt 0) {
+            if (-not $rest.StartsWith(':')) { return $false }
+            $portPart = $rest.Substring(1)
+        }
+    } else {
+        $colon = $value.LastIndexOf(':')
+        if ($colon -ge 0) {
+            $hostPart = $value.Substring(0, $colon)
+            $portPart = $value.Substring($colon + 1)
+        }
+    }
+    $port = if ($expected.Scheme -eq 'https') { 443 } else { 80 }
+    if ($null -ne $portPart) {
+        if ($portPart.Length -eq 0 -or -not [int]::TryParse($portPart, [ref] $port)) { return $false }
+    }
+    ($hostPart -eq $expected.Host) -and ($port -eq $expected.Port)
+}
+
 function New-McpHttpChannel {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Creates an in-memory object.')]
     [CmdletBinding()]
@@ -545,7 +594,7 @@ function Invoke-McpInboundHttpMessage {
 function Invoke-McpHttpAccept {
     <#
     .SYNOPSIS
-        Screens an accepted connection (path, Origin, method, content type, size) and starts reading its body.
+        Screens an accepted connection (Host, path, Origin, method, content type, size) and starts reading its body.
     #>
     [CmdletBinding()]
     param(
@@ -561,6 +610,12 @@ function Invoke-McpHttpAccept {
     $channel = New-McpHttpChannel -Context $Context
     Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message ("<- HTTP {0} {1} from {2}" -f $request.HttpMethod, $request.RawUrl, $request.RemoteEndPoint)
     $invalidRequest = $script:McpErrorCode.InvalidRequest
+    $hostHeader = $request.Headers['Host']
+    if (-not (Test-McpHttpHost -Transport $transport -HostHeader $hostHeader)) {
+        Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Rejected a request with Host '$hostHeader' (the endpoint is $($transport.Url.Authority))."
+        $null = Send-McpHttpStatus -State $State -Channel $channel -StatusCode 404 -Json (New-McpHttpErrorJson -Code $invalidRequest -Message "No MCP endpoint for host '$hostHeader'; the endpoint is '$($transport.Url)'.")
+        return
+    }
     $path = $request.Url.AbsolutePath.TrimEnd('/')
     if ($path -cne $transport.Path) {
         $null = Send-McpHttpStatus -State $State -Channel $channel -StatusCode 404 -Json (New-McpHttpErrorJson -Code $invalidRequest -Message "No MCP endpoint at '$($request.Url.AbsolutePath)'; the endpoint is '$($transport.Path)/'.")
