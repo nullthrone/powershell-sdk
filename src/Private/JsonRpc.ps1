@@ -66,11 +66,12 @@ function New-McpErrorResponse {
         [System.Collections.IDictionary] $ErrorObject
     )
 
-    [ordered]@{
-        jsonrpc = $script:McpJsonRpcVersion
-        id      = $Id
-        error   = $ErrorObject
-    }
+    # The specification types id as string or integer: when the request id could not be determined, the member
+    # is omitted rather than sent as null (schema.json rejects null; JSON-RPC 2.0 would use it).
+    $response = [ordered]@{ jsonrpc = $script:McpJsonRpcVersion }
+    if ($null -ne $Id) { $response['id'] = $Id }
+    $response['error'] = $ErrorObject
+    $response
 }
 
 function New-McpResultResponse {

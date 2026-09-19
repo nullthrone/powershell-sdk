@@ -199,4 +199,133 @@ function Test-McpSpecShape {
     Invoke-McpInModule { param($s, $i) Test-McpJsonSchema -Schema $s -Instance $i } -Parameters @{ s = $schema; i = $Instance }
 }
 
-Export-ModuleMember -Function Invoke-McpInModule, Test-McpSpecShape
+function Get-McpFreeTcpPort {
+    <#
+    .SYNOPSIS
+        A TCP port on the loopback interface that is free at the time of the call.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param()
+
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try {
+        $listener.LocalEndpoint.Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Start-McpTestHttpServer {
+    <#
+    .SYNOPSIS
+        Runs a server object over Streamable HTTP on a free loopback port in a background runspace; returns a handle with Url, Port, Server and Background.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helper.')]
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Server,
+
+        [hashtable] $Parameters = @{},
+
+        [int] $TimeoutSeconds = 15
+    )
+
+    $port = Get-McpFreeTcpPort
+    $url = "http://127.0.0.1:$port/mcp/"
+    $startParameters = @{ Transport = 'Http'; Url = $url }
+    foreach ($key in $Parameters.Keys) { $startParameters[$key] = $Parameters[$key] }
+    $background = Invoke-McpInModule { param($s, $p) Start-McpBackgroundServer -Server $s -Parameters $p } -Parameters @{ s = $Server; p = $startParameters }
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $Server.State.Started) {
+        if ($background.PowerShell.InvocationStateInfo.State -in @('Failed', 'Completed', 'Stopped')) {
+            throw "The HTTP test server did not start: $($background.PowerShell.InvocationStateInfo.Reason)"
+        }
+        if ($stopwatch.Elapsed.TotalSeconds -gt $TimeoutSeconds) { throw "The HTTP test server did not start within $TimeoutSeconds seconds." }
+        Start-Sleep -Milliseconds 25
+    }
+    @{ Url = $url; Port = $port; Server = $Server; Background = $background }
+}
+
+function Stop-McpTestHttpServer {
+    <#
+    .SYNOPSIS
+        Stops a server started with Start-McpTestHttpServer and waits for its runspace.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helper.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $Handle
+    )
+
+    Stop-McpServer -Server $Handle.Server
+    Invoke-McpInModule { param($b) Stop-McpBackgroundServer -Background $b -TimeoutSeconds 20 } -Parameters @{ b = $Handle.Background }
+}
+
+function Invoke-McpRawHttp {
+    <#
+    .SYNOPSIS
+        Sends one raw HTTP request (no proxy) and returns Status, ContentType, Headers, Body and, when the body is JSON, Json (hashtables).
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Url,
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $Body,
+
+        [hashtable] $Headers = @{},
+
+        [string] $Method = 'POST',
+
+        [string] $ContentType = 'application/json',
+
+        [int] $TimeoutSeconds = 30
+    )
+
+    $handler = [System.Net.Http.SocketsHttpHandler]::new()
+    $handler.UseProxy = $false
+    $handler.AllowAutoRedirect = $false
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [timespan]::FromSeconds($TimeoutSeconds)
+    try {
+        $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new($Method), $Url)
+        if ($null -ne $Body) {
+            $request.Content = [System.Net.Http.ByteArrayContent]::new([System.Text.Encoding]::UTF8.GetBytes($Body))
+            if ($ContentType) { $request.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new($ContentType) }
+        }
+        foreach ($key in $Headers.Keys) { $null = $request.Headers.TryAddWithoutValidation([string] $key, [string] $Headers[$key]) }
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        try {
+            $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            $json = $null
+            if ($text -and $response.Content.Headers.ContentType -and $response.Content.Headers.ContentType.MediaType -eq 'application/json') {
+                try { $json = ConvertFrom-Json -InputObject $text -AsHashtable -Depth 50 } catch { $json = $null }
+            }
+            $headerTable = @{}
+            foreach ($header in $response.Headers) { $headerTable[$header.Key] = @($header.Value) -join ', ' }
+            foreach ($header in $response.Content.Headers) { $headerTable[$header.Key] = @($header.Value) -join ', ' }
+            @{
+                Status      = [int] $response.StatusCode
+                ContentType = if ($response.Content.Headers.ContentType) { $response.Content.Headers.ContentType.MediaType } else { $null }
+                Headers     = $headerTable
+                Body        = $text
+                Json        = $json
+            }
+        } finally {
+            $response.Dispose()
+        }
+    } finally {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
+
+Export-ModuleMember -Function Invoke-McpInModule, Test-McpSpecShape, Get-McpFreeTcpPort, Start-McpTestHttpServer, Stop-McpTestHttpServer, Invoke-McpRawHttp

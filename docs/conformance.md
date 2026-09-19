@@ -2,8 +2,34 @@
 
 The SDK is measured with the official suite `@modelcontextprotocol/conformance`. The npm `latest` dist-tag
 (0.1.x) does not know revision 2026-07-28; the version pinned in `requirements.psd1` (alpha channel) does.
-Conformance fixtures (`tests/Conformance/everything-server.ps1`, `everything-client.ps1`) and the CI workflow
-`conformance.yml` arrive with milestone M2; this page documents the mechanics they will use.
+The fixtures live in `tests/Conformance/` (`everything-server.ps1`, a Streamable HTTP server with every tool
+the server scenarios call; `everything-client.ps1`, a client that discovers, lists and calls tools as the
+client scenarios expect), the build task `Conformance` runs both legs, and `.github/workflows/conformance.yml`
+runs them on every push and pull request.
+
+## Running the suite
+
+```powershell
+./build.ps1 -Task Conformance                                    # both legs, requirement set 2026-07-28
+./build.ps1 -Task Conformance -ConformanceLeg Server              # one leg
+./build.ps1 -Task Conformance -ConformanceScenario tools-list     # one scenario (both legs try it)
+```
+
+Node.js 20 or later is required (`npx` runs the pinned package). The task builds the module, starts the
+fixture server on a free loopback port with `MCP_MODULE_MANIFEST` pointing at the build, waits for the port,
+runs the server leg, stops the fixture, then runs the client leg with the fixture client. Results
+(`checks.json` per scenario, the fixture server log) are written to `output/conformance/`. The task fails
+when a leg exits with a non-zero code: an unexpected failure or a stale baseline entry.
+
+## State after milestone M2
+
+Requirement set `2026-07-28`, server leg: `server-stateless` (25 checks), `tools-list`, the seven
+`tools-call-*` scenarios, `sep-2164-resource-not-found`, `dns-rebinding-protection` and
+`server-sse-multiple-streams` pass; the not-scored `json-schema-2020-12`, `http-header-validation` and
+`http-custom-header-server-validation` pass too. Client leg: `tools_call`, `request-metadata`,
+`auth/resource-mismatch`, `http-standard-headers`, `http-custom-headers`, `http-invalid-tool-headers`,
+`json-schema-ref-no-deref` and the not-scored `json-schema-2020-12-preservation` pass. Everything else is in
+`conformance-baseline.yml`, grouped by the milestone that removes it.
 
 ## Requirement sets
 
@@ -16,7 +42,7 @@ Each set is scored only at its own wire, so the server is run twice (a modern-on
 dual-era instance) and the client is invoked with `--requirements` for each set. Scenarios classified as
 `extension`, `added-after-release` or `pending` run but never affect the score.
 
-## Commands (from M2)
+## Commands behind the task
 
 ```bash
 npx --yes @modelcontextprotocol/conformance@<pinned> server --url http://127.0.0.1:3001/mcp --requirements 2026-07-28 --expected-failures conformance-baseline.yml

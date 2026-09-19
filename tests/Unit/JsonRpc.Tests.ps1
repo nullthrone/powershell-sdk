@@ -12,7 +12,7 @@ Describe 'JSON-RPC message model' {
         Invoke-McpInModule { ConvertTo-McpJson (New-McpResultResponse -Id 'x' -Result ([ordered]@{ resultType = 'complete' })) } |
             Should -Be '{"jsonrpc":"2.0","id":"x","result":{"resultType":"complete"}}'
         Invoke-McpInModule { ConvertTo-McpJson (New-McpErrorResponse -Id $null -ErrorObject (New-McpError -Code -32700 -Message 'Parse error')) } |
-            Should -Be '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}'
+            Should -Be '{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"}}'
     }
 
     It 'omits params and data when they are not given' {

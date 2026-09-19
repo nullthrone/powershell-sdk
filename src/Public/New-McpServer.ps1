@@ -116,7 +116,8 @@ function New-McpServer {
             PageSize              = $PageSize
             LogLevel              = $LogLevel
             IncludeServerInfo     = -not $NoServerInfo
-            ListChanged           = $true
+            # tools.listChanged is advertised once subscriptions/listen can deliver the notification (milestone M4).
+            ListChanged           = $false
         }
         State             = @{
             Started       = $false

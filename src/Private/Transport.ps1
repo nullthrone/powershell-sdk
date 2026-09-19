@@ -1,7 +1,8 @@
-# Transports as data: a transport is a hashtable with Kind (Stdio, Process or InMemory), a line reader and a
-# line writer, used only through the functions below so that the same code runs in whichever runspace hosts
-# the dispatcher or the client. Stdio and Process transports wrap raw UTF-8 streams (no BOM, "\n" newlines);
-# the in-memory transport is a pair of System.Threading.Channels channels for tests and in-process clients.
+# Transports as data: a transport is a hashtable with Kind (Stdio, Process, InMemory or Http), used only
+# through functions so that the same code runs in whichever runspace hosts the dispatcher or the client. The
+# line-based kinds have a line reader and a line writer: Stdio and Process transports wrap raw UTF-8 streams
+# (no BOM, "\n" newlines), the in-memory transport is a pair of System.Threading.Channels channels for tests
+# and in-process clients. The Http kinds (HttpServer.ps1, HttpClient.ps1) carry a listener or an HttpClient.
 #
 # This file is the only place in the module that touches the console streams (see Measure-McpStdoutPurity).
 
@@ -243,6 +244,10 @@ function Close-McpTransport {
     )
 
     if ($Transport.Closed) { return }
+    if ($Transport.Kind -eq 'Http') {
+        if ($Transport.ContainsKey('Listener')) { Close-McpHttpServerTransport -Transport $Transport } else { Close-McpHttpClientTransport -Transport $Transport }
+        return
+    }
     $Transport.Closed = $true
     try {
         if ($Transport.Kind -eq 'InMemory') {

@@ -4,12 +4,14 @@ PowerShell SDK for building and consuming [Model Context Protocol](https://model
 and clients, targeting specification revision **2026-07-28** with dual-era support for 2025-11-25 and
 2025-06-18.
 
-> **Status: milestone M1 (protocol core, stdio, tools).** Servers expose PowerShell functions, cmdlets,
-> scripts and script blocks as tools over stdio with the stateless 2026-07-28 lifecycle (`server/discover`,
-> per-request `_meta`, progress, cancellation), and the client side connects to such servers. Streamable
-> HTTP, resources, prompts, input requests (MRTR), subscriptions, the legacy revisions, authorization and the
-> extensions follow in M2 to M7. The milestones are in [ROADMAP.md](ROADMAP.md); the design is in
-> [docs/implementation-plan.md](docs/implementation-plan.md).
+> **Status: milestone M2 (Streamable HTTP).** Servers expose PowerShell functions, cmdlets, scripts and
+> script blocks as tools over stdio and over Streamable HTTP with the stateless 2026-07-28 lifecycle
+> (`server/discover`, per-request `_meta`, request metadata headers, progress, cancellation), and the client
+> side connects to such servers over both transports. The official conformance suite runs in CI: every
+> 2026-07-28 scenario of the tools, HTTP header validation and DNS rebinding groups passes on both legs;
+> the remaining scenarios (resources, prompts, completion, input requests, subscriptions, authorization)
+> are listed in [conformance-baseline.yml](conformance-baseline.yml) and follow in M3 to M7. The milestones
+> are in [ROADMAP.md](ROADMAP.md); the design is in [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Requirements
 
@@ -63,10 +65,25 @@ $result.StructuredContent.temperature
 Disconnect-McpServer
 ```
 
+Over Streamable HTTP the same server listens on a URL, and the same client commands connect to it:
+
+```powershell
+Start-McpServer -Transport Http -Url http://127.0.0.1:8080/mcp/      # POST-only endpoint, SSE for progress
+
+$session = Connect-McpServer -Url http://127.0.0.1:8080/mcp/
+Invoke-McpTool -Name Get-Weather -Arguments @{ Location = 'Berlin' }
+```
+
+The HTTP server validates the request metadata headers of revision 2026-07-28 (`MCP-Protocol-Version`,
+`Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`), the `Origin` header (DNS rebinding protection) and answers with the
+HTTP statuses the specification assigns to the JSON-RPC error codes; the client sends those headers,
+mirrors parameters registered with `Register-McpTool -Header` into `Mcp-Param-*` headers and reads JSON or
+SSE responses. See [docs/concepts/transports.md](docs/concepts/transports.md).
+
 `Connect-McpServer -Server $serverObject` runs a server in a background runspace over an in-memory transport,
 which is how the tests exercise servers without child processes. `Invoke-McpToolHandler` calls a registered
-tool directly for unit tests of the tool itself. See `examples/echo-server.ps1` and
-[docs/development.md](docs/development.md) for the Inspector command line.
+tool directly for unit tests of the tool itself. See `examples/echo-server.ps1`, `examples/http-server.ps1`
+and [docs/development.md](docs/development.md) for the Inspector command line.
 
 ## Building from source
 
@@ -90,15 +107,16 @@ conventions; [docs/development.md](docs/development.md) has the details of the b
   separate legacy component that shares the same endpoint and process.
 - **Transports.** stdio (raw UTF-8 streams, nothing but protocol messages on stdout) and Streamable HTTP on
   `System.Net.HttpListener` with an SSE writer; an in-memory transport for tests.
-- **Conformance first.** The official conformance suite runs in CI from milestone M2 against a baseline that
-  may only shrink; 1.0.0 requires an empty baseline for the 2026-07-28 and 2025-11-25 requirement sets.
+- **Conformance first.** The official conformance suite runs in CI (`.github/workflows/conformance.yml`,
+  `./build.ps1 -Task Conformance`) against a baseline that may only shrink; 1.0.0 requires an empty baseline
+  for the 2026-07-28 and 2025-11-25 requirement sets.
 
 ## Repository
 
 | Path | Purpose |
 |---|---|
 | `src/` | Module sources and manifest |
-| `tests/` | Pester tests (unit, integration, spec, compat; conformance from M2) |
+| `tests/` | Pester tests (unit, integration, spec, compat) and the conformance fixtures (`tests/Conformance`) |
 | `tools/` | Custom PSScriptAnalyzer rules, maintenance scripts, offline package drop folder |
 | `docs/` | Concept documentation, implementation plan, research material |
 | `.github/` | CI matrix, release workflow, label sync, issue templates |

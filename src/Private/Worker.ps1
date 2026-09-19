@@ -58,10 +58,14 @@ function Send-McpSinkMessage {
         [object] $RequestId,
 
         [Parameter(Mandatory)]
-        [string] $Json
+        [string] $Json,
+
+        # The JSON-RPC error code of an error response; the HTTP transport derives the status code from it.
+        [AllowNull()]
+        [object] $ErrorCode
     )
 
-    $Sink.Queue.Enqueue(@{ Kind = $Kind; RequestId = $RequestId; Json = $Json })
+    $Sink.Queue.Enqueue(@{ Kind = $Kind; RequestId = $RequestId; Json = $Json; ErrorCode = $ErrorCode })
     $null = $Sink.Signal.Set()
 }
 
@@ -78,6 +82,7 @@ function Invoke-McpWorkerRequest {
 
     $context = New-McpRequestContext -Envelope $Envelope
     $response = $null
+    $errorCode = $null
     try {
         $result = Invoke-McpToolHandler -Registration $Envelope.Registration -Arguments $Envelope.Arguments -Context $context -UseCommandName
         if ($Envelope.IncludeServerInfo -and $null -ne $Envelope.ServerInfo) {
@@ -93,8 +98,10 @@ function Invoke-McpWorkerRequest {
         if ($exception -is [System.Management.Automation.RuntimeException] -and $null -ne $exception.InnerException -and $exception.GetType() -eq [System.Management.Automation.RuntimeException]) {
             $exception = $exception.InnerException
         }
-        $response = New-McpErrorResponse -Id $Envelope.RequestId -ErrorObject (ConvertTo-McpErrorObject -Exception $exception)
+        $errorObject = ConvertTo-McpErrorObject -Exception $exception
+        $errorCode = $errorObject['code']
+        $response = New-McpErrorResponse -Id $Envelope.RequestId -ErrorObject $errorObject
     }
     if ($Envelope.CancellationToken.IsCancellationRequested) { return }
-    Send-McpSinkMessage -Sink $Envelope.Sink -Kind Response -RequestId $Envelope.RequestId -Json (ConvertTo-McpJson -InputObject $response)
+    Send-McpSinkMessage -Sink $Envelope.Sink -Kind Response -RequestId $Envelope.RequestId -Json (ConvertTo-McpJson -InputObject $response) -ErrorCode $errorCode
 }

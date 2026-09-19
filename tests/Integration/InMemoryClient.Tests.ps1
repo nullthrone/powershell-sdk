@@ -42,7 +42,7 @@ Describe 'Connect-McpServer over the in-memory transport' {
         $info.Title | Should -Be 'In memory'
         $info.Instructions | Should -Be 'Test server.'
         $info.SupportedVersions | Should -Be @('2026-07-28')
-        $info.Capabilities['tools']['listChanged'] | Should -BeTrue
+        $info.Capabilities['tools']['listChanged'] | Should -BeFalse
         (Get-McpServerInfo -Session $script:session -Refresh).Name | Should -Be 'memory'
     }
 

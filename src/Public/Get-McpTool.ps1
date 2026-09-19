@@ -3,7 +3,9 @@ function Get-McpTool {
     .SYNOPSIS
         Lists the server's tools (tools/list, following all pages) or gets one tool by name.
     .DESCRIPTION
-        The list is cached in the session; -Refresh queries the server again.
+        The list is cached in the session; -Refresh queries the server again. Over Streamable HTTP a tool whose
+        x-mcp-header annotations are invalid is excluded from the list with a warning, as the specification
+        requires; the valid annotations tell Invoke-McpTool which arguments to mirror into Mcp-Param-* headers.
     .PARAMETER Name
         The name of a tool (exact match); an unknown name is an error.
     .PARAMETER Session
@@ -29,6 +31,7 @@ function Get-McpTool {
     $target = Resolve-McpSession -Session $Session
     if ($Refresh -or $null -eq $target.Tools) {
         $tools = [System.Collections.Generic.List[object]]::new()
+        $headers = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         $cursor = $null
         $pages = 0
         do {
@@ -39,13 +42,26 @@ function Get-McpTool {
                 throw [System.InvalidOperationException]::new('The tools/list result has no tools member.')
             }
             foreach ($tool in @($result['tools'])) {
-                if ($tool -is [System.Collections.IDictionary]) { $tools.Add((ConvertTo-McpToolObject -Tool $tool)) }
+                if ($tool -isnot [System.Collections.IDictionary]) { continue }
+                if ($target.Kind -eq 'Http') {
+                    $toolName = if ($tool.Contains('name')) { [string] $tool['name'] } else { '(unnamed)' }
+                    $headerParameters = @()
+                    try {
+                        $headerParameters = @(Get-McpToolHeaderParameter -InputSchema $(if ($tool.Contains('inputSchema')) { $tool['inputSchema'] } else { $null }))
+                    } catch [System.ArgumentException] {
+                        Write-Warning "Excluding tool '$toolName' from the list: $($_.Exception.Message)"
+                        continue
+                    }
+                    $headers[$toolName] = $headerParameters
+                }
+                $tools.Add((ConvertTo-McpToolObject -Tool $tool))
             }
             $cursor = if ($result.Contains('nextCursor') -and $null -ne $result['nextCursor']) { [string] $result['nextCursor'] } else { $null }
             $pages++
             if ($pages -gt 10000) { throw [System.InvalidOperationException]::new('tools/list paged more than 10000 times.') }
         } while ($null -ne $cursor)
         $target.Tools = $tools.ToArray()
+        $target.ToolHeaders = $headers
     }
     if ($Name) {
         $tool = $target.Tools | Where-Object { $_.Name -ceq $Name } | Select-Object -First 1

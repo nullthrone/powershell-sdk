@@ -15,7 +15,7 @@
           <TableColumnHeader><Label>Kind</Label><Width>9</Width></TableColumnHeader>
           <TableColumnHeader><Label>ProtocolVersion</Label><Width>16</Width></TableColumnHeader>
           <TableColumnHeader><Label>Closed</Label><Width>7</Width></TableColumnHeader>
-          <TableColumnHeader><Label>StandardErrorPath</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Endpoint</Label></TableColumnHeader>
         </TableHeaders>
         <TableRowEntries>
           <TableRowEntry>
@@ -24,7 +24,7 @@
               <TableColumnItem><PropertyName>Kind</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>ProtocolVersion</PropertyName></TableColumnItem>
               <TableColumnItem><PropertyName>Closed</PropertyName></TableColumnItem>
-              <TableColumnItem><PropertyName>StandardErrorPath</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Endpoint</PropertyName></TableColumnItem>
             </TableColumnItems>
           </TableRowEntry>
         </TableRowEntries>

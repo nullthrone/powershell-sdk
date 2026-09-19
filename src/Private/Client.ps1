@@ -84,6 +84,10 @@ function Send-McpClientNotification {
         [System.Collections.IDictionary] $Params
     )
 
+    if ($Session.Transport.Kind -eq 'Http') {
+        Send-McpHttpClientNotification -Session $Session -Method $Method -Params $Params
+        return
+    }
     $notification = New-McpNotification -Method $Method -Params $Params
     Send-McpTransportLine -Transport $Session.Transport -Line (ConvertTo-McpJson -InputObject $notification)
 }
@@ -114,9 +118,15 @@ function Invoke-McpClientRequest {
         [AllowNull()]
         [object] $LogLevel,
 
-        [int] $TimeoutMs = 0
+        [int] $TimeoutMs = 0,
+
+        # Additional HTTP headers of this request (Streamable HTTP only), for example Mcp-Param-* headers.
+        [hashtable] $Headers
     )
 
+    if ($Session.Transport.Kind -eq 'Http') {
+        return Invoke-McpHttpClientRequest -Session $Session -Method $Method -Params $Params -OnProgress $OnProgress -LogLevel $LogLevel -TimeoutMs $TimeoutMs -Headers $Headers
+    }
     if ($TimeoutMs -le 0) { $TimeoutMs = [int] $Session.RequestTimeoutMs }
     $id = [int] $Session.NextId
     $Session.NextId = $id + 1
@@ -250,6 +260,10 @@ function ConvertTo-McpServerInfoObject {
     if ($DiscoverResult.Contains('_meta') -and $DiscoverResult['_meta'] -is [System.Collections.IDictionary] -and $DiscoverResult['_meta'].Contains($script:McpMetaKey.ServerInfo)) {
         $info = $DiscoverResult['_meta'][$script:McpMetaKey.ServerInfo]
     }
+    if ($info.Count -eq 0 -and $DiscoverResult.Contains('serverInfo') -and $DiscoverResult['serverInfo'] -is [System.Collections.IDictionary]) {
+        # Servers written against the drafts before spec PR #3002 put serverInfo into the result body.
+        $info = $DiscoverResult['serverInfo']
+    }
     $get = { param($table, $key) if ($table -is [System.Collections.IDictionary] -and $table.Contains($key)) { $table[$key] } else { $null } }
     [pscustomobject]@{
         PSTypeName        = 'Mcp.ServerInfo'
@@ -324,7 +338,7 @@ function ConvertTo-McpToolResultObject {
 function Start-McpBackgroundServer {
     <#
     .SYNOPSIS
-        Runs Start-McpServer for an in-memory endpoint in a background runspace; returns the runspace handles.
+        Runs Start-McpServer in a background runspace (for an in-memory endpoint or with given parameters); returns the runspace handles.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'The caller (Connect-McpServer) owns the ShouldProcess decision.')]
     [CmdletBinding()]
@@ -333,8 +347,11 @@ function Start-McpBackgroundServer {
         [Parameter(Mandatory)]
         [pscustomobject] $Server,
 
-        [Parameter(Mandatory)]
-        [hashtable] $Endpoint
+        # The server end of an in-memory transport pair.
+        [hashtable] $Endpoint,
+
+        # Alternatively, the parameters of Start-McpServer (for example Transport and Url of an HTTP server).
+        [hashtable] $Parameters
     )
 
     $sessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2()
@@ -344,7 +361,14 @@ function Start-McpBackgroundServer {
     $runspace.Open()
     $powershell = [powershell]::Create()
     $powershell.Runspace = $runspace
-    $null = $powershell.AddCommand('Start-McpServer').AddParameter('Server', $Server).AddParameter('Transport', 'InMemory').AddParameter('Endpoint', $Endpoint)
+    $command = $powershell.AddCommand('Start-McpServer').AddParameter('Server', $Server)
+    if ($null -ne $Endpoint) {
+        $null = $command.AddParameter('Transport', 'InMemory').AddParameter('Endpoint', $Endpoint)
+    } elseif ($null -ne $Parameters) {
+        $null = $command.AddParameters($Parameters)
+    } else {
+        throw [System.ArgumentException]::new('Start-McpBackgroundServer needs -Endpoint or -Parameters.')
+    }
     $handle = $powershell.BeginInvoke()
     @{
         PowerShell = $powershell

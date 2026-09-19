@@ -1,6 +1,10 @@
 # The dispatcher: the loop that owns a transport, decodes inbound messages, answers server/discover and
 # tools/list itself, hands tools/call to the worker runspace pool, forwards the workers' responses and
 # notifications, honours notifications/cancelled and shuts down on end of stream or Stop-McpServer.
+#
+# Over stdio and in memory all messages share one line writer. Over Streamable HTTP every request owns a
+# channel (its HTTP response, sent as one JSON object or as a request-scoped SSE stream); accepting
+# connections, header validation and SSE writing live in HttpServer.ps1.
 
 function Get-McpRequestKey {
     [CmdletBinding()]
@@ -89,32 +93,14 @@ function Invoke-McpDispatcher {
     $Server.State.Signal = $state.Signal
     $Server.State.Started = $true
     $Server.State.StopRequested = $false
-    Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message "Server '$($Server.Name)' $($Server.Version) starting on $($Transport.Kind) with $($Server.Tools.Count) tool(s)."
+    $where = if ($Transport.Kind -eq 'Http') { "Streamable HTTP at $($Transport.Prefix)" } else { $Transport.Kind }
+    Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message "Server '$($Server.Name)' $($Server.Version) starting on $where with $($Server.Tools.Count) tool(s)."
     try {
         $state.Pool = New-McpWorkerPool -Server $Server
-        $readTask = Read-McpTransportLineAsync -Transport $Transport
-        $stopDeadline = $null
-        while ($true) {
-            $handles = if ($state.EofReceived) { @($state.Signal) } else { @((Get-McpTaskWaitHandle -Task $readTask), $state.Signal) }
-            $index = [System.Threading.WaitHandle]::WaitAny([System.Threading.WaitHandle[]] $handles, 250)
-            if (-not $state.EofReceived -and $index -eq 0) {
-                $line = Complete-McpTransportRead -Transport $Transport -Task $readTask
-                if ($null -eq $line) {
-                    $state.EofReceived = $true
-                    Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message 'End of input; shutting down.'
-                } else {
-                    Invoke-McpInboundLine -State $state -Line $line
-                    $readTask = Read-McpTransportLineAsync -Transport $Transport
-                }
-            }
-            Send-McpOutboundQueue -State $state
-            Update-McpInFlightRequest -State $state
-            if ($state.Stopping) { break }
-            if ($state.EofReceived -or $Server.State.StopRequested) {
-                if ($state.InFlight.Count -eq 0) { break }
-                if ($null -eq $stopDeadline) { $stopDeadline = [datetime]::UtcNow.AddSeconds($ShutdownGraceSeconds) }
-                if ([datetime]::UtcNow -ge $stopDeadline) { break }
-            }
+        if ($Transport.Kind -eq 'Http') {
+            Invoke-McpHttpDispatcherLoop -State $state -ShutdownGraceSeconds $ShutdownGraceSeconds
+        } else {
+            Invoke-McpLineDispatcherLoop -State $state -ShutdownGraceSeconds $ShutdownGraceSeconds
         }
     } finally {
         Stop-McpAllInFlightRequest -State $state
@@ -129,16 +115,70 @@ function Invoke-McpDispatcher {
     }
 }
 
+function Invoke-McpLineDispatcherLoop {
+    <#
+    .SYNOPSIS
+        The dispatcher loop of the line-based transports (stdio, in memory): reads lines until end of stream or Stop-McpServer.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State,
+
+        [int] $ShutdownGraceSeconds = 5
+    )
+
+    $server = $State.Server
+    $transport = $State.Transport
+    $readTask = Read-McpTransportLineAsync -Transport $transport
+    $stopDeadline = $null
+    while ($true) {
+        $handles = if ($State.EofReceived) { @($State.Signal) } else { @((Get-McpTaskWaitHandle -Task $readTask), $State.Signal) }
+        $index = [System.Threading.WaitHandle]::WaitAny([System.Threading.WaitHandle[]] $handles, 250)
+        if (-not $State.EofReceived -and $index -eq 0) {
+            $line = Complete-McpTransportRead -Transport $transport -Task $readTask
+            if ($null -eq $line) {
+                $State.EofReceived = $true
+                Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $server.Name -Message 'End of input; shutting down.'
+            } else {
+                Invoke-McpInboundLine -State $State -Line $line
+                $readTask = Read-McpTransportLineAsync -Transport $transport
+            }
+        }
+        Send-McpOutboundQueue -State $State
+        Update-McpInFlightRequest -State $State
+        if ($State.Stopping) { break }
+        if ($State.EofReceived -or $server.State.StopRequested) {
+            if ($State.InFlight.Count -eq 0) { break }
+            if ($null -eq $stopDeadline) { $stopDeadline = [datetime]::UtcNow.AddSeconds($ShutdownGraceSeconds) }
+            if ([datetime]::UtcNow -ge $stopDeadline) { break }
+        }
+    }
+}
+
 function Send-McpDispatcherMessage {
+    <#
+    .SYNOPSIS
+        Writes a message built by the dispatcher: to the request's HTTP channel, or to the shared line transport.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [hashtable] $State,
 
         [Parameter(Mandatory)]
-        [System.Collections.IDictionary] $Message
+        [System.Collections.IDictionary] $Message,
+
+        [AllowNull()]
+        [hashtable] $Channel
     )
 
+    if ($null -ne $Channel -and $Channel.Kind -eq 'Http') {
+        $errorCode = $null
+        if ($Message.Contains('error') -and $Message['error'] -is [System.Collections.IDictionary] -and $Message['error'].Contains('code')) { $errorCode = $Message['error']['code'] }
+        $null = Send-McpHttpResponse -State $State -Channel $Channel -Json (ConvertTo-McpJson -InputObject $Message) -ErrorCode $errorCode
+        return
+    }
     try {
         Send-McpTransportLine -Transport $State.Transport -Line (ConvertTo-McpJson -InputObject $Message)
     } catch [System.IO.IOException] {
@@ -148,6 +188,10 @@ function Send-McpDispatcherMessage {
 }
 
 function Send-McpOutboundQueue {
+    <#
+    .SYNOPSIS
+        Forwards the responses and notifications that workers enqueued: to the request's channel over HTTP, to the line writer otherwise.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -164,6 +208,23 @@ function Send-McpOutboundQueue {
         if ($null -ne $entry -and ($entry.Cancelled -or $entry.Responded)) { continue }
         if ($item.Kind -eq 'Response' -and $null -ne $entry) { $entry.Responded = $true }
         Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message ("-> {0} id={1} ({2} bytes)" -f $item.Kind, $item.RequestId, $item.Json.Length)
+        if ($State.Transport.Kind -eq 'Http') {
+            if ($null -eq $entry) {
+                Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Dropping a $($item.Kind) for request $($item.RequestId): no open HTTP response."
+                continue
+            }
+            $delivered = if ($item.Kind -eq 'Notification') {
+                Send-McpHttpNotification -State $State -Channel $entry.Channel -Json $item.Json
+            } else {
+                Send-McpHttpResponse -State $State -Channel $entry.Channel -Json $item.Json -ErrorCode $item.ErrorCode
+            }
+            if (-not $delivered -and -not $entry.Cancelled) {
+                Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)): the client disconnected; cancelling."
+                Stop-McpInFlightRequest -Entry $entry
+                $entry.Responded = $true
+            }
+            continue
+        }
         try {
             Send-McpTransportLine -Transport $State.Transport -Line $item.Json
         } catch [System.IO.IOException] {
@@ -247,6 +308,31 @@ function Stop-McpInFlightRequest {
     try { $null = $Entry.PowerShell.BeginStop($null, $null) } catch { Write-Debug 'Stopping the worker pipeline failed.' }
 }
 
+function Close-McpRequestChannel {
+    <#
+    .SYNOPSIS
+        Closes the HTTP channel of a finished request; a request that ends without a response gets an internal error first.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State,
+
+        [Parameter(Mandatory)]
+        [hashtable] $Entry,
+
+        [string] $Reason = 'The handler produced no response.'
+    )
+
+    $channel = $Entry.Channel
+    if ($null -eq $channel -or $channel.Kind -ne 'Http' -or $channel.Closed) { return }
+    if (-not $Entry.Responded) {
+        $Entry.Responded = $true
+        $null = Send-McpHttpResponse -State $State -Channel $channel -Json (ConvertTo-McpJson -InputObject (New-McpErrorResponse -Id $Entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $Reason))) -ErrorCode $script:McpErrorCode.InternalError
+    }
+    Close-McpHttpChannel -State $State -Channel $channel
+}
+
 function Stop-McpAllInFlightRequest {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal request bookkeeping.')]
     [CmdletBinding()]
@@ -257,6 +343,7 @@ function Stop-McpAllInFlightRequest {
 
     foreach ($entry in @($State.InFlight.Values)) {
         if (-not $entry.Cancelled -and -not $entry.Responded) { Stop-McpInFlightRequest -Entry $entry }
+        Close-McpRequestChannel -State $State -Entry $entry -Reason 'The server is shutting down.'
     }
     foreach ($entry in @($State.InFlight.Values)) {
         try { $null = $entry.PowerShell.InvocationStateInfo; $entry.PowerShell.Dispose() } catch { Write-Debug 'Disposing a worker failed.' }
@@ -279,6 +366,7 @@ function Update-McpInFlightRequest {
 
     $timeout = [int] $State.Server.Options.RequestTimeoutSeconds
     foreach ($key in @($State.InFlight.Keys)) {
+        if (-not $State.InFlight.ContainsKey($key)) { continue }
         $entry = $State.InFlight[$key]
         $invocationState = $entry.PowerShell.InvocationStateInfo.State
         $finished = $invocationState -in @([System.Management.Automation.PSInvocationState]::Completed, [System.Management.Automation.PSInvocationState]::Failed, [System.Management.Automation.PSInvocationState]::Stopped)
@@ -287,18 +375,20 @@ function Update-McpInFlightRequest {
                 Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)) timed out after $timeout s."
                 Stop-McpInFlightRequest -Entry $entry
                 $entry.Responded = $true
-                Send-McpDispatcherMessage -State $State -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message "The request timed out after $timeout seconds."))
+                Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message "The request timed out after $timeout seconds."))
             }
             continue
         }
+        # A worker enqueues its response before it completes: deliver whatever is queued while the entry exists.
+        Send-McpOutboundQueue -State $State
         if ($invocationState -eq [System.Management.Automation.PSInvocationState]::Failed -and -not $entry.Cancelled -and -not $entry.Responded) {
             $reason = $entry.PowerShell.InvocationStateInfo.Reason
             $text = if ($reason) { $reason.Message } else { 'The worker failed.' }
             Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)) failed in the worker: $text"
             $entry.Responded = $true
-            Send-McpDispatcherMessage -State $State -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $text))
+            Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $text))
         }
-        # A completed worker has enqueued its response already; a stopped one was cancelled.
+        Close-McpRequestChannel -State $State -Entry $entry
         try { $entry.PowerShell.Dispose() } catch { Write-Debug 'Disposing a worker failed.' }
         try { $entry.Cts.Dispose() } catch { Write-Debug 'Disposing a token source failed.' }
         $State.InFlight.Remove($key)
@@ -312,7 +402,10 @@ function Invoke-McpInboundRequest {
         [hashtable] $State,
 
         [Parameter(Mandatory)]
-        [System.Collections.IDictionary] $Message
+        [System.Collections.IDictionary] $Message,
+
+        [AllowNull()]
+        [hashtable] $Channel
     )
 
     $server = $State.Server
@@ -321,7 +414,7 @@ function Invoke-McpInboundRequest {
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
     $key = Get-McpRequestKey -Id $id
     if ($State.InFlight.ContainsKey($key)) {
-        Send-McpDispatcherMessage -State $State -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InvalidRequest -Message "A request with id '$id' is already in flight."))
+        Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InvalidRequest -Message "A request with id '$id' is already in flight."))
         return
     }
     try {
@@ -331,11 +424,11 @@ function Invoke-McpInboundRequest {
         $meta = Get-McpRequestMeta -Params $params -SupportedVersions $server.SupportedVersions
         switch ($method) {
             'server/discover' {
-                Send-McpDispatcherMessage -State $State -Message (New-McpResultResponse -Id $id -Result (Get-McpDiscoverResult -Server $server))
+                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpDiscoverResult -Server $server))
             }
             'tools/list' {
                 $cursor = if ($params.Contains('cursor')) { $params['cursor'] } else { $null }
-                Send-McpDispatcherMessage -State $State -Message (New-McpResultResponse -Id $id -Result (Get-McpToolListResult -Server $server -Cursor $cursor))
+                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpToolListResult -Server $server -Cursor $cursor))
             }
             'tools/call' {
                 if (-not $params.Contains('name') -or $params['name'] -isnot [string]) {
@@ -349,22 +442,25 @@ function Invoke-McpInboundRequest {
                     }
                 }
                 $registration = Get-McpToolRegistration -Server $server -Name $params['name']
-                Start-McpWorkerRequest -State $State -Id $id -Registration $registration -Arguments $arguments -Meta $meta
+                if ($null -ne $Channel -and $Channel.Kind -eq 'Http') {
+                    Test-McpToolParameterHeader -HeaderParameters $registration.HeaderParameters -Arguments $arguments -Headers $Channel.Context.Request.Headers
+                }
+                Start-McpWorkerRequest -State $State -Id $id -Registration $registration -Arguments $arguments -Meta $meta -Channel $Channel
             }
             default {
                 throw [McpProtocolException]::new($script:McpErrorCode.MethodNotFound, "Method not found: $method")
             }
         }
     } catch [McpProtocolException] {
-        Send-McpDispatcherMessage -State $State -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $_.Exception))
+        Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $_.Exception))
     } catch {
         $exception = $_.Exception
         if ($exception -is [System.Management.Automation.RuntimeException] -and $exception.InnerException -is [McpProtocolException]) {
-            Send-McpDispatcherMessage -State $State -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $exception.InnerException))
+            Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $exception.InnerException))
             return
         }
         Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $server.Name -Message "Request $id ($method) failed: $($exception.Message)"
-        Send-McpDispatcherMessage -State $State -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $exception.Message))
+        Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $exception.Message))
     }
 }
 
@@ -385,7 +481,10 @@ function Start-McpWorkerRequest {
         [System.Collections.IDictionary] $Arguments,
 
         [Parameter(Mandatory)]
-        [hashtable] $Meta
+        [hashtable] $Meta,
+
+        [AllowNull()]
+        [hashtable] $Channel
     )
 
     $server = $State.Server
@@ -417,5 +516,6 @@ function Start-McpWorkerRequest {
         StartedAt  = [datetime]::UtcNow
         Cancelled  = $false
         Responded  = $false
+        Channel    = $Channel
     }
 }

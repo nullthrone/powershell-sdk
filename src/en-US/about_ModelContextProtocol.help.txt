@@ -17,11 +17,14 @@ LONG DESCRIPTION
     Supported transports are stdio and Streamable HTTP.
 
 CURRENT STATUS
-    Milestone M1 (protocol core, stdio, tools): servers expose PowerShell
-    commands and script blocks as tools over stdio with the stateless
-    2026-07-28 lifecycle, and clients connect to such servers. Streamable HTTP,
-    resources, prompts, input requests, subscriptions, the legacy revisions,
-    authorization and the extensions follow in later milestones (ROADMAP.md).
+    Milestone M2 (Streamable HTTP): servers expose PowerShell commands and
+    script blocks as tools over stdio and over Streamable HTTP with the
+    stateless 2026-07-28 lifecycle (server/discover, per-request _meta,
+    request metadata headers, progress, cancellation), and clients connect to
+    such servers over both transports. The official conformance suite runs in
+    CI. Resources, prompts, input requests, subscriptions, the legacy
+    revisions, authorization and the extensions follow in later milestones
+    (ROADMAP.md).
 
 COMMANDS
     Server:   New-McpServer, Register-McpTool, Start-McpServer, Stop-McpServer,
@@ -30,6 +33,14 @@ COMMANDS
               Test-McpClientCapability
     Client:   Connect-McpServer, Disconnect-McpServer, Get-McpServerInfo,
               Get-McpTool, Invoke-McpTool
+
+    Start-McpServer serves stdio by default; -Transport Http -Url serves a
+    Streamable HTTP endpoint (POST-only, JSON or SSE responses, request
+    metadata header validation, Origin checks). Connect-McpServer -Command
+    starts a server process over stdio; Connect-McpServer -Url connects to a
+    Streamable HTTP endpoint. Register-McpTool -Header maps tool parameters to
+    Mcp-Param-* headers (the x-mcp-header annotation), which the client
+    mirrors and the server validates.
 
     A tool handler receives the request context through a parameter named
     Context (request id, protocol version, client info and capabilities, log

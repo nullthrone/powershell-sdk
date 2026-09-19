@@ -13,7 +13,10 @@ param(
     [switch] $CodeCoverage,
     [string[]] $TestTag,
     [string[]] $ExcludeTestTag,
-    [string] $OutputDirectory = (Join-Path $PSScriptRoot 'output')
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot 'output'),
+    [string[]] $ConformanceRequirements = @('2026-07-28'),
+    [string[]] $ConformanceLeg,
+    [string] $ConformanceScenario
 )
 
 Set-StrictMode -Version Latest
@@ -316,9 +319,95 @@ task Publish Build, {
     Write-Build Green "Published $script:ModuleName $(Get-BuildSemVer) to the PowerShell Gallery."
 }
 
-# Synopsis: Run the MCP conformance suite (available from milestone M2).
-task Conformance {
-    throw 'The conformance harness (tests/Conformance) is introduced in milestone M2; see ROADMAP.md and docs/conformance.md.'
+function Start-ConformanceServer {
+    <#
+    .SYNOPSIS
+        Starts tests/Conformance/everything-server.ps1 on a free loopback port and waits until it accepts connections.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Build helper; starts a fixture process for the conformance run.')]
+    param(
+        [Parameter(Mandatory)]
+        [string] $LogPath
+    )
+
+    $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $probe.Start()
+    $port = $probe.LocalEndpoint.Port
+    $probe.Stop()
+    $pwsh = (Get-Process -Id $PID).Path
+    $script = Join-Path $script:TestsPath 'Conformance' 'everything-server.ps1'
+    $process = Start-Process -FilePath $pwsh -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script, '-Port', $port) -RedirectStandardError $LogPath -PassThru -NoNewWindow
+    $deadline = [datetime]::UtcNow.AddSeconds(60)
+    while ([datetime]::UtcNow -lt $deadline) {
+        if ($process.HasExited) { throw "The conformance server exited with code $($process.ExitCode); see $LogPath." }
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $client.Connect([System.Net.IPAddress]::Loopback, $port)
+            if ($client.Connected) { break }
+        } catch {
+            Start-Sleep -Milliseconds 250
+        } finally {
+            $client.Dispose()
+        }
+    }
+    if ([datetime]::UtcNow -ge $deadline) { throw "The conformance server did not start listening on port $port within 60 seconds; see $LogPath." }
+    @{ Process = $process; Url = "http://127.0.0.1:$port/mcp"; Port = $port }
+}
+
+function Stop-ConformanceServer {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Build helper; stops the fixture process of the conformance run.')]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $Handle
+    )
+
+    $process = $Handle.Process
+    try {
+        if (-not $process.HasExited) {
+            $process.Kill($true)
+            $null = $process.WaitForExit(10000)
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+# Synopsis: Run the MCP conformance suite (server and client legs) for the requirement sets given with -ConformanceRequirements.
+task Conformance Build, {
+    $npx = Get-Command -Name npx -ErrorAction SilentlyContinue
+    assert ($null -ne $npx) 'npx (Node.js 20 or later) is required for the conformance suite.'
+    $requirements = Import-PowerShellDataFile -Path (Join-Path $PSScriptRoot 'requirements.psd1')
+    $package = '@modelcontextprotocol/conformance@' + $requirements.Npm['@modelcontextprotocol/conformance']
+    $baseline = Join-Path $PSScriptRoot 'conformance-baseline.yml'
+    $resultRoot = Join-Path $OutputDirectory 'conformance'
+    $null = New-Item -Path $resultRoot -ItemType Directory -Force
+    $env:MCP_MODULE_MANIFEST = Get-BuiltModuleManifest
+    $pwsh = (Get-Process -Id $PID).Path
+    $clientScript = Join-Path $script:TestsPath 'Conformance' 'everything-client.ps1'
+    $legs = if ($ConformanceLeg) { @($ConformanceLeg) } else { @('Server', 'Client') }
+    $selection = if ($ConformanceScenario) { @('--scenario', $ConformanceScenario) } else { $null }
+    $failures = [System.Collections.Generic.List[string]]::new()
+    foreach ($revision in $ConformanceRequirements) {
+        $scope = if ($selection) { $selection } else { @('--requirements', $revision) }
+        if ('Server' -in $legs) {
+            $log = Join-Path $resultRoot "server-$revision.log"
+            $handle = Start-ConformanceServer -LogPath $log
+            try {
+                Write-Build Cyan "Conformance: server leg, requirement set $revision, fixture at $($handle.Url) (log: $log)"
+                & $npx.Source --yes $package server --url $handle.Url @scope --expected-failures $baseline --output-dir (Join-Path $resultRoot "server-$revision")
+                if ($LASTEXITCODE -ne 0) { $failures.Add("server leg of $revision (exit code $LASTEXITCODE)") }
+            } finally {
+                Stop-ConformanceServer -Handle $handle
+            }
+        }
+        if ('Client' -in $legs) {
+            Write-Build Cyan "Conformance: client leg, requirement set $revision"
+            & $npx.Source --yes $package client --command "$pwsh -NoLogo -NoProfile -NonInteractive -File $clientScript" @scope --expected-failures $baseline --output-dir (Join-Path $resultRoot "client-$revision")
+            if ($LASTEXITCODE -ne 0) { $failures.Add("client leg of $revision (exit code $LASTEXITCODE)") }
+        }
+    }
+    assert ($failures.Count -eq 0) "Conformance failed: $($failures -join '; '). Results are under $resultRoot."
+    Write-Build Green "Conformance: all legs passed against the baseline ($baseline)."
 }
 
 # Synopsis: What CI runs: Analyze, Test, Package, PublishLocal.

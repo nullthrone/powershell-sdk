@@ -37,7 +37,7 @@ Describe 'server/discover' {
         @($result.Keys) | Should -Be @('resultType', 'supportedVersions', 'capabilities', 'instructions', 'ttlMs', 'cacheScope', '_meta')
         $result['resultType'] | Should -Be 'complete'
         $result['supportedVersions'] | Should -Be @('2026-07-28')
-        $result['capabilities']['tools']['listChanged'] | Should -BeTrue
+        $result['capabilities']['tools']['listChanged'] | Should -BeFalse
         $result['ttlMs'] | Should -Be 5000
         $result['cacheScope'] | Should -Be 'private'
         $result['_meta']['io.modelcontextprotocol/serverInfo']['name'] | Should -Be 'demo'

@@ -10,7 +10,7 @@
 | PSScriptAnalyzer | static analysis, formatting, custom rules | `./build.ps1 -Bootstrap` |
 | Pester 6 | tests | `./build.ps1 -Bootstrap` |
 | Microsoft.PowerShell.PlatyPS | help generation (optional locally) | `./build.ps1 -Bootstrap` |
-| Node.js 20+ | conformance suite and Inspector (from M2) | you |
+| Node.js 20+ | conformance suite (`Conformance` task) and Inspector | you |
 
 `build.ps1` verifies the declared version ranges (`requirements.psd1`) on every run and installs missing
 dependencies only with `-Bootstrap`. Sources are tried in the order PowerShell Gallery, `api.nuget.org`
@@ -31,7 +31,7 @@ offline folder `tools/packages/` (`-DependencySource Offline`).
 | `Package` | `Build`, then `Compress-PSResource` → `output/packages/ModelContextProtocol.<version>.nupkg` |
 | `PublishLocal` | `Build`, then `Publish-PSResource` to a file-share repository under `output/local-repository/`, `Find-PSResource`, `Save-PSResource` and an import in a fresh process: the release dry run |
 | `Publish` | `Publish-PSResource` to the PowerShell Gallery with `PSGALLERY_API_KEY` |
-| `Conformance` | conformance suite (from M2) |
+| `Conformance` | `Build`, then the server and the client leg of `@modelcontextprotocol/conformance` (pinned in `requirements.psd1`) against `conformance-baseline.yml`; `-ConformanceRequirements`, `-ConformanceLeg`, `-ConformanceScenario`; results under `output/conformance/` (see [conformance.md](conformance.md)) |
 | `CI` | `Analyze`, `Test`, `Package`, `PublishLocal` |
 
 ## Tests
@@ -42,8 +42,9 @@ built manifest, vendored schema access, a child-process runner with UTF-8 stream
 
 | Folder | Scope | Notes |
 |---|---|---|
-| `tests/Unit` | manifest, import behaviour, type accelerators, enums against the schema, custom analyzer rules, JSON codec, JSON-RPC model, `_meta` validation, JSON Schema generation and validation (both engines), tool registry and in-process invocation, `server/discover` and `tools/list` shapes against the vendored schema | in-process |
-| `tests/Integration` | fresh `pwsh` processes: import must be silent on stdout and stderr, also under `-File`; the client against a server in a background runspace (in-memory transport); `examples/echo-server.ps1` over stdio (encoding, 1 MB payloads, progress, timeouts, stderr capture, BOM-free stdout, EOF shutdown) | spawns processes |
+| `tests/Unit` | manifest, import behaviour, type accelerators, enums against the schema, custom analyzer rules, JSON codec, JSON-RPC model, `_meta` validation, JSON Schema generation and validation (both engines), tool registry and in-process invocation, `server/discover` and `tools/list` shapes against the vendored schema, header value encoding and `x-mcp-header` validation, HTTP status mapping, Origin checks, SSE parsing | in-process |
+| `tests/Integration` | fresh `pwsh` processes: import must be silent on stdout and stderr, also under `-File`; the client against a server in a background runspace (in-memory transport); `examples/echo-server.ps1` over stdio (encoding, 1 MB payloads, progress, timeouts, stderr capture, BOM-free stdout, EOF shutdown); a Streamable HTTP server in a background runspace (client round trips, SSE progress, header mirroring, disconnect → cancel, and raw requests for every status and error code the specification assigns) | spawns processes, binds loopback ports |
+| `tests/Conformance` | the fixtures of the conformance suite (not Pester; run by the `Conformance` task) | needs Node.js |
 | `tests/Spec` | vendored schemas: hashes, definition counts, JSON-RPC envelope, checklist | data-driven |
 | `tests/Compat` | Windows PowerShell 5.1 guard (skipped off Windows), pinned version matrix (`MCP_EXPECTED_PWSH_VERSION`) | tags `PS51Guard`, `VersionMatrix` |
 
@@ -81,6 +82,9 @@ npx @modelcontextprotocol/inspector --cli --config inspector.json --server echo 
 | Sequential `tools/call` round trip, stdio or in-memory | 25 to 30 ms |
 | Four parallel calls that each sleep 2 × 200 ms (`-MaxConcurrency 4`) | about 520 ms in total |
 | Stopping a cancelled handler that sleeps with `Start-Sleep` | about 25 ms |
+| `Connect-McpServer -Url` to a server in the same process (`server/discover`, `tools/list`) | about 400 ms (first request, includes the worker warm-up) |
+| Sequential `tools/call` round trip over Streamable HTTP (loopback, JSON response) | 35 to 40 ms |
+| Detecting a client that closed its response stream (keep-alive interval + TCP reset) | keep-alive interval + about 2 s |
 
 A handler blocked in a .NET call that ignores the pipeline stop (for example `[Thread]::Sleep`) is only
 stopped when the call returns; handlers should watch `$Context.CancellationToken` in long loops.
@@ -89,7 +93,8 @@ stopped when the call returns; handlers should watch `$Context.CancellationToken
 
 `.github/workflows/ci.yml` runs `lint` (ubuntu, PowerShell 7.4), the `test` matrix (ubuntu, windows, macOS ×
 PowerShell 7.4.20, 7.5.11, 7.6.6), `ps51-guard` (windows) and `package` (ubuntu; `Package` + `PublishLocal`,
-uploads the `.nupkg`). The composite action `.github/actions/install-pwsh` downloads the pinned PowerShell
+uploads the `.nupkg`). `.github/workflows/conformance.yml` runs the `Conformance` task on ubuntu with the
+runner's Node.js and uploads `output/conformance/`. The composite action `.github/actions/install-pwsh` downloads the pinned PowerShell
 release asset and prepends it to `PATH`, so every `shell: pwsh` step runs the pinned version; the
 `VersionMatrix` test asserts it. All actions are pinned to commit SHAs (Dependabot keeps them current).
 

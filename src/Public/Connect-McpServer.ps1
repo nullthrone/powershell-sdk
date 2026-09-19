@@ -1,12 +1,15 @@
 function Connect-McpServer {
     <#
     .SYNOPSIS
-        Connects to an MCP server over stdio (a server process) or in memory (a server object) and returns a session.
+        Connects to an MCP server over stdio (a server process), Streamable HTTP (a URL) or in memory (a server object) and returns a session.
     .DESCRIPTION
         For stdio the command is started with redirected standard streams; its stderr is captured in a file
-        (see the session's StandardErrorPath). The session probes the server with server/discover, selects a
-        protocol version from the server's supported versions and caches the server info. Servers that only
-        speak the initialize handshake of earlier revisions are not supported by this milestone.
+        (see the session's StandardErrorPath). Over Streamable HTTP every request is its own POST to the URL
+        with the request metadata headers of revision 2026-07-28 (MCP-Protocol-Version, Mcp-Method, Mcp-Name,
+        Mcp-Param-*); responses arrive as JSON or as a request-scoped SSE stream. The session probes the server
+        with server/discover, selects a protocol version from the server's supported versions and caches the
+        server info. Servers that only speak the initialize handshake of earlier revisions are not supported by
+        this milestone.
 
         With -Server, the given server object runs in a background runspace of this process over an in-memory
         transport: the way to test a server without a child process.
@@ -23,6 +26,12 @@ function Connect-McpServer {
         Additional environment variables for the server process.
     .PARAMETER StandardErrorPath
         The file that receives the server's stderr (default: a file in the temp folder).
+    .PARAMETER Url
+        The URL of a Streamable HTTP endpoint, for example http://127.0.0.1:8080/mcp/.
+    .PARAMETER Headers
+        Additional HTTP headers sent with every request to -Url (for example an Authorization header).
+    .PARAMETER NoProxy
+        Do not use the system or environment proxy for -Url (loopback URLs never use a proxy).
     .PARAMETER Server
         A server object (New-McpServer) to run in-process over an in-memory transport.
     .PARAMETER ClientInfo
@@ -43,6 +52,8 @@ function Connect-McpServer {
         Make this session the default session.
     .EXAMPLE
         $session = Connect-McpServer -Command pwsh -Arguments '-NoLogo', '-NoProfile', '-NonInteractive', '-File', './examples/echo-server.ps1'
+    .EXAMPLE
+        $session = Connect-McpServer -Url http://127.0.0.1:8080/mcp/
     .EXAMPLE
         $session = Connect-McpServer -Server $server
     .OUTPUTS
@@ -66,6 +77,16 @@ function Connect-McpServer {
 
         [Parameter(ParameterSetName = 'Stdio')]
         [string] $StandardErrorPath,
+
+        [Parameter(ParameterSetName = 'Http', Mandatory)]
+        [ValidateNotNull()]
+        [uri] $Url,
+
+        [Parameter(ParameterSetName = 'Http')]
+        [hashtable] $Headers,
+
+        [Parameter(ParameterSetName = 'Http')]
+        [switch] $NoProxy,
 
         [Parameter(ParameterSetName = 'InMemory', Mandatory)]
         [ValidateNotNull()]
@@ -91,7 +112,11 @@ function Connect-McpServer {
         [switch] $SetDefault
     )
 
-    $target = if ($PSCmdlet.ParameterSetName -eq 'InMemory') { "server '$($Server.Name)' in memory" } else { "$Command $($Arguments -join ' ')" }
+    $target = switch ($PSCmdlet.ParameterSetName) {
+        'InMemory' { "server '$($Server.Name)' in memory" }
+        'Http' { $Url.AbsoluteUri }
+        default { "$Command $($Arguments -join ' ')" }
+    }
     if (-not $PSCmdlet.ShouldProcess($target, 'Connect')) { return }
 
     $clientInfoObject = [ordered]@{ name = 'ModelContextProtocol'; version = Get-McpModuleVersionString }
@@ -111,6 +136,8 @@ function Connect-McpServer {
         $pair = New-McpInMemoryTransportPair
         $background = Start-McpBackgroundServer -Server $Server -Endpoint $pair.Server
         $transport = $pair.Client
+    } elseif ($PSCmdlet.ParameterSetName -eq 'Http') {
+        $transport = New-McpHttpClientTransport -Url $Url -Headers $Headers -NoProxy:$NoProxy
     } else {
         $transport = New-McpProcessTransport -FilePath $Command -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -Environment $Environment -StandardErrorPath $StandardErrorPath
         $stderrPath = $transport.StandardErrorPath
@@ -120,6 +147,7 @@ function Connect-McpServer {
         PSTypeName         = 'Mcp.Session'
         Name               = $null
         Kind               = $transport.Kind
+        Endpoint           = $target
         Transport          = $transport
         Background         = $background
         ClientInfo         = $clientInfoObject
@@ -128,6 +156,7 @@ function Connect-McpServer {
         Era                = 'Modern'
         ServerInfo         = $null
         Tools              = $null
+        ToolHeaders        = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         NextId             = 1
         RequestTimeoutMs   = $RequestTimeoutSeconds * 1000
         LogLevel           = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $null }
@@ -154,6 +183,8 @@ function Connect-McpServer {
             } else {
                 throw [System.InvalidOperationException]::new("server/discover failed with $($exception.Code): $($exception.Message). Servers that only implement the initialize handshake of revisions before 2026-07-28 are not supported by this milestone.")
             }
+        } catch [System.Net.Http.HttpRequestException] {
+            throw [System.InvalidOperationException]::new("server/discover at $Url failed: $($_.Exception.Message) A response without a JSON-RPC error body indicates a server of a revision before 2026-07-28; its initialize handshake is not supported by this milestone.", $_.Exception)
         }
         if ($discover -isnot [System.Collections.IDictionary] -or -not $discover.Contains('supportedVersions')) {
             throw [System.InvalidOperationException]::new('The server/discover result is not a DiscoverResult.')

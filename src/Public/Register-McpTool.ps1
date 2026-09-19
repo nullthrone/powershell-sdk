@@ -36,6 +36,11 @@ function Register-McpTool {
         Icon objects (hashtables with src, and optionally mimeType, sizes, theme).
     .PARAMETER Meta
         Additional _meta members of the tool definition.
+    .PARAMETER Header
+        Parameters to mirror into HTTP headers over Streamable HTTP, as a map of parameter name to header name
+        (the x-mcp-header annotation of the input schema): @{ Region = 'Region' } makes clients send
+        Mcp-Param-Region with the value of -Region. Only string, integer and boolean parameters can be
+        mirrored; never mirror secrets, header values are visible to intermediaries.
     .PARAMETER AllowAdditionalProperties
         Let the generated schema accept arguments that are not parameters (they are passed through by name).
     .PARAMETER Server
@@ -79,6 +84,8 @@ function Register-McpTool {
         [object[]] $Icons,
 
         [hashtable] $Meta,
+
+        [hashtable] $Header,
 
         [switch] $AllowAdditionalProperties,
 
@@ -203,6 +210,15 @@ function Register-McpTool {
         Test-McpSchemaLimit -Schema $schema
         if ($handler.ParameterTypes.ContainsKey('Arguments')) { $handler.ArgumentStyle = 'Arguments' }
     }
+    if ($Header -and $Header.Count -gt 0) {
+        Add-McpHeaderAnnotation -Schema $schema -Header $Header
+    }
+    $headerParameters = @()
+    try {
+        $headerParameters = @(Get-McpToolHeaderParameter -InputSchema $schema)
+    } catch [System.ArgumentException] {
+        throw [System.ArgumentException]::new("Tool '$Name' has an invalid x-mcp-header annotation: $($_.Exception.Message)")
+    }
     $outputSchemaObject = $null
     if ($PSBoundParameters.ContainsKey('OutputSchema') -and $null -ne $OutputSchema) {
         $outputSchemaObject = ConvertTo-McpSchemaObject -Schema $OutputSchema
@@ -210,16 +226,17 @@ function Register-McpTool {
     }
 
     $registration = [pscustomobject]@{
-        PSTypeName   = 'Mcp.ToolRegistration'
-        Name         = $Name
-        Title        = $Title
-        Description  = $Description
-        InputSchema  = $schema
-        OutputSchema = $outputSchemaObject
-        Annotations  = ConvertTo-McpAnnotationObject -Annotations $Annotations
-        Icons        = $Icons
-        Meta         = $Meta
-        Handler      = $handler
+        PSTypeName       = 'Mcp.ToolRegistration'
+        Name             = $Name
+        Title            = $Title
+        Description      = $Description
+        InputSchema      = $schema
+        OutputSchema     = $outputSchemaObject
+        Annotations      = ConvertTo-McpAnnotationObject -Annotations $Annotations
+        Icons            = $Icons
+        Meta             = $Meta
+        HeaderParameters = $headerParameters
+        Handler          = $handler
     }
     $target.Tools[$Name] = $registration
     if ($PassThru) { $registration }

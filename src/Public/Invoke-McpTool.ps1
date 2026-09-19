@@ -47,7 +47,25 @@ function Invoke-McpTool {
     $params = [ordered]@{ name = $Name }
     if ($null -ne $Arguments) { $params['arguments'] = $Arguments } else { $params['arguments'] = [ordered]@{} }
     $level = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $target.LogLevel }
-    $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs ($TimeoutSeconds * 1000)
+    $timeoutMs = $TimeoutSeconds * 1000
+    $result = $null
+    if ($target.Kind -ne 'Http') {
+        $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs
+    } else {
+        # Streamable HTTP mirrors x-mcp-header parameters into Mcp-Param-* headers; the annotations come from the
+        # cached tool list. A header mismatch reported by the server refreshes the list and retries once.
+        if ($null -eq $target.Tools) { $null = Get-McpTool -Session $target }
+        $headers = Get-McpToolCallHeader -HeaderParameters $target.ToolHeaders[$Name] -Arguments $params['arguments']
+        try {
+            $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs -Headers $headers
+        } catch [McpProtocolException] {
+            if ($_.Exception.Code -ne $script:McpErrorCode.HeaderMismatch) { throw }
+            Write-Verbose "The server reported a header mismatch for '$Name'; refreshing the tool list and retrying once."
+            $null = Get-McpTool -Session $target -Refresh
+            $headers = Get-McpToolCallHeader -HeaderParameters $target.ToolHeaders[$Name] -Arguments $params['arguments']
+            $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs -Headers $headers
+        }
+    }
     if ($result -isnot [System.Collections.IDictionary]) {
         throw [System.InvalidOperationException]::new('The tools/call result is not an object.')
     }
