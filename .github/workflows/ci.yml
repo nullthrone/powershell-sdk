@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  POWERSHELL_TELEMETRY_OPTOUT: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  lint:
+    name: Lint (PSScriptAnalyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PowerShell 7.4
+        uses: ./.github/actions/install-pwsh
+        with:
+          version: '7.4.20'
+      - name: Analyze
+        shell: pwsh
+        run: ./build.ps1 -Bootstrap -Task Analyze
+      - name: Check module name availability on the PowerShell Gallery
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $lines = foreach ($name in 'ModelContextProtocol', 'ModelContextProtocol.Sdk') {
+            $found = Find-PSResource -Name $name -Repository PSGallery -Prerelease -ErrorAction SilentlyContinue
+            if ($found) { '| `{0}` | taken: version {1} by {2} |' -f $name, $found.Version, $found.Author } else { '| `{0}` | available |' -f $name }
+          }
+          $summary = @('## PowerShell Gallery name check', '', '| Name | Status |', '|---|---|') + $lines
+          $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          $summary
+
+  test:
+    name: Test (${{ matrix.os }}, pwsh ${{ matrix.pwsh }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        pwsh: ['7.4.20', '7.5.11', '7.6.6']
+    env:
+      MCP_EXPECTED_PWSH_VERSION: ${{ matrix.pwsh }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PowerShell ${{ matrix.pwsh }}
+        uses: ./.github/actions/install-pwsh
+        with:
+          version: ${{ matrix.pwsh }}
+      - name: Build and test
+        shell: pwsh
+        run: ./build.ps1 -Bootstrap -Task Test
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ matrix.os }}-pwsh${{ matrix.pwsh }}
+          path: output/test-results/
+          if-no-files-found: warn
+
+  ps51-guard:
+    name: Windows PowerShell 5.1 guard
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PowerShell 7.4
+        uses: ./.github/actions/install-pwsh
+        with:
+          version: '7.4.20'
+      - name: Build and run the guard tests
+        shell: pwsh
+        run: ./build.ps1 -Bootstrap -Task Test -TestTag PS51Guard
+
+  package:
+    name: Package
+    needs: [lint, test, ps51-guard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PowerShell 7.4
+        uses: ./.github/actions/install-pwsh
+        with:
+          version: '7.4.20'
+      - name: Package and verify the local-repository publish
+        shell: pwsh
+        run: ./build.ps1 -Bootstrap -Task Package, PublishLocal
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nupkg
+          path: output/packages/*.nupkg
+          if-no-files-found: error

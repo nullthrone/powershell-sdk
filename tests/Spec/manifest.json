@@ -1,0 +1,50 @@
+{
+  "source": "https://github.com/modelcontextprotocol/modelcontextprotocol",
+  "commit": "24efd6e7cbd7a074e6b3b781eb370891df40afad",
+  "retrieved": "2026-09-18",
+  "primaryRevision": "2026-07-28",
+  "files": [
+    {
+      "path": "2026-07-28_schema.json",
+      "revision": "2026-07-28",
+      "upstream": "schema/2026-07-28/schema.json",
+      "sha256": "ef70b61f99b6d2e5e3b46863822eab08dff6a45bedc7a08914e0e5b133f40203",
+      "dialect": "https://json-schema.org/draft/2020-12/schema",
+      "definitions": 155
+    },
+    {
+      "path": "2026-07-28_schema.ts",
+      "revision": "2026-07-28",
+      "upstream": "schema/2026-07-28/schema.ts",
+      "sha256": "742750af0bb8c716e7030c4977c992b55d1adc4407e9e66997db5846baedc2cd"
+    },
+    {
+      "path": "2025-11-25_schema.json",
+      "revision": "2025-11-25",
+      "upstream": "schema/2025-11-25/schema.json",
+      "sha256": "268a5f82ba70fd7e4b6dc4aa1e64f116f74b4d0edcb69dc046829c79dd4e97e7",
+      "dialect": "https://json-schema.org/draft/2020-12/schema",
+      "definitions": 145
+    },
+    {
+      "path": "2025-11-25_schema.ts",
+      "revision": "2025-11-25",
+      "upstream": "schema/2025-11-25/schema.ts",
+      "sha256": "e74b56e73b2e37bdb595f74ba22e428ad7f07aa3519355ba661d681298ed38ac"
+    },
+    {
+      "path": "2025-06-18_schema.json",
+      "revision": "2025-06-18",
+      "upstream": "schema/2025-06-18/schema.json",
+      "sha256": "af845e7e5b9d27107d1690f0936022546177a1403e63ffb11470135b296a2e01",
+      "dialect": "http://json-schema.org/draft-07/schema#",
+      "definitions": 91
+    },
+    {
+      "path": "2025-06-18_schema.ts",
+      "revision": "2025-06-18",
+      "upstream": "schema/2025-06-18/schema.ts",
+      "sha256": "7d7f4cc6f3adb76e3fd5e1eee6bab8b1e183cfaf719da66d2aa5661737ca9539"
+    }
+  ]
+}

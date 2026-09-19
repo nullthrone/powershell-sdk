@@ -1,0 +1,30 @@
+TOPIC
+    about_ModelContextProtocol
+
+SHORT DESCRIPTION
+    PowerShell SDK for the Model Context Protocol (MCP).
+
+LONG DESCRIPTION
+    The ModelContextProtocol module lets you build MCP servers that expose
+    PowerShell functions, scripts and cmdlets as tools, resources and prompts,
+    and lets you consume MCP servers from PowerShell as a client.
+
+    The module targets specification revision 2026-07-28 (stateless
+    lifecycle with server/discover, per-request _meta, multi-round-trip
+    requests and subscriptions/listen) and also speaks the legacy revisions
+    2025-11-25 and 2025-06-18 (initialize handshake) on both sides.
+
+    Supported transports are stdio and Streamable HTTP.
+
+CURRENT STATUS
+    Milestone M0 (foundation): the module builds, imports without side effects
+    and is tested on PowerShell 7.4, 7.5 and 7.6, but exports no commands yet.
+    See ROADMAP.md in the repository for the milestones.
+
+REQUIREMENTS
+    PowerShell 7.4 or later (Core edition). Windows PowerShell 5.1 is not
+    supported. The module has no runtime dependencies.
+
+SEE ALSO
+    https://github.com/nullthrone/powershell-sdk
+    https://modelcontextprotocol.io/specification/2026-07-28

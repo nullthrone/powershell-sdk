@@ -1,0 +1,51 @@
+name: Bug report
+description: Something does not work as documented or as the specification requires.
+labels: ['bug', 'needs confirmation']
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal script or steps. For protocol issues include the JSON-RPC messages (redact secrets).
+      render: powershell
+  - type: input
+    id: module-version
+    attributes:
+      label: Module version
+      placeholder: 0.1.0-preview1
+    validations:
+      required: true
+  - type: input
+    id: powershell-version
+    attributes:
+      label: PowerShell version and operating system
+      description: Output of `$PSVersionTable.PSVersion` and `$PSVersionTable.OS`
+      placeholder: 7.4.20 on Ubuntu 24.04
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Server (stdio)
+        - Server (Streamable HTTP)
+        - Client
+        - Authorization
+        - Extensions (Tasks, Skills, Apps)
+        - Legacy revisions (2025-11-25 / 2025-06-18)
+        - Build, tests, CI
+        - Other
+  - type: checkboxes
+    id: severity
+    attributes:
+      label: Impact
+      options:
+        - label: This prevents basic MCP operations (connection, message exchange, tools/resources/prompts), i.e. a P0 candidate.

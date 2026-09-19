@@ -1,0 +1,109 @@
+name: Release
+
+# Tag push (v<semver>): runs CI, packages the module, publishes it to a local repository as a dry run, drafts a
+# GitHub release with the .nupkg, and publishes to the PowerShell Gallery only when the repository variable
+# PSGALLERY_PUBLISH_ENABLED is 'true' and the secret PSGALLERY_API_KEY exists in the 'psgallery' environment.
+# Manual dispatch: dry run only.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      semver:
+        description: Version to build (e.g. 0.1.0-preview1). Defaults to the version in src/ModelContextProtocol.psd1.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  dry-run:
+    name: Package and publish to a local repository
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      semver: ${{ steps.version.outputs.semver }}
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PowerShell 7.4
+        uses: ./.github/actions/install-pwsh
+        with:
+          version: '7.4.20'
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        env:
+          INPUT_SEMVER: ${{ inputs.semver }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $manifest = Import-PowerShellDataFile -Path ./src/ModelContextProtocol.psd1
+          $manifestSemVer = [string] $manifest.ModuleVersion
+          if ($manifest.PrivateData.PSData.Prerelease) { $manifestSemVer += '-' + $manifest.PrivateData.PSData.Prerelease }
+          $semver = if ($env:INPUT_SEMVER) { $env:INPUT_SEMVER } elseif ($env:REF_TYPE -eq 'tag') { $env:REF_NAME.TrimStart('v') } else { $manifestSemVer }
+          if ($env:REF_TYPE -eq 'tag' -and $semver -ne $manifestSemVer) {
+            throw "Tag $env:REF_NAME does not match the manifest version $manifestSemVer. Update src/ModelContextProtocol.psd1 before tagging."
+          }
+          "semver=$semver" | Add-Content -Path $env:GITHUB_OUTPUT
+          Write-Host "Building version $semver"
+      - name: Package and publish to a local repository
+        shell: pwsh
+        env:
+          SEMVER: ${{ steps.version.outputs.semver }}
+        run: ./build.ps1 -Bootstrap -Task Package, PublishLocal -SemVer $env:SEMVER
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nupkg
+          path: output/packages/*.nupkg
+          if-no-files-found: error
+      - name: Draft GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEMVER: ${{ steps.version.outputs.semver }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $notes = ./tools/Get-ChangelogSection.ps1 -Version $env:SEMVER -FallbackToUnreleased
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          Set-Content -Path $notesFile -Value $notes -Encoding utf8NoBOM
+          $package = Get-ChildItem -Path ./output/packages -Filter '*.nupkg' | Select-Object -First 1
+          $prerelease = if ($env:SEMVER -match '-') { '--prerelease' } else { $null }
+          gh release create $env:REF_NAME --draft --verify-tag --title $env:REF_NAME --notes-file $notesFile $prerelease $package.FullName
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE" }
+
+  publish:
+    name: Publish to the PowerShell Gallery
+    needs: dry-run
+    if: github.ref_type == 'tag' && vars.PSGALLERY_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: psgallery
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install PowerShell 7.4
+        uses: ./.github/actions/install-pwsh
+        with:
+          version: '7.4.20'
+      - name: Publish
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+          SEMVER: ${{ needs.dry-run.outputs.semver }}
+        run: ./build.ps1 -Bootstrap -Task Publish -SemVer $env:SEMVER

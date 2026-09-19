@@ -1,0 +1,16 @@
+# Build output (built module, packages, test results, coverage)
+/output/
+
+# Offline dependency packages dropped into tools/packages (see tools/README.md)
+/tools/packages/*.nupkg
+
+# Conformance suite and Inspector artefacts (from milestone M2)
+/results/
+/.sdk-under-test/
+/node_modules/
+
+# Editors and operating systems
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
