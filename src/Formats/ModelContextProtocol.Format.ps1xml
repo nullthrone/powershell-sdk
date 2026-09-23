@@ -219,5 +219,51 @@
         </ListEntries>
       </ListControl>
     </View>
+    <View>
+      <Name>Mcp.Subscription</Name>
+      <ViewSelectedBy>
+        <TypeName>Mcp.Subscription</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Id</Label></TableColumnHeader>
+          <TableColumnHeader><Label>State</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Honoured</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Queued</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Id</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>State</PropertyName></TableColumnItem>
+              <TableColumnItem><ScriptBlock>if ($null -ne $_.Honoured) { @(foreach ($key in $_.Honoured.Keys) { if ($key -eq 'resourceSubscriptions') { @($_.Honoured[$key]) -join ', ' } else { $key } }) -join ', ' }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><ScriptBlock>$_.Notifications.Count</ScriptBlock></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+    <View>
+      <Name>Mcp.Notification</Name>
+      <ViewSelectedBy>
+        <TypeName>Mcp.Notification</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Received</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Method</Label></TableColumnHeader>
+          <TableColumnHeader><Label>Uri</Label></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><ScriptBlock>$_.Received.ToLocalTime().ToString("HH:mm:ss")</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>Method</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Uri</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

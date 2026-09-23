@@ -7,23 +7,8 @@
 # This file may only shrink. Version 1.0.0 requires empty lists for both requirement sets
 # (2026-07-28 and 2025-11-25). The milestone that removes an entry is noted next to it (see ROADMAP.md);
 # the 2025-11-25 requirement set is run from milestone M5 (dual era) on.
-server:
-  # M4: input requests (MRTR); the two scenarios that only warn today (SHOULD checks) are listed as well
-  - input-required-result-basic-elicitation
-  - input-required-result-basic-sampling
-  - input-required-result-basic-list-roots
-  - input-required-result-request-state
-  - input-required-result-multiple-input-requests
-  - input-required-result-multi-round
-  - input-required-result-missing-input-response
-  - input-required-result-non-tool-request
-  - input-required-result-result-type
-  - input-required-result-tampered-state
-  - input-required-result-capability-check
-  - input-required-result-ignore-extra-params
+server: []
 client:
-  # M4: input requests
-  - sep-2322-client-request-state
   # M6: authorization
   - auth/metadata-default
   - auth/metadata-var1

@@ -10,8 +10,8 @@
     the tool calls to make) and MCP_CONFORMANCE_PROTOCOL_VERSION (when a spec version was requested). It
     discovers the server, lists the tools and calls them: the calls given in the context, or every listed tool
     with arguments derived from its input schema. Diagnostics go to stderr; the exit code is 0 unless the
-    connection fails. Scenarios of later milestones (input requests, authorization) are listed in
-    conformance-baseline.yml.
+    connection fails. Input requests of multi-round-trip requests are answered by fixed callbacks. Scenarios
+    of later milestones (authorization) are listed in conformance-baseline.yml.
 #>
 [CmdletBinding()]
 param(
@@ -74,7 +74,31 @@ if ($protocolVersion -ne '2026-07-28') {
     exit 0
 }
 
+# Answers to the input requests of multi-round-trip requests: form content derived from the requested schema,
+# a fixed sampling reply and one root.
+$onElicitation = {
+    param($Request)
+    $content = [ordered]@{}
+    $schema = $Request.RequestedSchema
+    if ($schema -is [System.Collections.IDictionary] -and $schema['properties'] -is [System.Collections.IDictionary]) {
+        foreach ($name in $schema['properties'].Keys) {
+            $property = $schema['properties'][$name]
+            $content[[string] $name] = switch ([string] $property['type']) {
+                'boolean' { $true }
+                'number' { 1 }
+                'integer' { 1 }
+                'array' { @() }
+                default { if ($property.Contains('enum')) { @($property['enum'])[0] } else { 'value' } }
+            }
+        }
+    }
+    @{ action = 'accept'; content = $content }
+}
+
 $connectParameters = @{
+    OnElicitation         = $onElicitation
+    OnSampling            = { param($Request) $null = $Request; 'Paris' }
+    OnRoots               = { param($Request) $null = $Request; @{ uri = 'file:///tmp/conformance'; name = 'conformance' } }
     Url                   = $url
     ClientInfo            = @{ name = 'ModelContextProtocol-everything-client'; version = '0.1.0' }
     Capabilities          = @{ elicitation = @{ form = @{} }; sampling = @{}; roots = @{ listChanged = $true } }

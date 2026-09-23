@@ -477,6 +477,10 @@ function Stop-McpHttpChannelRequest {
     )
 
     $key = Get-McpRequestKey -Id $Channel.RequestId
+    if ($State.Listeners.ContainsKey($key) -and $State.Listeners[$key].Channel -eq $Channel) {
+        Remove-McpListener -State $State -Key $key -Reason 'ended: the client closed the stream'
+        return
+    }
     if (-not $State.InFlight.ContainsKey($key)) { return }
     $entry = $State.InFlight[$key]
     if ($entry.Cancelled -or $entry.Responded) { return }
@@ -735,6 +739,7 @@ function Invoke-McpHttpDispatcherLoop {
         Update-McpHttpChannel -State $State
         if ($State.Stopping) { break }
         if ($server.State.StopRequested) {
+            if ($State.Listeners.Count -gt 0) { Close-McpAllListener -State $State }
             if (-not $transport.Stopped) {
                 $transport.Stopped = $true
                 Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $server.Name -Message 'Stop requested; no longer accepting connections.'

@@ -37,7 +37,21 @@ function Connect-McpServer {
     .PARAMETER ClientInfo
         The clientInfo sent with every request (name and version); defaults to this module.
     .PARAMETER Capabilities
-        The client capabilities declared with every request (default: none).
+        The client capabilities declared with every request (default: none, plus what the callbacks imply).
+    .PARAMETER OnElicitation
+        Answers elicitation input requests of multi-round-trip requests: invoked with an Mcp.InputRequest
+        (Key, Mode form or url, Message, RequestedSchema, Url); returns the form content as a hashtable (meaning
+        accept), an ElicitResult (@{ action = 'accept' | 'decline' | 'cancel'; content = @{...} }), or nothing
+        (cancel). Declares the elicitation capability (form and URL mode) unless -Capabilities has one.
+    .PARAMETER OnSampling
+        Answers sampling input requests (deprecated): invoked with an Mcp.InputRequest (Messages, MaxTokens,
+        SystemPrompt, Params); returns a string (the assistant text) or a CreateMessageResult (role, content,
+        model, stopReason). Declares the sampling capability unless -Capabilities has one.
+    .PARAMETER OnRoots
+        Answers roots input requests (deprecated): returns paths or URIs, or hashtables with uri and name.
+        Declares the roots capability unless -Capabilities has one.
+    .PARAMETER MaxInputRounds
+        The maximum number of input rounds of one request before it fails (default: 10).
     .PARAMETER ProtocolVersion
         The preferred protocol version (default: 2026-07-28).
     .PARAMETER RequestTimeoutSeconds
@@ -97,6 +111,15 @@ function Connect-McpServer {
 
         [hashtable] $Capabilities,
 
+        [scriptblock] $OnElicitation,
+
+        [scriptblock] $OnSampling,
+
+        [scriptblock] $OnRoots,
+
+        [ValidateRange(1, 100)]
+        [int] $MaxInputRounds = 10,
+
         [ValidateNotNullOrEmpty()]
         [string] $ProtocolVersion = '2026-07-28',
 
@@ -128,12 +151,16 @@ function Connect-McpServer {
         throw [System.ArgumentException]::new('-ClientInfo needs name and version.')
     }
     $capabilityObject = if ($Capabilities) { ConvertFrom-McpJson -Json (ConvertTo-McpJson -InputObject $Capabilities) } else { [ordered]@{} }
+    if ($OnElicitation -and -not $capabilityObject.Contains('elicitation')) { $capabilityObject['elicitation'] = [ordered]@{ form = [ordered]@{}; url = [ordered]@{} } }
+    if ($OnSampling -and -not $capabilityObject.Contains('sampling')) { $capabilityObject['sampling'] = [ordered]@{} }
+    if ($OnRoots -and -not $capabilityObject.Contains('roots')) { $capabilityObject['roots'] = [ordered]@{} }
 
     $transport = $null
     $background = $null
     $stderrPath = $null
     if ($PSCmdlet.ParameterSetName -eq 'InMemory') {
         if (-not (Test-McpServerObject -Server $Server)) { throw [System.ArgumentException]::new('-Server must be a server created by New-McpServer.') }
+        if ($Server.State.Started) { throw [System.InvalidOperationException]::new("Server '$($Server.Name)' is already running; a server object serves one in-memory session at a time.") }
         $pair = New-McpInMemoryTransportPair
         $background = Start-McpBackgroundServer -Server $Server -Endpoint $pair.Server
         $transport = $pair.Client
@@ -163,8 +190,16 @@ function Connect-McpServer {
         RequestTimeoutMs   = $RequestTimeoutSeconds * 1000
         LogLevel           = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $null }
         OnLog              = $OnLog
+        OnElicitation      = $OnElicitation
+        OnSampling         = $OnSampling
+        OnRoots            = $OnRoots
+        MaxInputRounds     = $MaxInputRounds
         Log                = [System.Collections.Generic.List[object]]::new()
         Notifications      = [System.Collections.Generic.Queue[object]]::new()
+        Subscriptions      = [ordered]@{}
+        SubscriptionIds    = @{}
+        Inbox              = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+        PendingEvents      = [System.Collections.Generic.List[object]]::new()
         StandardErrorPath  = $stderrPath
         Closed             = $false
     }

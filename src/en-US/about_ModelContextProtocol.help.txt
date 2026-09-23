@@ -17,27 +17,35 @@ LONG DESCRIPTION
     Supported transports are stdio and Streamable HTTP.
 
 CURRENT STATUS
-    Milestone M3 (server primitives): servers expose PowerShell commands and
-    script blocks as tools, resources (fixed content, files, directories,
-    handlers, RFC 6570 templates) and prompts, with argument completion and
-    caching hints, over stdio and over Streamable HTTP with the stateless
-    2026-07-28 lifecycle (server/discover, per-request _meta, request metadata
-    headers, progress, cancellation, log notifications). Clients consume all
-    of them over both transports and cache results for the ttlMs the server
-    sends. The official conformance suite runs in CI. Input requests,
-    subscriptions, the legacy revisions, authorization and the extensions
+    Milestone M4 (input requests and subscriptions): servers expose PowerShell
+    commands and script blocks as tools, resources (fixed content, files,
+    directories, handlers, RFC 6570 templates) and prompts, with argument
+    completion and caching hints, over stdio and over Streamable HTTP with the
+    stateless 2026-07-28 lifecycle (server/discover, per-request _meta, request
+    metadata headers, progress, cancellation, log notifications). Handlers ask
+    for user input (elicitation), sampling and roots through multi-round-trip
+    requests; clients subscribe to list changes and resource updates with
+    subscriptions/listen. Clients consume all of it over both transports and
+    cache results for the ttlMs the server sends. The official conformance
+    suite runs in CI. The legacy revisions, authorization and the extensions
     follow in later milestones (ROADMAP.md).
 
 COMMANDS
     Server:   New-McpServer, Register-McpTool, Register-McpResource,
-              Register-McpPrompt, Start-McpServer, Stop-McpServer,
+              Register-McpPrompt, Unregister-McpTool, Unregister-McpResource,
+              Unregister-McpPrompt, Start-McpServer, Stop-McpServer,
+              Send-McpToolListChanged, Send-McpPromptListChanged,
+              Send-McpResourceListChanged, Send-McpResourceUpdated,
               Invoke-McpToolHandler
     Handlers: New-McpContent, New-McpToolResult, New-McpPromptMessage,
               New-McpResourceContent, Write-McpProgress, Write-McpLog,
-              Test-McpClientCapability
+              Test-McpClientCapability, Request-McpElicitation,
+              Request-McpSampling, Request-McpRoot, Wait-McpInput
     Client:   Connect-McpServer, Disconnect-McpServer, Get-McpServerInfo,
               Get-McpTool, Invoke-McpTool, Get-McpResource, Read-McpResource,
-              Get-McpPrompt, Invoke-McpPrompt, Get-McpCompletion
+              Get-McpPrompt, Invoke-McpPrompt, Get-McpCompletion,
+              Register-McpSubscription, Unregister-McpSubscription,
+              Receive-McpNotification
 
     Start-McpServer serves stdio by default; -Transport Http -Url serves a
     Streamable HTTP endpoint (POST-only, JSON or SSE responses, request
@@ -56,9 +64,25 @@ COMMANDS
     completions are declared in server/discover only when something is
     registered.
 
+    A handler that needs input calls Request-McpElicitation (a form or a URL
+    for the user), Request-McpSampling or Request-McpRoot. The first call
+    answers the request with an InputRequiredResult; the client obtains the
+    answer (Connect-McpServer -OnElicitation, -OnSampling, -OnRoots) and
+    retries, and the handler runs again and gets the answer. Answers of earlier
+    rounds and $Context.State travel in a signed requestState (New-McpServer
+    -RequestStateKey). Handlers must be free of side effects before their last
+    input request.
+
+    Register-McpSubscription opens a subscriptions/listen stream for tool,
+    prompt and resource list changes and resource updates; the notifications
+    invalidate the client's cache and are read with Receive-McpNotification or
+    handled by an -Action script block. Registering or removing a primitive
+    on a running server notifies the subscribers; Send-McpResourceUpdated and
+    the Send-*ListChanged commands announce other changes.
+
     A handler receives the request context through a parameter named Context
     (request id, method, name, protocol version, client info and capabilities,
-    log level, progress token, cancellation token). Handlers run in a worker
+    log level, progress token, cancellation token, input responses, state). Handlers run in a worker
     runspace pool: pass everything they need as parameters; nothing they write
     to the host reaches the client. Their warnings, information and verbose
     records are logged to stderr and, when the request asks for it, sent as

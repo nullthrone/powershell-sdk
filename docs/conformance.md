@@ -4,8 +4,8 @@ The SDK is measured with the official suite `@modelcontextprotocol/conformance`.
 (0.1.x) does not know revision 2026-07-28; the version pinned in `requirements.psd1` (alpha channel) does.
 The fixtures live in `tests/Conformance/` (`everything-server.ps1`, a Streamable HTTP server with every tool,
 resource, prompt and completion the server scenarios call; `everything-client.ps1`, a client that discovers,
-lists and calls tools, and reads resources and renders prompts when the server declares them, as the client
-scenarios expect), the build task `Conformance` runs both legs, and `.github/workflows/conformance.yml`
+lists and calls tools, answers input requests with fixed callbacks, and reads resources and renders prompts
+when the server declares them, as the client scenarios expect), the build task `Conformance` runs both legs, and `.github/workflows/conformance.yml`
 runs them on every push and pull request.
 
 ## Running the suite
@@ -22,20 +22,28 @@ runs the server leg, stops the fixture, then runs the client leg with the fixtur
 (`checks.json` per scenario, the fixture server log) are written to `output/conformance/`. The task fails
 when a leg exits with a non-zero code: an unexpected failure or a stale baseline entry.
 
-## State after milestone M3
+## State after milestone M4
 
-Requirement set `2026-07-28`, server leg: `server-stateless` (25 checks), `tools-list`, the seven
-`tools-call-*` scenarios, `resources-list`, `resources-read-text`, `resources-read-binary`,
-`resources-templates-read`, `sep-2164-resource-not-found` (the `-32602` error with `data.uri`), the five
-`prompts-*` scenarios, `completion-complete`, `caching` (hints on every list result and on
-`resources/read`), `dns-rebinding-protection` and `server-sse-multiple-streams` pass, each including the
-`wire-schema-valid` check of every message against the 2026-07-28 schema; the not-scored
-`json-schema-2020-12`, `http-header-validation` and `http-custom-header-server-validation` pass too. Client
-leg: `tools_call`, `request-metadata`, `auth/resource-mismatch`, `http-standard-headers` (now with the
-`Mcp-Method` and `Mcp-Name` checks of `resources/read` and `prompts/get`), `http-custom-headers`,
-`http-invalid-tool-headers`, `json-schema-ref-no-deref` and the not-scored
-`json-schema-2020-12-preservation` pass. Everything else is in `conformance-baseline.yml`, grouped by the
-milestone that removes it.
+Requirement set `2026-07-28`, server leg: every scenario of the requirement set passes and the server
+baseline is empty. That covers `server-stateless` (30 checks, among them the `subscriptions/listen` checks:
+acknowledgement first, the subscription id on every notification, a strictly honoured filter, and tools and
+prompts list changes triggered by the fixture tools `test_trigger_tool_change` and
+`test_trigger_prompt_change`), the fourteen `input-required-result-*` scenarios (elicitation, sampling and
+roots input requests, answers accumulated over several rounds in the signed `requestState`, a tampered
+state rejected before any other validation, input requests gated by the client capabilities, prompts and
+resources as well as tools), `tools-list`, the seven `tools-call-*` scenarios, the `resources-*`,
+`prompts-*`, `completion-complete`, `caching`, `sep-2164-resource-not-found`, `dns-rebinding-protection`
+and `server-sse-multiple-streams` scenarios, each including the `wire-schema-valid` check of every message
+against the 2026-07-28 schema; the not-scored `json-schema-2020-12`, `http-header-validation` and
+`http-custom-header-server-validation` pass too. The `tasks-*` scenarios are extensions (milestone M7) and
+do not affect the score.
+
+Client leg: `tools_call`, `request-metadata`, `sep-2322-client-request-state` (the state echoed verbatim,
+a new request id per round, no state when the server sent none, no MRTR parameters on unrelated calls, a
+missing `resultType` read as `complete`), `auth/resource-mismatch`, `http-standard-headers`,
+`http-custom-headers`, `http-invalid-tool-headers`, `json-schema-ref-no-deref` and the not-scored
+`json-schema-2020-12-preservation` pass. The remaining entries of `conformance-baseline.yml` are the
+authorization scenarios of milestone M6.
 
 ## Requirement sets
 

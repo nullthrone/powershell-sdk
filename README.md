@@ -4,15 +4,17 @@ PowerShell SDK for building and consuming [Model Context Protocol](https://model
 and clients, targeting specification revision **2026-07-28** with dual-era support for 2025-11-25 and
 2025-06-18.
 
-> **Status: milestone M3 (server primitives).** Servers expose PowerShell functions, cmdlets, scripts and
-> script blocks as tools, resources (fixed content, files, directories, handlers, RFC 6570 templates) and
-> prompts, with argument completion and caching hints, over stdio and Streamable HTTP with the stateless
-> 2026-07-28 lifecycle (`server/discover`, per-request `_meta`, request metadata headers, progress,
-> cancellation, log notifications). The client side consumes all of them over both transports and caches
-> results for the `ttlMs` the server sends. The official conformance suite runs in CI: every 2026-07-28
-> scenario of the tools, resources, prompts, completion, caching, HTTP header validation and DNS rebinding
-> groups passes; the remaining scenarios (input requests, subscriptions, authorization) are listed in
-> [conformance-baseline.yml](conformance-baseline.yml) and follow in M4 to M7. The milestones are in
+> **Status: milestone M4 (input requests and subscriptions).** Servers expose PowerShell functions, cmdlets,
+> scripts and script blocks as tools, resources (fixed content, files, directories, handlers, RFC 6570
+> templates) and prompts, with argument completion and caching hints, over stdio and Streamable HTTP with the
+> stateless 2026-07-28 lifecycle (`server/discover`, per-request `_meta`, request metadata headers, progress,
+> cancellation, log notifications). Handlers ask the user for input (elicitation) or the client for sampling
+> and roots through multi-round-trip requests with a signed `requestState`; clients subscribe to list changes
+> and resource updates with `subscriptions/listen`, and tools, resources and prompts can be registered while
+> the server runs. The client side consumes all of it over both transports and caches results for the
+> `ttlMs` the server sends. The official conformance suite runs in CI: every 2026-07-28 server scenario
+> passes, and on the client side everything but authorization, which is listed in
+> [conformance-baseline.yml](conformance-baseline.yml) and follows in M6. The milestones are in
 > [ROADMAP.md](ROADMAP.md); the design is in [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Requirements
@@ -83,6 +85,22 @@ Get-McpResource | Read-McpResource                          # cached for the ttl
 Disconnect-McpServer
 ```
 
+A handler that needs input asks for it; the client answers through a callback, and the request is retried
+with the answer (see [docs/concepts/mrtr.md](docs/concepts/mrtr.md)):
+
+```powershell
+Register-McpTool -Name 'delete-files' -ScriptBlock {
+    param([Parameter(Mandatory)] [string] $Pattern, $Context)
+    $answer = Request-McpElicitation -Context $Context -Key 'confirm' -Message "Delete '$Pattern'?" -Schema @{ ok = @{ type = 'boolean' } } -Required ok
+    if ($answer.Action -ne 'accept' -or -not $answer.Content.ok) { return 'Cancelled.' }
+    Remove-Item -Path $Pattern
+}
+
+$session = Connect-McpServer -Command pwsh -Arguments '-File', './server.ps1' -OnElicitation { param($Request) @{ ok = $true } }
+$subscription = Register-McpSubscription -ToolsListChanged -ResourceUri 'weather://stations'
+Receive-McpNotification -Subscription $subscription -TimeoutSeconds 30
+```
+
 Over Streamable HTTP the same server listens on a URL, and the same client commands connect to it:
 
 ```powershell
@@ -101,7 +119,7 @@ SSE responses. See [docs/concepts/transports.md](docs/concepts/transports.md).
 `Connect-McpServer -Server $serverObject` runs a server in a background runspace over an in-memory transport,
 which is how the tests exercise servers without child processes. `Invoke-McpToolHandler` calls a registered
 tool directly for unit tests of the tool itself. See `examples/echo-server.ps1`, `examples/weather-server.ps1`
-(all server primitives), `examples/http-server.ps1`,
+(all server primitives), `examples/elicitation-server.ps1` (input requests), `examples/http-server.ps1`,
 [docs/concepts/server-primitives.md](docs/concepts/server-primitives.md) and
 [docs/development.md](docs/development.md) for the Inspector command line.
 

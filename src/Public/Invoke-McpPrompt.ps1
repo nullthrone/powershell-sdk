@@ -52,7 +52,7 @@ function Invoke-McpPrompt {
         $params['arguments'] = $values
     }
     $level = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $target.LogLevel }
-    $result = Invoke-McpClientRequest -Session $target -Method 'prompts/get' -Params $params -LogLevel $level -TimeoutMs ($TimeoutSeconds * 1000)
+    $result = (Invoke-McpClientRequestWithInput -Session $target -Method 'prompts/get' -Params $params -LogLevel $level -TimeoutMs ($TimeoutSeconds * 1000)).Result
     if ($result -isnot [System.Collections.IDictionary] -or -not $result.Contains('messages')) {
         throw [System.InvalidOperationException]::new('The prompts/get result has no messages member.')
     }

@@ -193,6 +193,17 @@ function Receive-McpTransportLine {
         [int] $TimeoutMs
     )
 
+    if ($Transport.ContainsKey('LineInbox') -and $null -ne $Transport.LineInbox) {
+        # A background pump reads the transport (client subscriptions, ClientSubscriptions.ps1).
+        $inboxLine = $null
+        try {
+            if ($Transport.LineInbox.TryTake([ref] $inboxLine, $TimeoutMs)) { return @{ Status = 'Line'; Line = $inboxLine } }
+        } catch [System.InvalidOperationException] {
+            return @{ Status = 'Eof'; Line = $null }
+        }
+        if ($Transport.LineInbox.IsCompleted) { return @{ Status = 'Eof'; Line = $null } }
+        return @{ Status = 'Timeout'; Line = $null }
+    }
     $task = Read-McpTransportLineAsync -Transport $Transport
     $completed = $false
     try {

@@ -244,5 +244,6 @@ function Register-McpResource {
     # Assigned separately: an if expression would enumerate a byte[] into an object[].
     if ($source -eq 'Content') { $registration.Content = $Content }
     if ($kind -eq 'Resource') { $target.Resources[$Uri] = $registration } else { $target.ResourceTemplates[$UriTemplate] = $registration }
+    if ($target.State.Started) { $null = Send-McpServerNotification -Method 'notifications/resources/list_changed' -Server $target }
     if ($PassThru) { $registration }
 }

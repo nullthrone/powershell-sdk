@@ -1,7 +1,8 @@
 # Server primitives
 
-Tools (milestone M1), resources, prompts and completion (milestone M3) are implemented. This page records how
-they map onto PowerShell, the contract for their handlers, and the caching behaviour on both sides.
+Tools (milestone M1), resources, prompts and completion (milestone M3) are implemented; since milestone M4
+they can be registered and removed while the server runs. This page records how they map onto PowerShell,
+the contract for their handlers, and the caching behaviour on both sides.
 
 ## Registration and capabilities
 
@@ -14,8 +15,12 @@ they map onto PowerShell, the contract for their handlers, and the caching behav
 | Completion | `-Completion` on prompts and templates, `ValidateSet` of prompt parameters | `completion/complete` | `completions` once a source exists |
 
 A capability that is not declared has no methods: they answer `-32601`, as the specification requires (the
-`server-stateless` conformance scenario checks this for prompts). `listChanged` and `subscribe` are `false`
-until `subscriptions/listen` can deliver the notifications (milestone M4).
+`server-stateless` conformance scenario checks this for prompts). `listChanged` (and `resources.subscribe`)
+is `true`: `Register-McpTool`, `Register-McpResource` and `Register-McpPrompt` on a running server, and
+`Unregister-McpTool`, `Unregister-McpResource` and `Unregister-McpPrompt`, notify the clients subscribed with
+`subscriptions/listen`, and handlers registered after the start are callable at once (see
+[subscriptions.md](subscriptions.md)). Handlers that need input from the user or the client use
+multi-round-trip requests ([mrtr.md](mrtr.md)).
 
 The list methods and everything without user code (fixed `-Content`, value-list completions) are answered by
 the dispatcher itself. `tools/call`, `resources/read` of files, directories and handlers, `prompts/get` and
@@ -79,7 +84,8 @@ The client keeps a cache per session. `Get-McpServerInfo`, `Get-McpTool`, `Get-M
 `Get-McpPrompt` and `Read-McpResource` (per URI) reuse a result until its `ttlMs` has elapsed; for a list
 the shortest `ttlMs` of its pages applies. A `ttlMs` of 0 (immediately stale) is never cached. `-Refresh`
 bypasses the cache. The cache is session-local, so private and public results are both reusable; the scope is
-kept with each entry. Invalidation by list-changed notifications follows with `subscriptions/listen` (M4).
+kept with each entry. On a session with subscriptions (`Register-McpSubscription`), list-changed and
+resource-updated notifications drop the affected entries.
 
 ## Pagination
 

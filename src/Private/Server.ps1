@@ -73,7 +73,7 @@ function Get-McpServerCapability {
     if (Test-McpCompletionCapability -Server $Server) { $capabilities['completions'] = [ordered]@{} }
     if ($Server.Prompts.Count -gt 0) { $capabilities['prompts'] = [ordered]@{ listChanged = [bool] $Server.Options.ListChanged } }
     if (Test-McpResourceCapability -Server $Server) {
-        $capabilities['resources'] = [ordered]@{ subscribe = $false; listChanged = [bool] $Server.Options.ListChanged }
+        $capabilities['resources'] = [ordered]@{ subscribe = [bool] $Server.Options.ListChanged; listChanged = [bool] $Server.Options.ListChanged }
     }
     $capabilities['tools'] = [ordered]@{ listChanged = [bool] $Server.Options.ListChanged }
     $capabilities

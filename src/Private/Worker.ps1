@@ -1,6 +1,7 @@
 # Worker side of a request that runs user code (tools/call, resources/read, prompts/get, completion/complete):
 # runs in a runspace of the server's pool, builds the request context, invokes the handler and enqueues the
-# response for the dispatcher.
+# response for the dispatcher; a handler that asks for input (McpInputRequiredException) is answered with an
+# InputRequiredResult.
 
 $script:McpModuleManifestPath = Join-Path $PSScriptRoot 'ModelContextProtocol.psd1'
 
@@ -39,6 +40,16 @@ function New-McpRequestContext {
         ServerName         = $Envelope.ServerName
         ServerLogLevel     = $Envelope.ServerLogLevel
         ProgressState      = @{ Last = $null }
+        # Multi-round-trip requests: the answers of this and earlier rounds, the requests of this round, the
+        # answers the handler accepted, and handler state that survives the rounds (in the signed requestState).
+        InputResponses     = if ($null -ne $Envelope.InputResponses) { $Envelope.InputResponses } else { [ordered]@{} }
+        PendingInput       = if ($Envelope.Kind -in @('Tool', 'Resource', 'Prompt')) { [ordered]@{} } else { $null }
+        ConsumedInput      = [ordered]@{}
+        State              = $(
+            $table = @{}
+            if ($Envelope.HandlerState -is [System.Collections.IDictionary]) { foreach ($key in $Envelope.HandlerState.Keys) { $table[[string] $key] = $Envelope.HandlerState[$key] } }
+            $table
+        )
     }
 }
 
@@ -71,6 +82,41 @@ function Send-McpSinkMessage {
     $null = $Sink.Signal.Set()
 }
 
+$script:McpWorkerDefinitions = @{}
+
+function Initialize-McpWorkerHandler {
+    <#
+    .SYNOPSIS
+        Makes a handler callable by name in this worker runspace: defines (or redefines) its function and imports its module.
+    .DESCRIPTION
+        The pool defines the handlers registered before the start. Handlers registered, or replaced with -Force,
+        while the server runs are defined here on first use, so that they can be called too.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [hashtable] $Handler
+    )
+
+    if ($null -eq $Handler) { return }
+    if ($Handler.Definition -and $Handler.Kind -in @('ScriptBlock', 'Function')) {
+        $name = $Handler.CommandName
+        if ($script:McpWorkerDefinitions[$name] -cne $Handler.Definition) {
+            if (-not $script:McpWorkerDefinitions.ContainsKey($name) -and (Test-Path -Path "function:global:$name")) {
+                # Defined by the pool: remember its definition instead of replacing it.
+                $script:McpWorkerDefinitions[$name] = (Get-Item -Path "function:global:$name").Definition
+            }
+            if ($script:McpWorkerDefinitions[$name] -cne $Handler.Definition) {
+                # A string value is compiled by the function provider, exactly like the pool's function entries.
+                Set-Item -Path "function:global:$name" -Value $Handler.Definition
+                $script:McpWorkerDefinitions[$name] = $Handler.Definition
+            }
+        }
+    } elseif ($Handler.ModulePath -and -not (Get-Module -Name $Handler.ModuleName)) {
+        Import-Module -Name $Handler.ModulePath -Global
+    }
+}
+
 function Invoke-McpWorkerRequest {
     <#
     .SYNOPSIS
@@ -86,6 +132,10 @@ function Invoke-McpWorkerRequest {
     $response = $null
     $errorCode = $null
     try {
+        switch ($Envelope.Kind) {
+            'Completion' { if ($null -ne $Envelope.Completion.Source) { Initialize-McpWorkerHandler -Handler $Envelope.Completion.Source.Handler } }
+            default { Initialize-McpWorkerHandler -Handler $Envelope.Registration.Handler }
+        }
         $result = switch ($Envelope.Kind) {
             'Tool' { Invoke-McpToolHandler -Registration $Envelope.Registration -Arguments $Envelope.Arguments -Context $context -UseCommandName }
             'Resource' { Invoke-McpResourceHandler -Registration $Envelope.Registration -Uri $Envelope.Name -Variables $Envelope.Variables -Context $context -CacheHint $Envelope.CacheHint -UseCommandName }
@@ -102,6 +152,17 @@ function Invoke-McpWorkerRequest {
         throw
     } catch {
         $exception = Get-McpHandlerException -Exception $_.Exception
+        if ($exception -is [McpInputRequiredException] -and $null -ne $context.PendingInput) {
+            $result = Get-McpInputRequiredResult -InputRequests $exception.InputRequests -Context $context -Envelope $Envelope
+            if ($Envelope.IncludeServerInfo -and $null -ne $Envelope.ServerInfo) {
+                $meta = [ordered]@{}
+                $meta[$script:McpMetaKey.ServerInfo] = $Envelope.ServerInfo
+                $result['_meta'] = $meta
+            }
+            if ($Envelope.CancellationToken.IsCancellationRequested) { return }
+            Send-McpSinkMessage -Sink $Envelope.Sink -Kind Response -RequestId $Envelope.RequestId -Json (ConvertTo-McpJson -InputObject (New-McpResultResponse -Id $Envelope.RequestId -Result $result))
+            return
+        }
         $errorObject = ConvertTo-McpErrorObject -Exception $exception
         $errorCode = $errorObject['code']
         $response = New-McpErrorResponse -Id $Envelope.RequestId -ErrorObject $errorObject

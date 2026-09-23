@@ -47,8 +47,8 @@ Describe 'Resources through the client' -Tag 'Integration' {
     It 'declares the capabilities of what is registered' {
         $capabilities = (Get-McpServerInfo -Session $script:session).Capabilities
         @($capabilities.Keys) | Should -Be @('completions', 'prompts', 'resources', 'tools')
-        $capabilities['resources']['subscribe'] | Should -BeFalse
-        $capabilities['resources']['listChanged'] | Should -BeFalse
+        $capabilities['resources']['subscribe'] | Should -BeTrue
+        $capabilities['resources']['listChanged'] | Should -BeTrue
     }
 
     It 'lists resources and templates across pages' {

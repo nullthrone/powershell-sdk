@@ -84,6 +84,7 @@ function Invoke-McpDispatcher {
         Outbound    = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
         Signal      = [System.Threading.AutoResetEvent]::new($false)
         InFlight    = @{}
+        Listeners   = @{}
         Pool        = $null
         EofReceived = $false
         Stopping    = $false
@@ -91,10 +92,17 @@ function Invoke-McpDispatcher {
         LogLevel    = $Server.Options.LogLevel
     }
     $Server.State.Signal = $state.Signal
+    # Fan-out cmdlets (Send-McpToolListChanged ...) queue notifications for the listeners here, from any runspace.
+    $Server.State.Sink = @{ Queue = $state.Outbound; Signal = $state.Signal }
+    # The open subscriptions, for diagnostics (a Hashtable: one writer, the dispatcher, and any number of readers).
+    $Server.State.Listeners = $state.Listeners
     $Server.State.Started = $true
     $Server.State.StopRequested = $false
     $where = if ($Transport.Kind -eq 'Http') { "Streamable HTTP at $($Transport.Prefix)" } else { $Transport.Kind }
     Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message "Server '$($Server.Name)' $($Server.Version) starting on $where with $($Server.Tools.Count) tool(s), $($Server.Resources.Count + $Server.ResourceTemplates.Count) resource(s) and template(s), $($Server.Prompts.Count) prompt(s)."
+    if (-not $Server.Options.RequestStateKeyGiven -and $Transport.Kind -eq 'Http') {
+        Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message 'requestState of input requests is signed with a random per-process key; pass New-McpServer -RequestStateKey to share it between instances.'
+    }
     try {
         $state.Pool = New-McpWorkerPool -Server $Server
         if ($Transport.Kind -eq 'Http') {
@@ -103,6 +111,7 @@ function Invoke-McpDispatcher {
             Invoke-McpLineDispatcherLoop -State $state -ShutdownGraceSeconds $ShutdownGraceSeconds
         }
     } finally {
+        Close-McpAllListener -State $state
         Stop-McpAllInFlightRequest -State $state
         Send-McpOutboundQueue -State $state
         if ($null -ne $state.Pool) {
@@ -111,6 +120,8 @@ function Invoke-McpDispatcher {
         Close-McpTransport -Transport $Transport
         $Server.State.Started = $false
         $Server.State.Signal = $null
+        $Server.State.Sink = $null
+        $Server.State.Listeners = $null
         Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message 'Server stopped.'
     }
 }
@@ -149,6 +160,7 @@ function Invoke-McpLineDispatcherLoop {
         Update-McpInFlightRequest -State $State
         if ($State.Stopping) { break }
         if ($State.EofReceived -or $server.State.StopRequested) {
+            if ($State.Listeners.Count -gt 0) { Close-McpAllListener -State $State }
             if ($State.InFlight.Count -eq 0) { break }
             if ($null -eq $stopDeadline) { $stopDeadline = [datetime]::UtcNow.AddSeconds($ShutdownGraceSeconds) }
             if ([datetime]::UtcNow -ge $stopDeadline) { break }
@@ -200,6 +212,12 @@ function Send-McpOutboundQueue {
 
     $item = $null
     while ($State.Outbound.TryDequeue([ref] $item)) {
+        if ($item.Kind -eq 'Broadcast') {
+            $params = if ($item.ParamsJson) { ConvertFrom-McpJson -Json $item.ParamsJson } else { $null }
+            Send-McpListenerNotification -State $State -Method $item.Method -Params $params
+            if ($State.Stopping) { return }
+            continue
+        }
         $entry = $null
         if ($null -ne $item.RequestId) {
             $key = Get-McpRequestKey -Id $item.RequestId
@@ -287,6 +305,10 @@ function Invoke-McpInboundNotification {
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
     if ($params -isnot [System.Collections.IDictionary] -or -not $params.Contains('requestId') -or -not (Test-McpRequestId -Id $params['requestId'])) { return }
     $key = Get-McpRequestKey -Id $params['requestId']
+    if ($State.Listeners.ContainsKey($key)) {
+        Remove-McpListener -State $State -Key $key -Reason 'cancelled by the client'
+        return
+    }
     if (-not $State.InFlight.ContainsKey($key)) { return }
     $entry = $State.InFlight[$key]
     if ($entry.Cancelled -or $entry.Responded) { return }
@@ -413,7 +435,13 @@ function Invoke-McpInboundRequest {
     $method = [string] $Message['method']
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
     $key = Get-McpRequestKey -Id $id
-    if ($State.InFlight.ContainsKey($key)) {
+    if ($State.InFlight.ContainsKey($key) -and ($State.InFlight[$key].Responded -or $State.InFlight[$key].Cancelled)) {
+        # Answered or cancelled, only its worker is still winding down: the client may reuse the id. The entry
+        # stays under a private key until Update-McpInFlightRequest disposes the worker.
+        $State.InFlight["$key#retired-" + [guid]::NewGuid().ToString('n')] = $State.InFlight[$key]
+        $State.InFlight.Remove($key)
+    }
+    if ($State.InFlight.ContainsKey($key) -or $State.Listeners.ContainsKey($key)) {
         Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InvalidRequest -Message "A request with id '$id' is already in flight."))
         return
     }
@@ -444,7 +472,12 @@ function Invoke-McpInboundRequest {
                 if ($null -ne $Channel -and $Channel.Kind -eq 'Http') {
                     Test-McpToolParameterHeader -HeaderParameters $registration.HeaderParameters -Arguments $arguments -Headers $Channel.Context.Request.Headers
                 }
-                Start-McpWorkerRequest -State $State -Id $id -Kind Tool -Method $method -Name $registration.Name -Registration $registration -Payload @{ Arguments = $arguments } -Meta $meta -Channel $Channel
+                $payload = New-McpInputPayload -Server $server -Method $method -Name $registration.Name -Params $params
+                $payload['Arguments'] = $arguments
+                Start-McpWorkerRequest -State $State -Id $id -Kind Tool -Method $method -Name $registration.Name -Registration $registration -Payload $payload -Meta $meta -Channel $Channel
+            }
+            'subscriptions/listen' {
+                Start-McpListener -State $State -Id $id -Params $params -Channel $Channel
             }
             'resources/list' {
                 Assert-McpServerCapability -Server $server -Capability resources -Method $method
@@ -460,6 +493,7 @@ function Invoke-McpInboundRequest {
                 if (-not (Test-McpResourceUri -Uri $uri)) {
                     throw [McpProtocolException]::new($script:McpErrorCode.InvalidParams, "resources/read requires a parameter 'uri' with an absolute URI.")
                 }
+                $payload = New-McpInputPayload -Server $server -Method $method -Name $uri -Params $params
                 $resolved = Resolve-McpResourceRequest -Server $server -Uri $uri
                 $registration = $resolved.Registration
                 $cacheHint = Get-McpResourceCacheHint -Server $server -Registration $registration
@@ -467,7 +501,9 @@ function Invoke-McpInboundRequest {
                     $result = Invoke-McpResourceHandler -Registration $registration -Uri $uri -CacheHint $cacheHint
                     Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result $result -Server $server))
                 } else {
-                    Start-McpWorkerRequest -State $State -Id $id -Kind Resource -Method $method -Name $uri -Registration $registration -Payload @{ Variables = $resolved.Variables; CacheHint = $cacheHint } -Meta $meta -Channel $Channel
+                    $payload['Variables'] = $resolved.Variables
+                    $payload['CacheHint'] = $cacheHint
+                    Start-McpWorkerRequest -State $State -Id $id -Kind Resource -Method $method -Name $uri -Registration $registration -Payload $payload -Meta $meta -Channel $Channel
                 }
             }
             'prompts/list' {
@@ -477,8 +513,9 @@ function Invoke-McpInboundRequest {
             'prompts/get' {
                 Assert-McpServerCapability -Server $server -Capability prompts -Method $method
                 $registration = Get-McpPromptRegistration -Server $server -Name $params['name']
-                $arguments = Test-McpPromptArgument -Registration $registration -Arguments $(if ($params.Contains('arguments')) { $params['arguments'] } else { $null })
-                Start-McpWorkerRequest -State $State -Id $id -Kind Prompt -Method $method -Name $registration.Name -Registration $registration -Payload @{ Arguments = $arguments } -Meta $meta -Channel $Channel
+                $payload = New-McpInputPayload -Server $server -Method $method -Name $registration.Name -Params $params
+                $payload['Arguments'] = Test-McpPromptArgument -Registration $registration -Arguments $(if ($params.Contains('arguments')) { $params['arguments'] } else { $null })
+                Start-McpWorkerRequest -State $State -Id $id -Kind Prompt -Method $method -Name $registration.Name -Registration $registration -Payload $payload -Meta $meta -Channel $Channel
             }
             'completion/complete' {
                 Assert-McpServerCapability -Server $server -Capability completions -Method $method
@@ -503,6 +540,38 @@ function Invoke-McpInboundRequest {
         }
         Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $server.Name -Message "Request $id ($method) failed: $($exception.Message)"
         Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $exception.Message))
+    }
+}
+
+function New-McpInputPayload {
+    <#
+    .SYNOPSIS
+        The envelope members of a request that may ask for input: the verified answers and handler state of earlier rounds and what the worker needs to sign the next requestState.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory table.')]
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Server,
+
+        [Parameter(Mandatory)]
+        [string] $Method,
+
+        [Parameter(Mandatory)]
+        [string] $Name,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Params
+    )
+
+    $requestInput = Get-McpRequestInput -Server $Server -Method $Method -Name $Name -Params $Params
+    @{
+        InputResponses         = $requestInput.InputResponses
+        HandlerState           = $requestInput.HandlerState
+        RequestDigest          = $requestInput.Digest
+        RequestStateKey        = $Server.Options.RequestStateKey
+        RequestStateTtlSeconds = $Server.Options.RequestStateTtlSeconds
     }
 }
 
@@ -570,7 +639,7 @@ function Start-McpWorkerRequest {
         [AllowNull()]
         [pscustomobject] $Registration,
 
-        # Kind-specific envelope members: Arguments, Variables, CacheHint or Completion.
+        # Kind-specific envelope members: Arguments, Variables, CacheHint or Completion, and the input members of New-McpInputPayload.
         [hashtable] $Payload = @{},
 
         [Parameter(Mandatory)]

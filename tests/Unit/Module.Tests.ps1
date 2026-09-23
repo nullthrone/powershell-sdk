@@ -3,7 +3,7 @@ BeforeAll {
     $script:manifestPath = Get-McpBuiltModuleManifest
     $script:manifestData = Import-PowerShellDataFile -Path $script:manifestPath
     $script:accelerators = [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')
-    $script:engineTypeNames = @('McpEra', 'McpLoggingLevel')
+    $script:engineTypeNames = @('McpEra', 'McpLoggingLevel', 'McpProtocolException', 'McpInputRequiredException')
     Remove-Module -Name ModelContextProtocol -Force -ErrorAction SilentlyContinue
 }
 

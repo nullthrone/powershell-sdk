@@ -8,8 +8,7 @@
         pwsh -NoLogo -NoProfile -NonInteractive -File tests/Conformance/everything-server.ps1 -Port 3001
     and run the suite against http://127.0.0.1:3001/mcp. The module is imported from $env:MCP_MODULE_MANIFEST
     when set (the build sets it to the built module), otherwise from the installed ModelContextProtocol module.
-    Scenarios of later milestones (subscriptions, input requests) are listed in conformance-baseline.yml until
-    their milestone lands.
+    Scenarios of later milestones are listed in conformance-baseline.yml until their milestone lands.
 .PARAMETER Port
     The TCP port on the loopback interface.
 .PARAMETER Hostname
@@ -93,8 +92,91 @@ Register-McpTool -Name 'test_missing_capability' -Description 'Requires the samp
     'The client declared the sampling capability.'
 }
 
-Register-McpTool -Name 'test_streaming_elicitation' -Description 'Streams a result; asks the client for input from milestone M4 on.' -ScriptBlock {
-    'No input required yet.'
+Register-McpTool -Name 'test_streaming_elicitation' -Description 'Asks the client for a confirmation: an InputRequiredResult, never an independent request on the response stream.' -ScriptBlock {
+    param($Context)
+    $answer = Request-McpElicitation -Context $Context -Key 'confirm' -Message 'Continue?' -Schema @{ ok = @{ type = 'boolean' } } -Required ok
+    "Confirmation: $($answer.Action)"
+}
+
+# Multi-round-trip requests (SEP-2322): the keys, messages and schemas are the ones the input-required-result-*
+# scenarios send and expect.
+
+Register-McpTool -Name 'test_input_required_result_elicitation' -Description 'Asks for the user name with an elicitation input request.' -ScriptBlock {
+    param($Context)
+    $answer = Request-McpElicitation -Context $Context -Key 'user_name' -Message 'What is your name?' -Schema @{ name = @{ type = 'string'; description = 'Your name' } } -Required name
+    if ($answer.Action -ne 'accept') { return "Elicitation $($answer.Action)." }
+    "Hello, $($answer.Content.name)!"
+}
+
+Register-McpTool -Name 'test_input_required_result_sampling' -Description 'Asks the client to sample a completion.' -ScriptBlock {
+    param($Context)
+    $answer = Request-McpSampling -Context $Context -Key 'capital_question' -Messages 'What is the capital of France?' -MaxTokens 100
+    "Sampling result: $($answer.Text)"
+}
+
+Register-McpTool -Name 'test_input_required_result_list_roots' -Description 'Asks the client for its roots.' -ScriptBlock {
+    param($Context)
+    $roots = @(Request-McpRoot -Context $Context -Key 'client_roots')
+    "Roots: $(@($roots | ForEach-Object Uri) -join ', ')"
+}
+
+Register-McpTool -Name 'test_input_required_result_request_state' -Description 'Keeps handler state across rounds in the requestState.' -ScriptBlock {
+    param($Context)
+    if (-not $Context.State.ContainsKey('started')) { $Context.State['started'] = 'round-1' }
+    $answer = Request-McpElicitation -Context $Context -Key 'confirm' -Message 'Please confirm' -Schema @{ ok = @{ type = 'boolean' } } -Required ok
+    $marker = if ($Context.State['started'] -eq 'round-1') { 'state-ok' } else { 'state-missing' }
+    "Confirmed: $($answer.Content.ok) ($marker)"
+}
+
+Register-McpTool -Name 'test_input_required_result_multiple_inputs' -Description 'Asks for an elicitation, a sampling and the roots in one round.' -ScriptBlock {
+    param($Context)
+    $name = Request-McpElicitation -Context $Context -Key 'user_name' -Message 'What is your name?' -Schema @{ name = @{ type = 'string' } } -Required name -Defer
+    $greeting = Request-McpSampling -Context $Context -Key 'greeting' -Messages 'Generate a greeting' -MaxTokens 50 -Defer
+    $roots = Request-McpRoot -Context $Context -Key 'client_roots' -Defer
+    Wait-McpInput -Context $Context
+    "Name: $($name.Content.name); greeting: $($greeting.Text); roots: $(@($roots).Count)"
+}
+
+Register-McpTool -Name 'test_input_required_result_multi_round' -Description 'Asks two questions in two consecutive rounds.' -ScriptBlock {
+    param($Context)
+    $first = Request-McpElicitation -Context $Context -Key 'step1' -Message 'Step 1: What is your name?' -Schema @{ name = @{ type = 'string' } } -Required name
+    $second = Request-McpElicitation -Context $Context -Key 'step2' -Message 'Step 2: What is your favorite color?' -Schema @{ color = @{ type = 'string' } } -Required color
+    "$($first.Content.name) likes $($second.Content.color)."
+}
+
+Register-McpTool -Name 'test_input_required_result_tampered_state' -Description 'Asks for a confirmation; a modified requestState is rejected.' -ScriptBlock {
+    param($Context)
+    $answer = Request-McpElicitation -Context $Context -Key 'confirm' -Message 'Please confirm' -Schema @{ ok = @{ type = 'boolean' } } -Required ok
+    "Confirmed: $($answer.Content.ok)"
+}
+
+Register-McpTool -Name 'test_input_required_result_capabilities' -Description 'Asks only for the input types the client declared.' -ScriptBlock {
+    param($Context)
+    $asked = $false
+    if (Test-McpClientCapability -Context $Context -Path 'elicitation') {
+        $null = Request-McpElicitation -Context $Context -Key 'user_name' -Message 'What is your name?' -Schema @{ name = @{ type = 'string' } } -Required name -Defer
+        $asked = $true
+    }
+    if (Test-McpClientCapability -Context $Context -Path 'sampling') {
+        $null = Request-McpSampling -Context $Context -Key 'capital_question' -Messages 'What is the capital of France?' -MaxTokens 100 -Defer
+        $asked = $true
+    }
+    Wait-McpInput -Context $Context
+    if ($asked) { 'All declared input types answered.' } else { 'The client declared no input capability.' }
+}
+
+# subscriptions/listen: these tools make the server announce list changes to the open listen streams.
+
+Register-McpTool -Name 'test_trigger_tool_change' -Description 'Announces a change of the tool list to subscribers.' -ScriptBlock {
+    param($Context)
+    Send-McpToolListChanged -Context $Context
+    'Tool list change announced.'
+}
+
+Register-McpTool -Name 'test_trigger_prompt_change' -Description 'Announces a change of the prompt list to subscribers.' -ScriptBlock {
+    param($Context)
+    Send-McpPromptListChanged -Context $Context
+    'Prompt list change announced.'
 }
 
 Register-McpTool -Name 'test_custom_headers' -Description 'Mirrors region and priority into Mcp-Param headers.' -ScriptBlock {
@@ -165,6 +247,12 @@ Register-McpPrompt -Name 'test_prompt_with_embedded_resource' -Description 'A pr
     param([string] $resourceUri)
     New-McpContent -EmbeddedResource $resourceUri -MimeType 'text/plain' -ResourceText 'Embedded resource content for testing.'
     'Please process the embedded resource above.'
+}
+
+Register-McpPrompt -Name 'test_input_required_result_prompt' -Description 'A prompt that asks the user for context first.' -ScriptBlock {
+    param($Context)
+    $answer = Request-McpElicitation -Context $Context -Key 'user_context' -Message 'What context should the prompt use?' -Schema @{ context = @{ type = 'string' } } -Required context
+    "Use this context: $($answer.Content.context)"
 }
 
 Register-McpPrompt -Name 'test_prompt_with_image' -Description 'A prompt with an image.' -ScriptBlock {
