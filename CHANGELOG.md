@@ -11,6 +11,34 @@ support, dependency and breaking-change policy.
 
 ### Added
 
+- Milestone M4 (multi-round-trip requests and subscriptions): handlers ask for input with
+  `Request-McpElicitation` (form mode with the flat primitive schema subset, or URL mode),
+  `Request-McpSampling` and `Request-McpRoot`; the request is answered with an `InputRequiredResult`, and on
+  the retry the handler runs again and receives the answer. `-Defer` and `Wait-McpInput` ask for several
+  inputs in one round; answers of earlier rounds and `$Context.State` travel in a `requestState` signed with
+  HMAC-SHA256 and bound to method, target, argument digest and expiry (`New-McpServer -RequestStateKey`,
+  `-RequestStateTtlSeconds`). Tampered or foreign states, malformed `inputResponses` and answers that do not
+  match the request fail with `-32602`; input types the client did not declare fail with `-32021` and
+  `data.requiredCapabilities`. Works for `tools/call`, `prompts/get` and `resources/read`.
+- `subscriptions/listen` on the server: acknowledgement first with the honoured filter, every notification
+  tagged with the subscription id, a strictly honoured filter, `resources/updated` for subscribed URIs and
+  their sub-resources, a stream per listen request over Streamable HTTP (dropped when the client closes it),
+  cancellation by `notifications/cancelled` over stdio, and a graceful `complete` result for every open
+  subscription when the server stops. `Send-McpToolListChanged`, `Send-McpPromptListChanged`,
+  `Send-McpResourceListChanged` and `Send-McpResourceUpdated` announce changes from handlers or any runspace.
+- Dynamic registration: `Register-McpTool`, `Register-McpResource` and `Register-McpPrompt` on a running server
+  and the new `Unregister-McpTool`, `Unregister-McpResource` and `Unregister-McpPrompt` notify subscribers;
+  handlers registered after the start are callable at once. `listChanged` and `resources.subscribe` are
+  declared as `true`.
+- Client: `Connect-McpServer -OnElicitation`, `-OnSampling`, `-OnRoots` (which declare their capabilities)
+  and `-MaxInputRounds`; `Invoke-McpTool`, `Invoke-McpPrompt` and `Read-McpResource` run the input rounds
+  transparently and echo the `requestState` verbatim. `Register-McpSubscription`,
+  `Unregister-McpSubscription` and `Receive-McpNotification` read subscriptions in the background (a reader
+  runspace over stdio and in memory, one per stream over Streamable HTTP, with reconnects), invalidate the
+  result cache on list changes and resource updates, and run `-Action` callbacks in the caller's runspace.
+- Conformance: the fixture server implements the input-request and list-change fixtures, the fixture client
+  answers input requests; the server baseline is empty and the client baseline holds only the authorization
+  scenarios. `examples/elicitation-server.ps1` demonstrates input requests and list-change notifications.
 - Milestone M3 (server primitives): `Register-McpResource` registers resources with fixed text or binary
   content, files, handlers and RFC 6570 resource templates (levels 1 to 3; variables are bound to the
   handler's parameters), and directories as `<base>/{+path}` templates that reject `..`, absolute paths and
@@ -94,6 +122,8 @@ support, dependency and breaking-change policy.
 
 ### Fixed
 
+- `Connect-McpServer -Server` fails at once for a server object that is already running, instead of waiting
+  for the `server/discover` timeout.
 - `build.ps1 -Bootstrap` reports why a dependency could not be installed instead of failing with a strict-mode
   error about the missing `Optional` key.
 - Script block tools whose names differ only in characters outside `A-Z`, `a-z`, `0-9` and `_` (for example

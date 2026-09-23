@@ -164,5 +164,6 @@ function Register-McpTool {
         Handler          = $handler
     }
     $target.Tools[$Name] = $registration
+    if ($target.State.Started) { $null = Send-McpServerNotification -Method 'notifications/tools/list_changed' -Server $target }
     if ($PassThru) { $registration }
 }

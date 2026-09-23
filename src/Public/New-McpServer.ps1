@@ -35,6 +35,13 @@ function New-McpServer {
         The cacheScope caching hint (public or private) sent with the same results.
     .PARAMETER PageSize
         The number of items per page of tools/list, resources/list, resources/templates/list and prompts/list.
+    .PARAMETER RequestStateKey
+        The key that signs requestState of multi-round-trip requests (HMAC-SHA256): a SecureString or string of
+        at least 16 characters, or a byte[] of at least 32 bytes. Without it a random key is created per server
+        object; a retry then only succeeds against the same process. Give the same key to every instance behind
+        a load balancer.
+    .PARAMETER RequestStateTtlSeconds
+        How long a requestState stays valid (default 600 seconds).
     .PARAMETER LogLevel
         The minimum level of diagnostics written to stderr (default: warning).
     .PARAMETER NoServerInfo
@@ -86,6 +93,11 @@ function New-McpServer {
         [ValidateRange(1, 1000)]
         [int] $PageSize = 100,
 
+        [object] $RequestStateKey,
+
+        [ValidateRange(1, 86400)]
+        [int] $RequestStateTtlSeconds = 600,
+
         [McpLoggingLevel] $LogLevel = [McpLoggingLevel]::Warning,
 
         [switch] $NoServerInfo,
@@ -114,16 +126,18 @@ function New-McpServer {
         ResourceTemplates = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         Prompts           = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         Options           = @{
-            MaxConcurrency        = $MaxConcurrency
-            RequestTimeoutSeconds = $RequestTimeoutSeconds
-            DefaultTtlMs          = $DefaultTtlMs
-            DefaultCacheScope     = $DefaultCacheScope
-            PageSize              = $PageSize
-            LogLevel              = $LogLevel
-            IncludeServerInfo     = -not $NoServerInfo
-            # listChanged (tools, prompts, resources) is advertised once subscriptions/listen can deliver the
-            # notifications (milestone M4).
-            ListChanged           = $false
+            MaxConcurrency         = $MaxConcurrency
+            RequestTimeoutSeconds  = $RequestTimeoutSeconds
+            DefaultTtlMs           = $DefaultTtlMs
+            DefaultCacheScope      = $DefaultCacheScope
+            PageSize               = $PageSize
+            LogLevel               = $LogLevel
+            IncludeServerInfo      = -not $NoServerInfo
+            # listChanged (tools, prompts, resources) and resources.subscribe: delivered on subscriptions/listen streams.
+            ListChanged            = $true
+            RequestStateKey        = ConvertTo-McpRequestStateKey -Key $RequestStateKey
+            RequestStateKeyGiven   = $PSBoundParameters.ContainsKey('RequestStateKey')
+            RequestStateTtlSeconds = $RequestStateTtlSeconds
         }
         State             = @{
             Started       = $false

@@ -50,20 +50,20 @@ function Invoke-McpTool {
     $timeoutMs = $TimeoutSeconds * 1000
     $result = $null
     if ($target.Kind -ne 'Http') {
-        $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs
+        $result = (Invoke-McpClientRequestWithInput -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs).Result
     } else {
         # Streamable HTTP mirrors x-mcp-header parameters into Mcp-Param-* headers; the annotations come from the
         # cached tool list. A header mismatch reported by the server refreshes the list and retries once.
         if ($null -eq $target.Tools) { $null = Get-McpTool -Session $target }
         $headers = Get-McpToolCallHeader -HeaderParameters $target.ToolHeaders[$Name] -Arguments $params['arguments']
         try {
-            $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs -Headers $headers
+            $result = (Invoke-McpClientRequestWithInput -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs -Headers $headers).Result
         } catch [McpProtocolException] {
             if ($_.Exception.Code -ne $script:McpErrorCode.HeaderMismatch) { throw }
             Write-Verbose "The server reported a header mismatch for '$Name'; refreshing the tool list and retrying once."
             $null = Get-McpTool -Session $target -Refresh
             $headers = Get-McpToolCallHeader -HeaderParameters $target.ToolHeaders[$Name] -Arguments $params['arguments']
-            $result = Invoke-McpClientRequest -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs -Headers $headers
+            $result = (Invoke-McpClientRequestWithInput -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs -Headers $headers).Result
         }
     }
     if ($result -isnot [System.Collections.IDictionary]) {

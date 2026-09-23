@@ -8,7 +8,8 @@
 | [concepts/transports.md](concepts/transports.md) | stdio and Streamable HTTP: framing, stdout hygiene, header validation |
 | [concepts/server-primitives.md](concepts/server-primitives.md) | Tools, resources, templates, prompts and completion: handler contract, errors, caching, pagination |
 | [concepts/dual-era.md](concepts/dual-era.md) | Serving 2026-07-28 and the legacy revisions side by side |
-| [concepts/mrtr.md](concepts/mrtr.md) | Multi-round-trip requests: elicitation, sampling and roots as input requests |
+| [concepts/mrtr.md](concepts/mrtr.md) | Multi-round-trip requests: elicitation, sampling and roots as input requests, `requestState` |
+| [concepts/subscriptions.md](concepts/subscriptions.md) | `subscriptions/listen`: list-changed and resource-updated notifications, dynamic registration |
 | [concepts/authorization.md](concepts/authorization.md) | OAuth client flows and server-side bearer validation |
 | `help/` | Generated command reference (PlatyPS markdown; produced by `./build.ps1 -Task Help` from milestone M1) |
 | [research/](research/README.md) | Secondary material the plan was written from (specification extractions, platform research) |

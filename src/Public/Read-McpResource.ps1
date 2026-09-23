@@ -54,7 +54,8 @@ function Read-McpResource {
                 continue
             }
             try {
-                $result = Invoke-McpClientRequest -Session $target -Method 'resources/read' -Params ([ordered]@{ uri = $item }) -LogLevel $level -TimeoutMs ($TimeoutSeconds * 1000)
+                $exchange = Invoke-McpClientRequestWithInput -Session $target -Method 'resources/read' -Params ([ordered]@{ uri = $item }) -LogLevel $level -TimeoutMs ($TimeoutSeconds * 1000)
+                $result = $exchange.Result
             } catch [McpProtocolException] {
                 if (-not (Test-McpResourceNotFoundError -Exception $_.Exception)) { throw }
                 $record = [System.Management.Automation.ErrorRecord]::new(
@@ -69,7 +70,8 @@ function Read-McpResource {
                 throw [System.InvalidOperationException]::new('The resources/read result has no contents member.')
             }
             $contents = @(@($result['contents']) | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object { ConvertTo-McpResourceContentObject -Content $_ })
-            Set-McpClientCacheEntry -Session $target -Key $key -Value $contents -CacheHint (Get-McpResultCacheHint -Result $result)
+            # Results that needed input rounds are not cached (the specification forbids caching them).
+            if ($exchange.Rounds -eq 0) { Set-McpClientCacheEntry -Session $target -Key $key -Value $contents -CacheHint (Get-McpResultCacheHint -Result $result) }
             foreach ($content in $contents) { $content }
         }
     }

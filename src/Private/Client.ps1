@@ -41,12 +41,16 @@ function Resolve-McpSession {
         if ($Session.Closed) {
             throw [System.InvalidOperationException]::new('The session is closed.')
         }
-        return $Session
-    }
-    if ($null -eq $script:McpDefaultSession -or $script:McpDefaultSession.Closed) {
+        $resolved = $Session
+    } elseif ($null -eq $script:McpDefaultSession -or $script:McpDefaultSession.Closed) {
         throw [System.InvalidOperationException]::new('No session given and no default session; connect with Connect-McpServer first.')
+    } else {
+        $resolved = $script:McpDefaultSession
     }
-    $script:McpDefaultSession
+    # Every client command starts here: process what the subscription readers received (cache invalidation,
+    # -Action callbacks) before the command looks at the cache.
+    $null = Invoke-McpClientEventPump -Session $resolved
+    $resolved
 }
 
 function New-McpClientRequestMeta {
@@ -171,7 +175,7 @@ function Invoke-McpClientRequest {
         switch (Get-McpMessageKind -Message $message) {
             'Response' {
                 if ([string] $message['id'] -ceq [string] $id) { return $message['result'] }
-                Write-Debug "Ignoring a response with id $($message['id'])."
+                Invoke-McpClientStrayMessage -Session $Session -Message $message
             }
             'ErrorResponse' {
                 if ($message.Contains('id') -and [string] $message['id'] -ceq [string] $id) {
@@ -179,7 +183,7 @@ function Invoke-McpClientRequest {
                     $data = if ($errorObject.Contains('data')) { $errorObject['data'] } else { $null }
                     throw [McpProtocolException]::new([int] $errorObject['code'], [string] $errorObject['message'], $data)
                 }
-                Write-Debug "Ignoring an error response with id $($message['id'])."
+                Invoke-McpClientStrayMessage -Session $Session -Message $message
             }
             'Notification' {
                 Invoke-McpClientNotificationHandler -Session $Session -Message $message -ProgressToken $progressToken -OnProgress $OnProgress
@@ -211,7 +215,25 @@ function Invoke-McpClientNotificationHandler {
 
     $method = [string] $Message['method']
     $params = if ($Message.Contains('params') -and $Message['params'] -is [System.Collections.IDictionary]) { $Message['params'] } else { [ordered]@{} }
+    if ($params['_meta'] -is [System.Collections.IDictionary] -and $params['_meta'].Contains($script:McpMetaKey.SubscriptionId)) {
+        $subscription = Get-McpClientSubscriptionById -Session $Session -Id $params['_meta'][$script:McpMetaKey.SubscriptionId]
+        if ($null -ne $subscription) {
+            Receive-McpSubscriptionNotification -Session $Session -Subscription $subscription -Message $Message
+            return
+        }
+    }
     switch ($method) {
+        'notifications/cancelled' {
+            # The server ended a subscription (servers do not cancel anything else in this revision).
+            $subscription = Get-McpClientSubscriptionById -Session $Session -Id $params['requestId']
+            if ($null -ne $subscription) {
+                $subscription.State = 'Closed'
+                $subscription.Error = if ($params.Contains('reason')) { [string] $params['reason'] } else { $null }
+                Remove-McpClientSubscriptionId -Session $Session -Subscription $subscription
+            } else {
+                $Session.Notifications.Enqueue($Message)
+            }
+        }
         'notifications/progress' {
             $token = if ($params.Contains('progressToken')) { $params['progressToken'] } else { $null }
             if ($null -ne $ProgressToken -and $null -ne $OnProgress -and [string] $token -ceq [string] $ProgressToken) {
@@ -746,5 +768,170 @@ function Stop-McpBackgroundServer {
     } finally {
         try { $powershell.Dispose() } catch { Write-Debug 'Disposing the server runspace failed.' }
         try { $Background.Runspace.Dispose() } catch { Write-Debug 'Disposing the server runspace failed.' }
+    }
+}
+
+function ConvertTo-McpWireValue {
+    <#
+    .SYNOPSIS
+        A value returned by a user callback (hashtables, PSCustomObjects, arrays) as wire objects: ordered dictionaries and arrays.
+    #>
+    [CmdletBinding()]
+    [OutputType([object], [System.Array])]
+    param(
+        [AllowNull()]
+        [object] $Value
+    )
+
+    if ($null -eq $Value) { return $null }
+    , (ConvertFrom-McpJson -Json (ConvertTo-McpJson -InputObject $Value))
+}
+
+function ConvertTo-McpInputRequestObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.InputRequest')]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Key,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Request,
+
+        [Parameter(Mandatory)]
+        [string] $RequestMethod
+    )
+
+    $params = if ($Request['params'] -is [System.Collections.IDictionary]) { $Request['params'] } else { [ordered]@{} }
+    [pscustomobject]@{
+        PSTypeName      = 'Mcp.InputRequest'
+        Key             = $Key
+        Method          = [string] $Request['method']
+        Params          = $params
+        Mode            = if ($Request['method'] -eq 'elicitation/create') { if ($params['mode'] -eq 'url') { 'url' } else { 'form' } } else { $null }
+        Message         = Get-McpWireValue -Object $params -Key 'message'
+        RequestedSchema = Get-McpWireValue -Object $params -Key 'requestedSchema'
+        Url             = Get-McpWireValue -Object $params -Key 'url'
+        Messages        = Get-McpWireValue -Object $params -Key 'messages'
+        MaxTokens       = Get-McpWireValue -Object $params -Key 'maxTokens'
+        SystemPrompt    = Get-McpWireValue -Object $params -Key 'systemPrompt'
+        RequestMethod   = $RequestMethod
+    }
+}
+
+function Invoke-McpClientInputCallback {
+    <#
+    .SYNOPSIS
+        Answers one input request of an InputRequiredResult with the session's callback and normalises the answer to its wire shape.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary], [System.Collections.IDictionary])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [pscustomobject] $Request
+    )
+
+    $callback = switch ($Request.Method) {
+        'elicitation/create' { $Session.OnElicitation }
+        'sampling/createMessage' { $Session.OnSampling }
+        'roots/list' { $Session.OnRoots }
+        default { throw [System.InvalidOperationException]::new("The server asked for the unknown input request '$($Request.Method)' (key '$($Request.Key)').") }
+    }
+    if ($null -eq $callback) {
+        $parameter = switch ($Request.Method) { 'elicitation/create' { '-OnElicitation' } 'sampling/createMessage' { '-OnSampling' } default { '-OnRoots' } }
+        throw [System.InvalidOperationException]::new("The server asked for input ($($Request.Method), key '$($Request.Key)'), but the session has no $parameter callback. Pass one to Connect-McpServer.")
+    }
+    $answer = @(& $callback $Request)
+    $value = if ($answer.Count -eq 1) { $answer[0] } elseif ($answer.Count -eq 0) { $null } else { , $answer }
+    switch ($Request.Method) {
+        'elicitation/create' {
+            if ($null -eq $value) { return [ordered]@{ action = 'cancel' } }
+            if ($value -is [string] -and $value -in @('accept', 'decline', 'cancel')) { return [ordered]@{ action = $value } }
+            $wire = ConvertTo-McpWireValue -Value $value
+            if ($wire -isnot [System.Collections.IDictionary]) { throw [System.InvalidOperationException]::new('-OnElicitation must return a hashtable (the form content, or an ElicitResult with action and content).') }
+            if (-not $wire.Contains('action')) { return [ordered]@{ action = 'accept'; content = $wire } }
+            return $wire
+        }
+        'sampling/createMessage' {
+            if ($value -is [string]) { return [ordered]@{ role = 'assistant'; content = [ordered]@{ type = 'text'; text = $value }; model = 'unknown' } }
+            $wire = ConvertTo-McpWireValue -Value $value
+            if ($wire -isnot [System.Collections.IDictionary]) { throw [System.InvalidOperationException]::new('-OnSampling must return a string or a CreateMessageResult (role, content, model).') }
+            return $wire
+        }
+        'roots/list' {
+            $wire = ConvertTo-McpWireValue -Value $value
+            if ($wire -is [System.Collections.IDictionary] -and $wire.Contains('roots')) { return $wire }
+            $roots = foreach ($item in @($wire)) {
+                if ($null -eq $item) { continue }
+                if ($item -is [string]) {
+                    $uri = $null
+                    $text = if ([uri]::TryCreate($item, [System.UriKind]::Absolute, [ref] $uri) -and $uri.Scheme -ne 'file' -or $item -match '^file:') { $item } else { ([System.Uri]::new([System.IO.Path]::GetFullPath($item))).AbsoluteUri }
+                    [ordered]@{ uri = $text }
+                } elseif ($item -is [System.Collections.IDictionary]) {
+                    $item
+                }
+            }
+            return [ordered]@{ roots = @($roots) }
+        }
+    }
+}
+
+function Invoke-McpClientRequestWithInput {
+    <#
+    .SYNOPSIS
+        Sends a request that may be answered with an InputRequiredResult and runs the multi-round-trip loop: answers the input requests with the session's callbacks and retries with a new id, the answers and the requestState echoed verbatim.
+    .OUTPUTS
+        A hashtable with Result (the complete result) and Rounds (the number of retries).
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [string] $Method,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Params,
+
+        [scriptblock] $OnProgress,
+
+        [AllowNull()]
+        [object] $LogLevel,
+
+        [int] $TimeoutMs = 0,
+
+        [hashtable] $Headers
+    )
+
+    $current = $Params
+    for ($round = 0; ; $round++) {
+        $result = Invoke-McpClientRequest -Session $Session -Method $Method -Params $current -OnProgress $OnProgress -LogLevel $LogLevel -TimeoutMs $TimeoutMs -Headers $Headers
+        $resultType = if ($result -is [System.Collections.IDictionary] -and $result.Contains('resultType')) { $result['resultType'] } else { 'complete' }
+        if ($resultType -eq 'complete') { return @{ Result = $result; Rounds = $round } }
+        if ($resultType -ne 'input_required') {
+            throw [System.InvalidOperationException]::new("The server answered '$Method' with the unknown resultType '$resultType'.")
+        }
+        if ($round -ge $Session.MaxInputRounds) {
+            throw [System.InvalidOperationException]::new("The server still asks for input after $round rounds of '$Method' (the session allows $($Session.MaxInputRounds); see Connect-McpServer -MaxInputRounds).")
+        }
+        $retry = [ordered]@{}
+        foreach ($key in $Params.Keys) {
+            if ([string] $key -notin @('inputResponses', 'requestState')) { $retry[$key] = $Params[$key] }
+        }
+        if ($result['inputRequests'] -is [System.Collections.IDictionary] -and $result['inputRequests'].Count -gt 0) {
+            $responses = [ordered]@{}
+            foreach ($key in $result['inputRequests'].Keys) {
+                $request = ConvertTo-McpInputRequestObject -Key $key -Request $result['inputRequests'][$key] -RequestMethod $Method
+                $responses[$key] = Invoke-McpClientInputCallback -Session $Session -Request $request
+            }
+            $retry['inputResponses'] = $responses
+        }
+        # The state is opaque: it is echoed exactly as received, and only when the server sent one.
+        if ($result.Contains('requestState') -and $result['requestState'] -is [string]) { $retry['requestState'] = $result['requestState'] }
+        $current = $retry
     }
 }

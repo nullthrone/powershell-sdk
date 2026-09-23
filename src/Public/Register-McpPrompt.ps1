@@ -142,5 +142,6 @@ function Register-McpPrompt {
         Completion  = ConvertTo-McpCompletionSource -Completion $derivedCompletion -ArgumentNames $argumentNames -Key $Name
     }
     $target.Prompts[$Name] = $registration
+    if ($target.State.Started) { $null = Send-McpServerNotification -Method 'notifications/prompts/list_changed' -Server $target }
     if ($PassThru) { $registration }
 }

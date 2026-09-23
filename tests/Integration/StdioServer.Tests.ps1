@@ -156,3 +156,40 @@ Describe 'The weather example over stdio' -Tag 'Integration' {
         (Invoke-McpTool -Name 'forecast' -Arguments @{ City = 'Berlin'; Days = 2 } -Session $script:weather).StructuredContent['days'].Count | Should -Be 2
     }
 }
+
+Describe 'The elicitation example over stdio' -Tag 'Integration' {
+    BeforeAll {
+        $elicitationArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path (Get-McpRepositoryRoot) 'examples' 'elicitation-server.ps1'))
+        $script:asked = [System.Collections.Generic.List[string]]::new()
+        $script:elicitation = Connect-McpServer -Command $script:pwsh -Arguments $elicitationArguments -ConnectTimeoutSeconds 60 -OnElicitation {
+            param($Request)
+            $script:asked.Add($Request.Message)
+            switch (@($Request.RequestedSchema['properties'].Keys)[0]) {
+                'confirm' { @{ confirm = $true } }
+                'name' { @{ name = 'Ada' } }
+                'color' { @{ color = 'green' } }
+            }
+        }
+    }
+
+    AfterAll {
+        if ($script:elicitation) { Disconnect-McpServer -Session $script:elicitation }
+    }
+
+    It 'asks the user through the client in one and in several rounds' {
+        (Invoke-McpTool -Name 'delete-files' -Arguments @{ Pattern = '*.tmp' } -Session $script:elicitation).Text | Should -BeLike "Deleted the files matching '*.tmp'*"
+        (Invoke-McpTool -Name 'profile' -Session $script:elicitation).Text | Should -Be 'Ada likes green (asked in 3 rounds).'
+        @($script:asked) | Should -Be @("Delete all files matching '*.tmp'?", 'What is your name?', 'Hello Ada, what is your favourite color?')
+    }
+
+    It 'delivers subscription notifications on the shared output stream' {
+        $subscription = Register-McpSubscription -ToolsListChanged -Session $script:elicitation
+        $subscription.State | Should -Be 'Open'
+        (Invoke-McpTool -Name 'announce-tools' -Session $script:elicitation).Text | Should -Be 'Announced.'
+        @(Receive-McpNotification -Subscription $subscription -TimeoutSeconds 10 | ForEach-Object Method) | Should -Be @('notifications/tools/list_changed')
+        # Requests keep working while the background reader owns the output stream.
+        @(Get-McpTool -Session $script:elicitation -Refresh | ForEach-Object Name) | Should -Contain 'profile'
+        Unregister-McpSubscription -Subscription $subscription
+        $subscription.State | Should -Be 'Closed'
+    }
+}
