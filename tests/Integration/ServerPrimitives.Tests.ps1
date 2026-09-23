@@ -82,8 +82,8 @@ Describe 'Resources through the client' -Tag 'Integration' {
     It 'reports unknown resources as non-terminating ObjectNotFound errors' {
         $contents = @(Read-McpResource -Uri 'test://nope', 'items://500', 'test://text' -Session $script:session -ErrorVariable errors -ErrorAction SilentlyContinue)
         $contents.Count | Should -Be 1
-        # -ErrorVariable also collects the protocol exceptions caught inside the command.
-        $failures = @($errors | Where-Object { $_.FullyQualifiedErrorId -like 'McpResourceNotFound,*' })
+        # -ErrorVariable also collects the protocol exceptions caught inside the command (not all as ErrorRecords).
+        $failures = @($errors | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -like 'McpResourceNotFound,*' })
         $failures.Count | Should -Be 2
         $failures[0].CategoryInfo.Category | Should -Be 'ObjectNotFound'
         $failures[0].TargetObject | Should -Be 'test://nope'
