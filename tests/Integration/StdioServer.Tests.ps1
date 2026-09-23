@@ -126,3 +126,33 @@ Describe 'Raw stdio behaviour of the example server' -Tag 'Integration' {
         $result.StdErr | Should -Match 'a warning for the server log'
     }
 }
+
+Describe 'The weather example over stdio' -Tag 'Integration' {
+    BeforeAll {
+        $weatherArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path (Get-McpRepositoryRoot) 'examples' 'weather-server.ps1'))
+        $script:weather = Connect-McpServer -Command $script:pwsh -Arguments $weatherArguments -ConnectTimeoutSeconds 60
+    }
+
+    AfterAll {
+        if ($script:weather) { Disconnect-McpServer -Session $script:weather }
+    }
+
+    It 'serves resources, templates, prompts and completions' {
+        @((Get-McpServerInfo -Session $script:weather).Capabilities.Keys) | Should -Be @('completions', 'prompts', 'resources', 'tools')
+        (Get-McpResource -Session $script:weather).Uri | Should -Be 'weather://stations'
+        (ConvertFrom-Json (Read-McpResource -Uri 'weather://stations' -Session $script:weather).Text) | Should -Contain 'Vienna'
+        (Get-McpResource -Template -Session $script:weather).UriTemplate | Should -Be 'weather://{city}/current'
+        (ConvertFrom-Json (Read-McpResource -Uri 'weather://Vienna/current' -Session $script:weather).Text).city | Should -Be 'Vienna'
+        Read-McpResource -Uri 'weather://Atlantis/current' -Session $script:weather -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        (Get-McpCompletion -ResourceTemplate 'weather://{city}/current' -Argument 'city' -Value 'Mu' -Session $script:weather).Values | Should -Be @('Munich')
+        (Get-McpCompletion -PromptName 'weather-report' -Argument 'Tone' -Value 'd' -Session $script:weather).Values | Should -Be @('dramatic')
+        @(Get-McpPrompt -Session $script:weather | ForEach-Object Name) | Should -Be @('weather-report', 'packing-list')
+        $report = Invoke-McpPrompt -Name 'weather-report' -Arguments @{ City = 'Zurich' } -Session $script:weather
+        $report.Messages[0].Content.type | Should -Be 'resource'
+        $report.Text | Should -BeLike '*neutral three-sentence weather report for Zurich*'
+        $packing = Invoke-McpPrompt -Name 'packing-list' -Arguments @{ destination = 'Hamburg'; days = 4 } -Session $script:weather
+        $packing.Messages[1].Role | Should -Be 'assistant'
+        $packing.Messages[0].Content.text | Should -Be 'I am travelling to Hamburg for 4 days. What should I pack?'
+        (Invoke-McpTool -Name 'forecast' -Arguments @{ City = 'Berlin'; Days = 2 } -Session $script:weather).StructuredContent['days'].Count | Should -Be 2
+    }
+}

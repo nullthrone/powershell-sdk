@@ -328,7 +328,7 @@ function Install-BuildDependency {
         }
     }
     $message = "Could not install '$Name' $range.`n  " + ($errors -join "`n  ")
-    if ($Requirement.Optional) {
+    if ($Requirement.ContainsKey('Optional') -and $Requirement.Optional) {
         Write-Warning "$message`n  '$Name' is optional; tasks that need it will be skipped."
         return $false
     }
@@ -348,7 +348,7 @@ foreach ($entry in ($script:Requirements.Modules.GetEnumerator() | Sort-Object -
     if ($Bootstrap) {
         Write-Host ("  {0,-32} {1,-14} installing..." -f $name, $requirement.Version)
         $null = Install-BuildDependency -Name $name -Requirement $requirement -Source $DependencySource -OfflinePath $OfflinePackagePath
-    } elseif ($requirement.Optional) {
+    } elseif ($requirement.ContainsKey('Optional') -and $requirement.Optional) {
         Write-Host ("  {0,-32} {1,-14} missing (optional)" -f $name, $requirement.Version) -ForegroundColor Yellow
     } else {
         Write-Host ("  {0,-32} {1,-14} missing" -f $name, $requirement.Version) -ForegroundColor Red

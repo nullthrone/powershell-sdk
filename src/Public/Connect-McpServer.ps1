@@ -59,6 +59,7 @@ function Connect-McpServer {
     .OUTPUTS
         Mcp.Session
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseLiteralInitializerForHashtable', '', Justification = 'The result cache is keyed by case-sensitive method names and URIs.')]
     [CmdletBinding(DefaultParameterSetName = 'Stdio', SupportsShouldProcess)]
     [OutputType('Mcp.Session')]
     param(
@@ -157,6 +158,7 @@ function Connect-McpServer {
         ServerInfo         = $null
         Tools              = $null
         ToolHeaders        = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+        Cache              = [hashtable]::new([System.StringComparer]::Ordinal)
         NextId             = 1
         RequestTimeoutMs   = $RequestTimeoutSeconds * 1000
         LogLevel           = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $null }
@@ -199,6 +201,7 @@ function Connect-McpServer {
         }
         $session.ServerInfo = ConvertTo-McpServerInfoObject -DiscoverResult $discover -ProtocolVersion $session.ProtocolVersion
         $session.Name = $session.ServerInfo.Name
+        Set-McpClientCacheEntry -Session $session -Key 'server/discover' -Value $session.ServerInfo -CacheHint (Get-McpResultCacheHint -Result $discover)
     } catch {
         try { Disconnect-McpServer -Session $session -Confirm:$false } catch { Write-Debug 'Cleanup after a failed connection failed.' }
         throw

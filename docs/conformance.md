@@ -2,9 +2,10 @@
 
 The SDK is measured with the official suite `@modelcontextprotocol/conformance`. The npm `latest` dist-tag
 (0.1.x) does not know revision 2026-07-28; the version pinned in `requirements.psd1` (alpha channel) does.
-The fixtures live in `tests/Conformance/` (`everything-server.ps1`, a Streamable HTTP server with every tool
-the server scenarios call; `everything-client.ps1`, a client that discovers, lists and calls tools as the
-client scenarios expect), the build task `Conformance` runs both legs, and `.github/workflows/conformance.yml`
+The fixtures live in `tests/Conformance/` (`everything-server.ps1`, a Streamable HTTP server with every tool,
+resource, prompt and completion the server scenarios call; `everything-client.ps1`, a client that discovers,
+lists and calls tools, and reads resources and renders prompts when the server declares them, as the client
+scenarios expect), the build task `Conformance` runs both legs, and `.github/workflows/conformance.yml`
 runs them on every push and pull request.
 
 ## Running the suite
@@ -21,15 +22,20 @@ runs the server leg, stops the fixture, then runs the client leg with the fixtur
 (`checks.json` per scenario, the fixture server log) are written to `output/conformance/`. The task fails
 when a leg exits with a non-zero code: an unexpected failure or a stale baseline entry.
 
-## State after milestone M2
+## State after milestone M3
 
 Requirement set `2026-07-28`, server leg: `server-stateless` (25 checks), `tools-list`, the seven
-`tools-call-*` scenarios, `sep-2164-resource-not-found`, `dns-rebinding-protection` and
-`server-sse-multiple-streams` pass; the not-scored `json-schema-2020-12`, `http-header-validation` and
-`http-custom-header-server-validation` pass too. Client leg: `tools_call`, `request-metadata`,
-`auth/resource-mismatch`, `http-standard-headers`, `http-custom-headers`, `http-invalid-tool-headers`,
-`json-schema-ref-no-deref` and the not-scored `json-schema-2020-12-preservation` pass. Everything else is in
-`conformance-baseline.yml`, grouped by the milestone that removes it.
+`tools-call-*` scenarios, `resources-list`, `resources-read-text`, `resources-read-binary`,
+`resources-templates-read`, `sep-2164-resource-not-found` (the `-32602` error with `data.uri`), the five
+`prompts-*` scenarios, `completion-complete`, `caching` (hints on every list result and on
+`resources/read`), `dns-rebinding-protection` and `server-sse-multiple-streams` pass, each including the
+`wire-schema-valid` check of every message against the 2026-07-28 schema; the not-scored
+`json-schema-2020-12`, `http-header-validation` and `http-custom-header-server-validation` pass too. Client
+leg: `tools_call`, `request-metadata`, `auth/resource-mismatch`, `http-standard-headers` (now with the
+`Mcp-Method` and `Mcp-Name` checks of `resources/read` and `prompts/get`), `http-custom-headers`,
+`http-invalid-tool-headers`, `json-schema-ref-no-deref` and the not-scored
+`json-schema-2020-12-preservation` pass. Everything else is in `conformance-baseline.yml`, grouped by the
+milestone that removes it.
 
 ## Requirement sets
 

@@ -1,10 +1,11 @@
 function New-McpContent {
     <#
     .SYNOPSIS
-        Creates a content block (text, image, audio, resource link or embedded resource) for tool results.
+        Creates a content block (text, image, audio, resource link or embedded resource) for tool results and prompt messages.
     .DESCRIPTION
-        Content blocks are the items of CallToolResult.content. Return them from a tool handler, or pass them
-        to New-McpToolResult. Binary data may be given as byte[] or as a base64 string.
+        Content blocks are the items of CallToolResult.content and the content of prompt messages. Return them
+        from a tool or prompt handler, or pass them to New-McpToolResult or New-McpPromptMessage. Binary data
+        may be given as byte[] or as a base64 string.
     .PARAMETER Text
         The text of a text block.
     .PARAMETER Image
@@ -29,8 +30,13 @@ function New-McpContent {
         The text contents of an embedded resource.
     .PARAMETER ResourceBlob
         The binary contents (byte[] or base64 string) of an embedded resource.
+    .PARAMETER Icons
+        Icon objects of a resource link (hashtables with src, and optionally mimeType, sizes, theme).
+    .PARAMETER ResourceMeta
+        Additional _meta members of the contents of an embedded resource.
     .PARAMETER Annotations
-        Annotations (audience, priority, lastModified) of the block.
+        Annotations of the block: Audience (user, assistant), Priority (0 to 1), LastModified (DateTime or
+        ISO 8601 text).
     .PARAMETER Meta
         Additional _meta members of the block.
     .EXAMPLE
@@ -91,7 +97,13 @@ function New-McpContent {
         [Parameter(ParameterSetName = 'EmbeddedResource')]
         [object] $ResourceBlob,
 
-        [hashtable] $Annotations,
+        [Parameter(ParameterSetName = 'ResourceLink')]
+        [object[]] $Icons,
+
+        [Parameter(ParameterSetName = 'EmbeddedResource')]
+        [object] $ResourceMeta,
+
+        [object] $Annotations,
 
         [hashtable] $Meta
     )
@@ -120,6 +132,8 @@ function New-McpContent {
             if ($Description) { $block['description'] = $Description }
             if ($MimeType) { $block['mimeType'] = $MimeType }
             if ($Size -ge 0) { $block['size'] = $Size }
+            $iconList = ConvertTo-McpIconList -Icons $Icons
+            if ($null -ne $iconList) { $block['icons'] = $iconList }
         }
         'EmbeddedResource' {
             if (-not $PSBoundParameters.ContainsKey('ResourceText') -and $null -eq $ResourceBlob) {
@@ -128,11 +142,14 @@ function New-McpContent {
             $resource = [ordered]@{ uri = $EmbeddedResource }
             if ($MimeType) { $resource['mimeType'] = $MimeType }
             if ($PSBoundParameters.ContainsKey('ResourceText')) { $resource['text'] = $ResourceText } else { $resource['blob'] = ConvertTo-McpBase64 -Data $ResourceBlob }
+            $resourceMetaObject = ConvertTo-McpMetaObject -Meta $ResourceMeta
+            if ($null -ne $resourceMetaObject) { $resource['_meta'] = $resourceMetaObject }
             $block['type'] = 'resource'
             $block['resource'] = $resource
         }
     }
-    if ($Annotations -and $Annotations.Count -gt 0) { $block['annotations'] = $Annotations }
+    $annotationObject = ConvertTo-McpContentAnnotation -Annotations $Annotations
+    if ($null -ne $annotationObject) { $block['annotations'] = $annotationObject }
     if ($Meta -and $Meta.Count -gt 0) { $block['_meta'] = $Meta }
     $object = [pscustomobject] $block
     $object.PSObject.TypeNames.Insert(0, 'Mcp.Content')

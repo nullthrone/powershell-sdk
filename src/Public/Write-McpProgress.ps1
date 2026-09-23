@@ -33,7 +33,7 @@ function Write-McpProgress {
     if ($null -eq $Context.ProgressToken -or $null -eq $Context.Sink) { return }
     $state = $Context.ProgressState
     if ($null -ne $state -and $null -ne $state.Last -and $Progress -le [double] $state.Last) {
-        Write-McpStderr -Level Warning -Threshold $Context.ServerLogLevel -Logger $Context.ToolName -Message "Progress $Progress does not increase over $($state.Last); the notification is not sent."
+        Write-McpStderr -Level Warning -Threshold $Context.ServerLogLevel -Logger $Context.Name -Message "Progress $Progress does not increase over $($state.Last); the notification is not sent."
         return
     }
     if ($null -ne $state) { $state.Last = $Progress }

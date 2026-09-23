@@ -1,5 +1,6 @@
-# Worker side of a tools/call request: runs in a runspace of the server's pool, builds the request context,
-# invokes the handler through Invoke-McpToolHandler and enqueues the response for the dispatcher.
+# Worker side of a request that runs user code (tools/call, resources/read, prompts/get, completion/complete):
+# runs in a runspace of the server's pool, builds the request context, invokes the handler and enqueues the
+# response for the dispatcher.
 
 $script:McpModuleManifestPath = Join-Path $PSScriptRoot 'ModelContextProtocol.psd1'
 
@@ -25,7 +26,8 @@ function New-McpRequestContext {
         PSTypeName         = 'Mcp.RequestContext'
         RequestId          = $Envelope.RequestId
         Method             = $Envelope.Method
-        ToolName           = $Envelope.ToolName
+        Name               = $Envelope.Name
+        ToolName           = if ($Envelope.Kind -eq 'Tool') { $Envelope.Name } else { $null }
         Era                = 'Modern'
         ProtocolVersion    = $meta.ProtocolVersion
         ClientInfo         = $meta.ClientInfo
@@ -72,7 +74,7 @@ function Send-McpSinkMessage {
 function Invoke-McpWorkerRequest {
     <#
     .SYNOPSIS
-        Handles one tools/call request in a worker runspace and enqueues the response.
+        Handles one request in a worker runspace and enqueues the response.
     #>
     [CmdletBinding()]
     param(
@@ -84,7 +86,12 @@ function Invoke-McpWorkerRequest {
     $response = $null
     $errorCode = $null
     try {
-        $result = Invoke-McpToolHandler -Registration $Envelope.Registration -Arguments $Envelope.Arguments -Context $context -UseCommandName
+        $result = switch ($Envelope.Kind) {
+            'Tool' { Invoke-McpToolHandler -Registration $Envelope.Registration -Arguments $Envelope.Arguments -Context $context -UseCommandName }
+            'Resource' { Invoke-McpResourceHandler -Registration $Envelope.Registration -Uri $Envelope.Name -Variables $Envelope.Variables -Context $context -CacheHint $Envelope.CacheHint -UseCommandName }
+            'Prompt' { Invoke-McpPromptHandler -Registration $Envelope.Registration -Arguments $Envelope.Arguments -Context $context -UseCommandName }
+            'Completion' { Invoke-McpCompletionHandler -Request $Envelope.Completion -Context $context -UseCommandName }
+        }
         if ($Envelope.IncludeServerInfo -and $null -ne $Envelope.ServerInfo) {
             $meta = if ($result.Contains('_meta') -and $result['_meta'] -is [System.Collections.IDictionary]) { $result['_meta'] } else { [ordered]@{} }
             $meta[$script:McpMetaKey.ServerInfo] = $Envelope.ServerInfo
@@ -94,10 +101,7 @@ function Invoke-McpWorkerRequest {
     } catch [System.Management.Automation.PipelineStoppedException] {
         throw
     } catch {
-        $exception = $_.Exception
-        if ($exception -is [System.Management.Automation.RuntimeException] -and $null -ne $exception.InnerException -and $exception.GetType() -eq [System.Management.Automation.RuntimeException]) {
-            $exception = $exception.InnerException
-        }
+        $exception = Get-McpHandlerException -Exception $_.Exception
         $errorObject = ConvertTo-McpErrorObject -Exception $exception
         $errorCode = $errorObject['code']
         $response = New-McpErrorResponse -Id $Envelope.RequestId -ErrorObject $errorObject

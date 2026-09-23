@@ -1,5 +1,6 @@
-# The dispatcher: the loop that owns a transport, decodes inbound messages, answers server/discover and
-# tools/list itself, hands tools/call to the worker runspace pool, forwards the workers' responses and
+# The dispatcher: the loop that owns a transport, decodes inbound messages, answers server/discover, the list
+# methods and everything that runs no user code itself, hands tools/call, resources/read, prompts/get and
+# completion/complete with a handler to the worker runspace pool, forwards the workers' responses and
 # notifications, honours notifications/cancelled and shuts down on end of stream or Stop-McpServer.
 #
 # Over stdio and in memory all messages share one line writer. Over Streamable HTTP every request owns a
@@ -22,7 +23,7 @@ function Get-McpRequestKey {
 function New-McpWorkerPool {
     <#
     .SYNOPSIS
-        The hostless runspace pool that runs tool handlers: the module, the registered handlers and preferences.
+        The hostless runspace pool that runs handlers: the module, the registered handlers and preferences.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Creates a runspace pool for the caller (Start-McpServer), which owns the ShouldProcess decision.')]
     [CmdletBinding()]
@@ -38,8 +39,7 @@ function New-McpWorkerPool {
     }
     $modules = [System.Collections.Generic.List[string]]::new()
     $modules.Add($script:McpModuleManifestPath)
-    foreach ($registration in $Server.Tools.Values) {
-        $handler = $registration.Handler
+    foreach ($handler in Get-McpServerHandler -Server $Server) {
         if ($handler.ModulePath -and -not $modules.Contains($handler.ModulePath)) {
             $modules.Add($handler.ModulePath)
         } elseif (-not $handler.ModulePath -and $handler.ModuleName -and -not $modules.Contains($handler.ModuleName)) {
@@ -94,7 +94,7 @@ function Invoke-McpDispatcher {
     $Server.State.Started = $true
     $Server.State.StopRequested = $false
     $where = if ($Transport.Kind -eq 'Http') { "Streamable HTTP at $($Transport.Prefix)" } else { $Transport.Kind }
-    Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message "Server '$($Server.Name)' $($Server.Version) starting on $where with $($Server.Tools.Count) tool(s)."
+    Write-McpStderr -Level Info -Threshold $state.LogLevel -Logger $Server.Name -Message "Server '$($Server.Name)' $($Server.Version) starting on $where with $($Server.Tools.Count) tool(s), $($Server.Resources.Count + $Server.ResourceTemplates.Count) resource(s) and template(s), $($Server.Prompts.Count) prompt(s)."
     try {
         $state.Pool = New-McpWorkerPool -Server $Server
         if ($Transport.Kind -eq 'Http') {
@@ -219,7 +219,7 @@ function Send-McpOutboundQueue {
                 Send-McpHttpResponse -State $State -Channel $entry.Channel -Json $item.Json -ErrorCode $item.ErrorCode
             }
             if (-not $delivered -and -not $entry.Cancelled) {
-                Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)): the client disconnected; cancelling."
+                Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)): the client disconnected; cancelling."
                 Stop-McpInFlightRequest -Entry $entry
                 $entry.Responded = $true
             }
@@ -372,7 +372,7 @@ function Update-McpInFlightRequest {
         $finished = $invocationState -in @([System.Management.Automation.PSInvocationState]::Completed, [System.Management.Automation.PSInvocationState]::Failed, [System.Management.Automation.PSInvocationState]::Stopped)
         if (-not $finished) {
             if ($timeout -gt 0 -and -not $entry.Cancelled -and -not $entry.Responded -and ([datetime]::UtcNow - $entry.StartedAt).TotalSeconds -gt $timeout) {
-                Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)) timed out after $timeout s."
+                Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)) timed out after $timeout s."
                 Stop-McpInFlightRequest -Entry $entry
                 $entry.Responded = $true
                 Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message "The request timed out after $timeout seconds."))
@@ -384,7 +384,7 @@ function Update-McpInFlightRequest {
         if ($invocationState -eq [System.Management.Automation.PSInvocationState]::Failed -and -not $entry.Cancelled -and -not $entry.Responded) {
             $reason = $entry.PowerShell.InvocationStateInfo.Reason
             $text = if ($reason) { $reason.Message } else { 'The worker failed.' }
-            Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)) failed in the worker: $text"
+            Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)) failed in the worker: $text"
             $entry.Responded = $true
             Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $text))
         }
@@ -427,8 +427,7 @@ function Invoke-McpInboundRequest {
                 Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpDiscoverResult -Server $server))
             }
             'tools/list' {
-                $cursor = if ($params.Contains('cursor')) { $params['cursor'] } else { $null }
-                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpToolListResult -Server $server -Cursor $cursor))
+                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpToolListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
             }
             'tools/call' {
                 if (-not $params.Contains('name') -or $params['name'] -isnot [string]) {
@@ -445,7 +444,50 @@ function Invoke-McpInboundRequest {
                 if ($null -ne $Channel -and $Channel.Kind -eq 'Http') {
                     Test-McpToolParameterHeader -HeaderParameters $registration.HeaderParameters -Arguments $arguments -Headers $Channel.Context.Request.Headers
                 }
-                Start-McpWorkerRequest -State $State -Id $id -Registration $registration -Arguments $arguments -Meta $meta -Channel $Channel
+                Start-McpWorkerRequest -State $State -Id $id -Kind Tool -Method $method -Name $registration.Name -Registration $registration -Payload @{ Arguments = $arguments } -Meta $meta -Channel $Channel
+            }
+            'resources/list' {
+                Assert-McpServerCapability -Server $server -Capability resources -Method $method
+                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpResourceListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+            }
+            'resources/templates/list' {
+                Assert-McpServerCapability -Server $server -Capability resources -Method $method
+                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpResourceTemplateListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+            }
+            'resources/read' {
+                Assert-McpServerCapability -Server $server -Capability resources -Method $method
+                $uri = $params['uri']
+                if (-not (Test-McpResourceUri -Uri $uri)) {
+                    throw [McpProtocolException]::new($script:McpErrorCode.InvalidParams, "resources/read requires a parameter 'uri' with an absolute URI.")
+                }
+                $resolved = Resolve-McpResourceRequest -Server $server -Uri $uri
+                $registration = $resolved.Registration
+                $cacheHint = Get-McpResourceCacheHint -Server $server -Registration $registration
+                if ($registration.Source -eq 'Content') {
+                    $result = Invoke-McpResourceHandler -Registration $registration -Uri $uri -CacheHint $cacheHint
+                    Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result $result -Server $server))
+                } else {
+                    Start-McpWorkerRequest -State $State -Id $id -Kind Resource -Method $method -Name $uri -Registration $registration -Payload @{ Variables = $resolved.Variables; CacheHint = $cacheHint } -Meta $meta -Channel $Channel
+                }
+            }
+            'prompts/list' {
+                Assert-McpServerCapability -Server $server -Capability prompts -Method $method
+                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpPromptListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+            }
+            'prompts/get' {
+                Assert-McpServerCapability -Server $server -Capability prompts -Method $method
+                $registration = Get-McpPromptRegistration -Server $server -Name $params['name']
+                $arguments = Test-McpPromptArgument -Registration $registration -Arguments $(if ($params.Contains('arguments')) { $params['arguments'] } else { $null })
+                Start-McpWorkerRequest -State $State -Id $id -Kind Prompt -Method $method -Name $registration.Name -Registration $registration -Payload @{ Arguments = $arguments } -Meta $meta -Channel $Channel
+            }
+            'completion/complete' {
+                Assert-McpServerCapability -Server $server -Capability completions -Method $method
+                $request = Resolve-McpCompletionRequest -Server $server -Params $params
+                if ($null -eq $request.Source -or $null -eq $request.Source.Handler) {
+                    Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result (Invoke-McpCompletionHandler -Request $request) -Server $server))
+                } else {
+                    Start-McpWorkerRequest -State $State -Id $id -Kind Completion -Method $method -Name $request.Label -Registration $null -Payload @{ Completion = $request } -Meta $meta -Channel $Channel
+                }
             }
             default {
                 throw [McpProtocolException]::new($script:McpErrorCode.MethodNotFound, "Method not found: $method")
@@ -464,6 +506,46 @@ function Invoke-McpInboundRequest {
     }
 }
 
+function Get-McpCursorParam {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [AllowNull()]
+        [System.Collections.IDictionary] $Params
+    )
+
+    if ($null -ne $Params -and $Params.Contains('cursor')) { return $Params['cursor'] }
+    $null
+}
+
+function Assert-McpServerCapability {
+    <#
+    .SYNOPSIS
+        Answers methods of a capability the server does not declare (no registrations) with -32601.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Server,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('resources', 'prompts', 'completions')]
+        [string] $Capability,
+
+        [Parameter(Mandatory)]
+        [string] $Method
+    )
+
+    $declared = switch ($Capability) {
+        'resources' { Test-McpResourceCapability -Server $Server }
+        'prompts' { $Server.Prompts.Count -gt 0 }
+        'completions' { Test-McpCompletionCapability -Server $Server }
+    }
+    if (-not $declared) {
+        throw [McpProtocolException]::new($script:McpErrorCode.MethodNotFound, "Method not found: $Method (the server does not declare the $Capability capability).")
+    }
+}
+
 function Start-McpWorkerRequest {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal request bookkeeping.')]
     [CmdletBinding()]
@@ -475,10 +557,21 @@ function Start-McpWorkerRequest {
         [object] $Id,
 
         [Parameter(Mandatory)]
-        [pscustomobject] $Registration,
+        [ValidateSet('Tool', 'Resource', 'Prompt', 'Completion')]
+        [string] $Kind,
+
+        [Parameter(Mandatory)]
+        [string] $Method,
+
+        # The tool or prompt name, the resource URI or the completion target.
+        [Parameter(Mandatory)]
+        [string] $Name,
 
         [AllowNull()]
-        [System.Collections.IDictionary] $Arguments,
+        [pscustomobject] $Registration,
+
+        # Kind-specific envelope members: Arguments, Variables, CacheHint or Completion.
+        [hashtable] $Payload = @{},
 
         [Parameter(Mandatory)]
         [hashtable] $Meta,
@@ -491,10 +584,10 @@ function Start-McpWorkerRequest {
     $cts = [System.Threading.CancellationTokenSource]::new()
     $envelope = @{
         RequestId         = $Id
-        Method            = 'tools/call'
-        ToolName          = $Registration.Name
+        Kind              = $Kind
+        Method            = $Method
+        Name              = $Name
         Registration      = $Registration
-        Arguments         = $Arguments
         Meta              = $Meta
         Sink              = @{ Queue = $State.Outbound; Signal = $State.Signal }
         CancellationToken = $cts.Token
@@ -503,13 +596,14 @@ function Start-McpWorkerRequest {
         ServerInfo        = $State.ServerInfo
         IncludeServerInfo = [bool] $server.Options.IncludeServerInfo
     }
+    foreach ($key in $Payload.Keys) { $envelope[$key] = $Payload[$key] }
     $worker = [powershell]::Create()
     $worker.RunspacePool = $State.Pool
     $null = $worker.AddScript($script:McpWorkerScript).AddArgument($envelope)
     $handle = $worker.BeginInvoke()
     $State.InFlight[(Get-McpRequestKey -Id $Id)] = @{
         Id         = $Id
-        ToolName   = $Registration.Name
+        Label      = "$Method $Name"
         PowerShell = $worker
         Handle     = $handle
         Cts        = $cts

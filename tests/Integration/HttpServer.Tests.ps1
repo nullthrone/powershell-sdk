@@ -33,6 +33,8 @@ BeforeAll {
         }
         'sampled'
     } -Server $script:server
+    Register-McpResource -Uri 'test://doc' -Name 'doc' -Content 'document' -Server $script:server
+    Register-McpPrompt -Name 'hello' -Description 'Says hello.' -ScriptBlock { param([string] $Name = 'world') "Hello, $Name!" } -Server $script:server
     $script:handle = Start-McpTestHttpServer -Server $script:server -Parameters @{ KeepAliveSeconds = 1 }
     $script:url = $script:handle.Url
     $script:meta = '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
@@ -225,6 +227,31 @@ Describe 'Raw Streamable HTTP behaviour' -Tag 'Integration' {
         (Send-Raw -Body $script:echoCall -Headers @{ 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = 'other' }).Status | Should -Be 400
         (Send-Raw -Body $script:echoCall -Headers @{ 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = '  echo  ' }).Json['result']['content'][0]['text'] | Should -Be 'hi'
         (Send-Raw -Body $script:echoCall -Headers @{ 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = '=?base64?ZWNobw==?=' }).Status | Should -Be 200
+    }
+
+    It 'validates Mcp-Name for resources/read and prompts/get and answers unknown resources with 400 and the URI' {
+        $read = "{`"jsonrpc`":`"2.0`",`"id`":30,`"method`":`"resources/read`",`"params`":{$($script:meta),`"uri`":`"test://doc`"}}"
+        $ok = Send-Raw -Body $read -Headers @{ 'Mcp-Method' = 'resources/read'; 'Mcp-Name' = 'test://doc' }
+        $ok.Status | Should -Be 200
+        $ok.Json['result']['contents'][0]['text'] | Should -Be 'document'
+        (Test-McpSpecShape -Definition 'ReadResourceResult' -Instance $ok.Json['result']).IsValid | Should -BeTrue
+        $mismatch = Send-Raw -Body $read -Headers @{ 'Mcp-Method' = 'resources/read'; 'Mcp-Name' = 'test://other' }
+        $mismatch.Status | Should -Be 400
+        $mismatch.Json['error']['code'] | Should -Be -32020
+        (Send-Raw -Body $read -Headers @{ 'Mcp-Method' = 'resources/read' }).Status | Should -Be 400
+        $missing = "{`"jsonrpc`":`"2.0`",`"id`":31,`"method`":`"resources/read`",`"params`":{$($script:meta),`"uri`":`"test://missing`"}}"
+        $notFound = Send-Raw -Body $missing -Headers @{ 'Mcp-Method' = 'resources/read'; 'Mcp-Name' = 'test://missing' }
+        $notFound.Status | Should -Be 400
+        $notFound.Json['error']['code'] | Should -Be -32602
+        $notFound.Json['error']['data']['uri'] | Should -Be 'test://missing'
+        $prompt = "{`"jsonrpc`":`"2.0`",`"id`":32,`"method`":`"prompts/get`",`"params`":{$($script:meta),`"name`":`"hello`",`"arguments`":{`"Name`":`"HTTP`"}}}"
+        (Send-Raw -Body $prompt -Headers @{ 'Mcp-Method' = 'prompts/get'; 'Mcp-Name' = 'hello' }).Json['result']['messages'][0]['content']['text'] | Should -Be 'Hello, HTTP!'
+        (Send-Raw -Body $prompt -Headers @{ 'Mcp-Method' = 'prompts/get'; 'Mcp-Name' = 'bye' }).Json['error']['code'] | Should -Be -32020
+    }
+
+    It 'serves resources and prompts to the HTTP client' {
+        (Read-McpResource -Uri 'test://doc' -Session $script:session).Text | Should -Be 'document'
+        (Invoke-McpPrompt -Name 'hello' -Session $script:session).Text | Should -Be 'Hello, world!'
     }
 
     It 'validates Mcp-Param headers (<Name>)' -TestCases @(

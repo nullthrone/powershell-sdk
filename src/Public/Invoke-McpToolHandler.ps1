@@ -59,26 +59,16 @@ function Invoke-McpToolHandler {
         throw [McpProtocolException]::new($script:McpErrorCode.InvalidParams, "Invalid arguments for tool '$($Registration.Name)': $($validation.Errors -join '; ')", $data)
     }
     $splat = ConvertTo-McpToolArgument -Registration $Registration -Arguments $Arguments -Context $Context
-    $handler = $Registration.Handler
     $threshold = if ($null -ne $Context -and $Context.PSObject.Properties['ServerLogLevel'] -and $null -ne $Context.ServerLogLevel) { $Context.ServerLogLevel } else { $script:McpDefaultLogLevel }
 
     $merged = $null
     try {
-        if ($UseCommandName) {
-            $merged = @(& $handler.CommandName @splat *>&1)
-        } elseif ($handler.Kind -eq 'ScriptBlock') {
-            $merged = @(& $handler.ScriptBlock @splat *>&1)
-        } else {
-            $merged = @(& $handler.CommandInfo @splat *>&1)
-        }
+        $merged = @(Invoke-McpHandlerCommand -Handler $Registration.Handler -Splat $splat -UseCommandName:$UseCommandName)
     } catch [System.Management.Automation.PipelineStoppedException] {
         throw
     } catch {
-        $exception = $_.Exception
-        if ($exception -is [System.Management.Automation.RuntimeException] -and $null -ne $exception.InnerException -and $exception.GetType() -eq [System.Management.Automation.RuntimeException]) {
-            $exception = $exception.InnerException
-        }
-        if ($exception -is [McpProtocolException]) { throw }
+        $exception = Get-McpHandlerException -Exception $_.Exception
+        if ($exception -is [McpProtocolException]) { throw $exception }
         $failure = ConvertTo-McpTextBlock -Text ('Error: ' + $exception.Message)
         $result = [ordered]@{
             content    = @($failure)
@@ -88,6 +78,6 @@ function Invoke-McpToolHandler {
         return $result
     }
     $parts = Split-McpHandlerOutput -Merged $merged
-    Write-McpHandlerDiagnostic -Diagnostics $parts.Diagnostics -ToolName $Registration.Name -Threshold $threshold
+    Write-McpHandlerDiagnostic -Diagnostics $parts.Diagnostics -Name $Registration.Name -Threshold $threshold -Context $Context
     ConvertTo-McpCallToolResult -Output $parts.Output -Registration $Registration -ErrorRecords $parts.Errors
 }

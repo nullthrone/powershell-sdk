@@ -4,14 +4,16 @@ PowerShell SDK for building and consuming [Model Context Protocol](https://model
 and clients, targeting specification revision **2026-07-28** with dual-era support for 2025-11-25 and
 2025-06-18.
 
-> **Status: milestone M2 (Streamable HTTP).** Servers expose PowerShell functions, cmdlets, scripts and
-> script blocks as tools over stdio and over Streamable HTTP with the stateless 2026-07-28 lifecycle
-> (`server/discover`, per-request `_meta`, request metadata headers, progress, cancellation), and the client
-> side connects to such servers over both transports. The official conformance suite runs in CI: every
-> 2026-07-28 scenario of the tools, HTTP header validation and DNS rebinding groups passes on both legs;
-> the remaining scenarios (resources, prompts, completion, input requests, subscriptions, authorization)
-> are listed in [conformance-baseline.yml](conformance-baseline.yml) and follow in M3 to M7. The milestones
-> are in [ROADMAP.md](ROADMAP.md); the design is in [docs/implementation-plan.md](docs/implementation-plan.md).
+> **Status: milestone M3 (server primitives).** Servers expose PowerShell functions, cmdlets, scripts and
+> script blocks as tools, resources (fixed content, files, directories, handlers, RFC 6570 templates) and
+> prompts, with argument completion and caching hints, over stdio and Streamable HTTP with the stateless
+> 2026-07-28 lifecycle (`server/discover`, per-request `_meta`, request metadata headers, progress,
+> cancellation, log notifications). The client side consumes all of them over both transports and caches
+> results for the `ttlMs` the server sends. The official conformance suite runs in CI: every 2026-07-28
+> scenario of the tools, resources, prompts, completion, caching, HTTP header validation and DNS rebinding
+> groups passes; the remaining scenarios (input requests, subscriptions, authorization) are listed in
+> [conformance-baseline.yml](conformance-baseline.yml) and follow in M4 to M7. The milestones are in
+> [ROADMAP.md](ROADMAP.md); the design is in [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Requirements
 
@@ -54,6 +56,19 @@ validated against the generated JSON Schema and bound to the parameters; objects
 `Write-McpProgress`/`Write-McpLog` reach the client through a `Context` parameter. Handlers run in a worker
 runspace pool, so nothing they write to the host can reach stdout.
 
+Resources and prompts are registered the same way; resource templates bind their variables to parameters,
+prompt arguments come from the `param()` block, and a `ValidateSet` doubles as argument completion:
+
+```powershell
+Register-McpResource -Uri 'weather://stations' -MimeType application/json -Content '["Berlin","Vienna"]'
+Register-McpResource -UriTemplate 'weather://{city}/current' -ScriptBlock { param($city) Get-Weather -Location $city } -TtlMs 10000
+Register-McpResource -Path ./docs -Uri 'docs://'           # every file below ./docs, as docs://{+path}
+Register-McpPrompt -Name 'weather-report' -Description 'Asks for a weather report.' -ScriptBlock {
+    param([Parameter(Mandatory)] [ValidateSet('Berlin', 'Vienna')] [string] $City)
+    "Write a three-sentence weather report for $City."
+}
+```
+
 The client side:
 
 ```powershell
@@ -62,6 +77,9 @@ Get-McpServerInfo | Format-List
 Get-McpTool | Select-Object Name, Description
 $result = Invoke-McpTool -Name Get-Weather -Arguments @{ Location = 'Berlin' }
 $result.StructuredContent.temperature
+Get-McpResource | Read-McpResource                          # cached for the ttlMs of each result
+(Invoke-McpPrompt -Name weather-report -Arguments @{ City = 'Vienna' }).Messages
+(Get-McpCompletion -PromptName weather-report -Argument City -Value 'Vi').Values
 Disconnect-McpServer
 ```
 
@@ -82,8 +100,10 @@ SSE responses. See [docs/concepts/transports.md](docs/concepts/transports.md).
 
 `Connect-McpServer -Server $serverObject` runs a server in a background runspace over an in-memory transport,
 which is how the tests exercise servers without child processes. `Invoke-McpToolHandler` calls a registered
-tool directly for unit tests of the tool itself. See `examples/echo-server.ps1`, `examples/http-server.ps1`
-and [docs/development.md](docs/development.md) for the Inspector command line.
+tool directly for unit tests of the tool itself. See `examples/echo-server.ps1`, `examples/weather-server.ps1`
+(all server primitives), `examples/http-server.ps1`,
+[docs/concepts/server-primitives.md](docs/concepts/server-primitives.md) and
+[docs/development.md](docs/development.md) for the Inspector command line.
 
 ## Building from source
 
