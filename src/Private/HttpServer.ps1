@@ -480,7 +480,7 @@ function Stop-McpHttpChannelRequest {
     if (-not $State.InFlight.ContainsKey($key)) { return }
     $entry = $State.InFlight[$key]
     if ($entry.Cancelled -or $entry.Responded) { return }
-    Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.ToolName)): the client closed the connection; cancelling."
+    Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)): the client closed the connection; cancelling."
     Stop-McpInFlightRequest -Entry $entry
     $entry.Responded = $true
 }

@@ -1,7 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Extended type data for the public PSTypeName shapes (Mcp.Tool, Mcp.ToolResult, Mcp.Resource, ...).
-  Empty until the first public objects exist (milestone M1).
+  Extended type data for the public PSTypeName shapes: GetBytes() decodes the binary data of content blocks
+  (image and audio data, embedded resource blobs) and resource contents; for text it returns the UTF-8 bytes.
 -->
 <Types>
+  <Type>
+    <Name>Mcp.Content</Name>
+    <Members>
+      <ScriptMethod>
+        <Name>GetBytes</Name>
+        <Script>
+          if ($this.PSObject.Properties['data'] -and $this.data) { return , [System.Convert]::FromBase64String([string] $this.data) }
+          $resource = if ($this.PSObject.Properties['resource']) { $this.resource } else { $null }
+          if ($resource -is [System.Collections.IDictionary]) {
+            if ($resource.Contains('blob')) { return , [System.Convert]::FromBase64String([string] $resource['blob']) }
+            if ($resource.Contains('text')) { return , [System.Text.Encoding]::UTF8.GetBytes([string] $resource['text']) }
+          } elseif ($null -ne $resource) {
+            if ($resource.PSObject.Properties['blob']) { return , [System.Convert]::FromBase64String([string] $resource.blob) }
+            if ($resource.PSObject.Properties['text']) { return , [System.Text.Encoding]::UTF8.GetBytes([string] $resource.text) }
+          }
+          if ($this.PSObject.Properties['text']) { return , [System.Text.Encoding]::UTF8.GetBytes([string] $this.text) }
+          return , [byte[]]::new(0)
+        </Script>
+      </ScriptMethod>
+    </Members>
+  </Type>
+  <Type>
+    <Name>Mcp.ResourceContent</Name>
+    <Members>
+      <ScriptMethod>
+        <Name>GetBytes</Name>
+        <Script>
+          if ($null -ne $this.Blob) { return , [System.Convert]::FromBase64String([string] $this.Blob) }
+          if ($null -ne $this.Text) { return , [System.Text.Encoding]::UTF8.GetBytes([string] $this.Text) }
+          return , [byte[]]::new(0)
+        </Script>
+      </ScriptMethod>
+    </Members>
+  </Type>
 </Types>

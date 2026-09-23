@@ -8,19 +8,6 @@
 # (2026-07-28 and 2025-11-25). The milestone that removes an entry is noted next to it (see ROADMAP.md);
 # the 2025-11-25 requirement set is run from milestone M5 (dual era) on.
 server:
-  # M3: resources, prompts, completion and caching hints on their results
-  - completion-complete
-  - resources-list
-  - resources-read-text
-  - resources-read-binary
-  - resources-templates-read
-  - sep-2164-resource-not-found
-  - prompts-list
-  - prompts-get-simple
-  - prompts-get-with-args
-  - prompts-get-embedded-resource
-  - prompts-get-with-image
-  - caching
   # M4: input requests (MRTR); the two scenarios that only warn today (SHOULD checks) are listed as well
   - input-required-result-basic-elicitation
   - input-required-result-basic-sampling

@@ -1,15 +1,15 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-    The conformance fixture server: the tools that the server scenarios of @modelcontextprotocol/conformance
-    exercise for revision 2026-07-28, served over Streamable HTTP.
+    The conformance fixture server: the tools, resources, prompts and completions that the server scenarios of
+    @modelcontextprotocol/conformance exercise for revision 2026-07-28, served over Streamable HTTP.
 .DESCRIPTION
     The Conformance build task and .github/workflows/conformance.yml start it with
         pwsh -NoLogo -NoProfile -NonInteractive -File tests/Conformance/everything-server.ps1 -Port 3001
     and run the suite against http://127.0.0.1:3001/mcp. The module is imported from $env:MCP_MODULE_MANIFEST
     when set (the build sets it to the built module), otherwise from the installed ModelContextProtocol module.
-    Scenarios of later milestones (resources, prompts, completion, subscriptions, input requests) are listed in
-    conformance-baseline.yml until their milestone lands.
+    Scenarios of later milestones (subscriptions, input requests) are listed in conformance-baseline.yml until
+    their milestone lands.
 .PARAMETER Port
     The TCP port on the loopback interface.
 .PARAMETER Hostname
@@ -136,6 +136,40 @@ $jsonSchemaTool = [ordered]@{
 Register-McpTool -Name 'json_schema_2020_12_tool' -Description 'Tool with JSON Schema 2020-12 features' -InputSchema $jsonSchemaTool -ScriptBlock {
     param([hashtable] $Arguments)
     "Received $($Arguments.Count) argument(s)."
+}
+
+# Resources: the caching scenario reads the first listed resource, so the static text resource comes first.
+$png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=='
+Register-McpResource -Uri 'test://static-text' -Name 'Static text resource' -Description 'A static text resource.' -Content 'This is the content of the static text resource.'
+Register-McpResource -Uri 'test://static-binary' -Name 'Static binary resource' -Description 'A 1x1 PNG image.' -MimeType 'image/png' -Content ([System.Convert]::FromBase64String($png))
+Register-McpResource -UriTemplate 'test://template/{id}/data' -Name 'Template resource' -Description 'Data for an ID.' -MimeType 'application/json' -ScriptBlock {
+    param([string] $id)
+    [ordered]@{ id = $id; templateTest = $true; data = "Data for ID: $id" }
+} -Completion @{ id = @('1', '12', '123') }
+
+Register-McpPrompt -Name 'test_simple_prompt' -Description 'A simple prompt without arguments.' -ScriptBlock {
+    'This is a simple prompt for testing.'
+}
+
+Register-McpPrompt -Name 'test_prompt_with_arguments' -Description 'A prompt with two required arguments.' -Arguments @(
+    @{ Name = 'arg1'; Description = 'First test argument'; Required = $true }
+    @{ Name = 'arg2'; Description = 'Second test argument'; Required = $true }
+) -ScriptBlock {
+    param([string] $arg1, [string] $arg2)
+    "Prompt with arguments: arg1='$arg1', arg2='$arg2'"
+} -Completion @{ arg1 = @('paris', 'park', 'party', 'test', 'testing') }
+
+Register-McpPrompt -Name 'test_prompt_with_embedded_resource' -Description 'A prompt that embeds a resource.' -Arguments @(
+    @{ Name = 'resourceUri'; Description = 'The URI of the embedded resource'; Required = $true }
+) -ScriptBlock {
+    param([string] $resourceUri)
+    New-McpContent -EmbeddedResource $resourceUri -MimeType 'text/plain' -ResourceText 'Embedded resource content for testing.'
+    'Please process the embedded resource above.'
+}
+
+Register-McpPrompt -Name 'test_prompt_with_image' -Description 'A prompt with an image.' -ScriptBlock {
+    New-McpContent -Image 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==' -MimeType 'image/png'
+    'Please analyze the image above.'
 }
 
 Start-McpServer -Server $server -Transport Http -Url "http://${Hostname}:$Port/mcp/"

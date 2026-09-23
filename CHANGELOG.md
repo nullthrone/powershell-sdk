@@ -11,6 +11,34 @@ support, dependency and breaking-change policy.
 
 ### Added
 
+- Milestone M3 (server primitives): `Register-McpResource` registers resources with fixed text or binary
+  content, files, handlers and RFC 6570 resource templates (levels 1 to 3; variables are bound to the
+  handler's parameters), and directories as `<base>/{+path}` templates that reject `..`, absolute paths and
+  symbolic links leading outside; `resources/list`, `resources/templates/list` and `resources/read` with
+  `-32602` and `data.uri` for unknown resources (SEP-2164) and per-resource caching hints (`-TtlMs`,
+  `-CacheScope`).
+- `Register-McpPrompt` registers prompts whose arguments are derived from the handler's parameters (or given
+  with `-Arguments`); `prompts/list` and `prompts/get` with argument validation and message shaping (strings,
+  content blocks, `New-McpPromptMessage`). `completion/complete` for prompt arguments and template variables
+  from `-Completion` value lists or handlers and from `ValidateSet`, capped at 100 values with `total` and
+  `hasMore`.
+- The `resources`, `prompts` and `completions` capabilities are declared when something is registered; their
+  methods answer `-32601` otherwise. All list methods page with cursors bound to their list.
+- `New-McpContent` validates annotations (`audience`, `priority`, `lastModified`) and takes `-Icons` for
+  resource links and `-ResourceMeta` for embedded resources; icons of servers, tools, resources and prompts are
+  validated; `New-McpPromptMessage` and `New-McpResourceContent` build prompt messages and resource contents.
+- Warning, information, verbose and debug records of handlers are sent as `notifications/message` when the
+  request asks for log notifications (besides stderr); the request context has a `Name` for every kind of
+  handler.
+- Client: `Get-McpResource [-Template]`, `Read-McpResource` (pipeline input, non-terminating `ObjectNotFound`
+  errors for `-32602` with `data.uri` and the legacy `-32002`), `Get-McpPrompt`, `Invoke-McpPrompt` and
+  `Get-McpCompletion`; a per-session cache that reuses `server/discover`, list and `resources/read` results
+  for their `ttlMs`; content blocks and resource contents are typed objects with `GetBytes()`; format views
+  for the new objects.
+- Conformance: the fixture server registers the resources, template, prompts and completions of the
+  resource, prompt, completion and caching scenarios, whose baseline entries are removed; the fixture client
+  also reads resources and renders prompts when the server declares them. `examples/weather-server.ps1`
+  demonstrates every server primitive.
 - Milestone M2 (Streamable HTTP): `Start-McpServer -Transport Http -Url ...` serves the MCP endpoint on
   `System.Net.HttpListener`: one JSON-RPC request or notification per POST, responses as a single JSON
   object or as a request-scoped SSE stream (progress and log notifications, keep-alive comments, a closed
@@ -66,6 +94,10 @@ support, dependency and breaking-change policy.
 
 ### Fixed
 
+- `build.ps1 -Bootstrap` reports why a dependency could not be installed instead of failing with a strict-mode
+  error about the missing `Optional` key.
+- Script block tools whose names differ only in characters outside `A-Z`, `a-z`, `0-9` and `_` (for example
+  `a-b` and `a_b`) no longer share one worker function.
 - The `Analyze` build task no longer fails or hangs on PSScriptAnalyzer's sporadic rule failures: every path is
   analysed in a fresh process with a timeout, and files on which a rule failed are re-analysed in further fresh
   processes.

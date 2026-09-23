@@ -17,22 +17,27 @@ LONG DESCRIPTION
     Supported transports are stdio and Streamable HTTP.
 
 CURRENT STATUS
-    Milestone M2 (Streamable HTTP): servers expose PowerShell commands and
-    script blocks as tools over stdio and over Streamable HTTP with the
-    stateless 2026-07-28 lifecycle (server/discover, per-request _meta,
-    request metadata headers, progress, cancellation), and clients connect to
-    such servers over both transports. The official conformance suite runs in
-    CI. Resources, prompts, input requests, subscriptions, the legacy
-    revisions, authorization and the extensions follow in later milestones
-    (ROADMAP.md).
+    Milestone M3 (server primitives): servers expose PowerShell commands and
+    script blocks as tools, resources (fixed content, files, directories,
+    handlers, RFC 6570 templates) and prompts, with argument completion and
+    caching hints, over stdio and over Streamable HTTP with the stateless
+    2026-07-28 lifecycle (server/discover, per-request _meta, request metadata
+    headers, progress, cancellation, log notifications). Clients consume all
+    of them over both transports and cache results for the ttlMs the server
+    sends. The official conformance suite runs in CI. Input requests,
+    subscriptions, the legacy revisions, authorization and the extensions
+    follow in later milestones (ROADMAP.md).
 
 COMMANDS
-    Server:   New-McpServer, Register-McpTool, Start-McpServer, Stop-McpServer,
+    Server:   New-McpServer, Register-McpTool, Register-McpResource,
+              Register-McpPrompt, Start-McpServer, Stop-McpServer,
               Invoke-McpToolHandler
-    Handlers: New-McpContent, New-McpToolResult, Write-McpProgress, Write-McpLog,
+    Handlers: New-McpContent, New-McpToolResult, New-McpPromptMessage,
+              New-McpResourceContent, Write-McpProgress, Write-McpLog,
               Test-McpClientCapability
     Client:   Connect-McpServer, Disconnect-McpServer, Get-McpServerInfo,
-              Get-McpTool, Invoke-McpTool
+              Get-McpTool, Invoke-McpTool, Get-McpResource, Read-McpResource,
+              Get-McpPrompt, Invoke-McpPrompt, Get-McpCompletion
 
     Start-McpServer serves stdio by default; -Transport Http -Url serves a
     Streamable HTTP endpoint (POST-only, JSON or SSE responses, request
@@ -42,11 +47,22 @@ COMMANDS
     Mcp-Param-* headers (the x-mcp-header annotation), which the client
     mirrors and the server validates.
 
-    A tool handler receives the request context through a parameter named
-    Context (request id, protocol version, client info and capabilities, log
-    level, progress token, cancellation token). Handlers run in a worker
+    Register-McpResource serves fixed content, a file, the files below a
+    directory (with protection against paths that leave it) or the output of a
+    handler; -UriTemplate registers an RFC 6570 template (levels 1 to 3) whose
+    variables are bound to the handler's parameters. Register-McpPrompt derives
+    the prompt arguments from the handler's parameters; -Completion (and a
+    ValidateSet) provides argument completion. Resources, prompts and
+    completions are declared in server/discover only when something is
+    registered.
+
+    A handler receives the request context through a parameter named Context
+    (request id, method, name, protocol version, client info and capabilities,
+    log level, progress token, cancellation token). Handlers run in a worker
     runspace pool: pass everything they need as parameters; nothing they write
-    to the host reaches the client.
+    to the host reaches the client. Their warnings, information and verbose
+    records are logged to stderr and, when the request asks for it, sent as
+    notifications/message.
 
 REQUIREMENTS
     PowerShell 7.4 or later (Core edition). Windows PowerShell 5.1 is not

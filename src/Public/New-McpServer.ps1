@@ -5,8 +5,9 @@ function New-McpServer {
     .DESCRIPTION
         The server object carries the implementation info (name, version, title, description, website URL,
         icons), the instructions for clients, the supported protocol versions and the runtime options. It is
-        a plain object (PSTypeName Mcp.Server); tools are registered on it with Register-McpTool. With
-        -SetDefault the object becomes the default for the other server commands of this session.
+        a plain object (PSTypeName Mcp.Server); tools, resources and prompts are registered on it with
+        Register-McpTool, Register-McpResource and Register-McpPrompt. With -SetDefault the object becomes the
+        default for the other server commands of this session.
     .PARAMETER Name
         The implementation name reported as serverInfo.name.
     .PARAMETER Version
@@ -24,15 +25,16 @@ function New-McpServer {
     .PARAMETER SupportedVersions
         The protocol revisions the server speaks. This milestone supports 2026-07-28 only.
     .PARAMETER MaxConcurrency
-        The maximum number of tool handlers running at the same time (the size of the worker runspace pool).
+        The maximum number of handlers running at the same time (the size of the worker runspace pool).
     .PARAMETER RequestTimeoutSeconds
-        Seconds after which a running tool handler is stopped and the request answered with an error; 0 disables the timeout.
+        Seconds after which a running handler is stopped and the request answered with an error; 0 disables the timeout.
     .PARAMETER DefaultTtlMs
-        The ttlMs caching hint sent with server/discover and tools/list results.
+        The ttlMs caching hint sent with server/discover, the list results and resources/read (unless the
+        resource sets its own with Register-McpResource -TtlMs).
     .PARAMETER DefaultCacheScope
-        The cacheScope caching hint sent with server/discover and tools/list results (public or private).
+        The cacheScope caching hint (public or private) sent with the same results.
     .PARAMETER PageSize
-        The number of tools per tools/list page.
+        The number of items per page of tools/list, resources/list, resources/templates/list and prompts/list.
     .PARAMETER LogLevel
         The minimum level of diagnostics written to stderr (default: warning).
     .PARAMETER NoServerInfo
@@ -104,10 +106,13 @@ function New-McpServer {
         Title             = $Title
         Description       = $Description
         WebsiteUrl        = $WebsiteUrl
-        Icons             = $Icons
+        Icons             = ConvertTo-McpIconList -Icons $Icons
         Instructions      = $Instructions
         SupportedVersions = [string[]] $SupportedVersions
         Tools             = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+        Resources         = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+        ResourceTemplates = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+        Prompts           = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         Options           = @{
             MaxConcurrency        = $MaxConcurrency
             RequestTimeoutSeconds = $RequestTimeoutSeconds
@@ -116,7 +121,8 @@ function New-McpServer {
             PageSize              = $PageSize
             LogLevel              = $LogLevel
             IncludeServerInfo     = -not $NoServerInfo
-            # tools.listChanged is advertised once subscriptions/listen can deliver the notification (milestone M4).
+            # listChanged (tools, prompts, resources) is advertised once subscriptions/listen can deliver the
+            # notifications (milestone M4).
             ListChanged           = $false
         }
         State             = @{

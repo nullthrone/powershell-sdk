@@ -57,6 +57,10 @@ Describe 'Register-McpTool' {
         $registration = Register-McpTool -Name 'add' -ScriptBlock { param([Parameter(Mandatory)][int] $A, [int] $B = 1) $A + $B } -Server $script:server -PassThru
         $registration.Handler.Kind | Should -Be 'ScriptBlock'
         $registration.Handler.CommandName | Should -Be 'McpTool_add'
+        $separate = New-McpServer -Name 'names' -Version '1'
+        $dashed = Register-McpTool -Name 'a-b' -ScriptBlock { 'dash' } -Server $separate -PassThru
+        $underscored = Register-McpTool -Name 'a_b' -ScriptBlock { 'underscore' } -Server $separate -PassThru
+        $dashed.Handler.CommandName | Should -Not -Be $underscored.Handler.CommandName
         $registration.InputSchema['properties']['A']['type'] | Should -Be 'integer'
         $registration.InputSchema['properties']['B']['default'] | Should -Be 1
         $registration.InputSchema['required'] | Should -Be @('A')

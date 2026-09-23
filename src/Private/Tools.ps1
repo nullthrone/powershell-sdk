@@ -1,5 +1,5 @@
-# Tool registry: registrations (PSTypeName Mcp.ToolRegistration), the Tool definitions of tools/list, cursor
-# pagination, typed argument binding and the shaping of handler output into CallToolResult.
+# Tool registry: registrations (PSTypeName Mcp.ToolRegistration), the Tool definitions of tools/list, typed
+# argument binding and the shaping of handler output into CallToolResult.
 
 $script:McpToolNamePattern = '^[A-Za-z0-9_.-]{1,128}$'
 $script:McpContentTypes = @('text', 'image', 'audio', 'resource_link', 'resource')
@@ -70,39 +70,6 @@ function ConvertTo-McpAnnotationObject {
     $result
 }
 
-function New-McpCursor {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Encodes a value.')]
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory)]
-        [int] $Offset
-    )
-
-    [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("mcp-cursor:offset=$Offset"))
-}
-
-function Read-McpCursor {
-    [CmdletBinding()]
-    [OutputType([int])]
-    param(
-        [AllowNull()]
-        [object] $Cursor
-    )
-
-    if ($null -eq $Cursor) { return 0 }
-    if ($Cursor -is [string]) {
-        $text = $null
-        try {
-            $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Cursor))
-        } catch {
-            $text = $null
-        }
-        if ($null -ne $text -and $text -match '^mcp-cursor:offset=(\d{1,9})$') { return [int] $Matches[1] }
-    }
-    throw [McpProtocolException]::new($script:McpErrorCode.InvalidParams, 'Invalid cursor.')
-}
-
 function Get-McpToolListResult {
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -114,27 +81,7 @@ function Get-McpToolListResult {
         [object] $Cursor
     )
 
-    $offset = Read-McpCursor -Cursor $Cursor
-    $registrations = @($Server.Tools.Values)
-    if ($offset -gt $registrations.Count) {
-        throw [McpProtocolException]::new($script:McpErrorCode.InvalidParams, 'Invalid cursor.')
-    }
-    $pageSize = [int] $Server.Options.PageSize
-    $page = @()
-    if ($offset -lt $registrations.Count) {
-        $end = [math]::Min($offset + $pageSize, $registrations.Count) - 1
-        $page = @($registrations[$offset..$end] | ForEach-Object { ConvertTo-McpToolDefinition -Registration $_ })
-    }
-    $result = [ordered]@{
-        resultType = 'complete'
-        tools      = $page
-    }
-    if ($offset + $pageSize -lt $registrations.Count) {
-        $result['nextCursor'] = New-McpCursor -Offset ($offset + $pageSize)
-    }
-    $result['ttlMs'] = [long] $Server.Options.DefaultTtlMs
-    $result['cacheScope'] = $Server.Options.DefaultCacheScope
-    Add-McpResultMeta -Result $result -Server $Server
+    Get-McpPagedListResult -Server $Server -Kind 'tools' -Items @($Server.Tools.Values) -Cursor $Cursor -Converter { param($registration) ConvertTo-McpToolDefinition -Registration $registration }
 }
 
 function ConvertTo-McpToolArgument {
@@ -360,26 +307,50 @@ function Split-McpHandlerOutput {
 }
 
 function Write-McpHandlerDiagnostic {
+    <#
+    .SYNOPSIS
+        Routes a handler's warning, verbose, debug and information records (and optionally its non-terminating
+        errors) to stderr and, when the request asked for log notifications, to the client.
+    .DESCRIPTION
+        Warnings map to the level warning, information to info, verbose and debug to debug and errors to
+        error. With a request context whose request carried io.modelcontextprotocol/logLevel, the records at
+        or above that level are also sent as notifications/message (see Write-McpLog).
+    #>
     [CmdletBinding()]
     param(
         [AllowNull()]
         [AllowEmptyCollection()]
         [object[]] $Diagnostics,
 
+        # The logger name: the tool or prompt name or the resource URI.
         [Parameter(Mandatory)]
-        [string] $ToolName,
+        [string] $Name,
 
-        [object] $Threshold = $script:McpDefaultLogLevel
+        [object] $Threshold = $script:McpDefaultLogLevel,
+
+        [AllowNull()]
+        [object] $Context,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [System.Management.Automation.ErrorRecord[]] $ErrorRecords
     )
 
-    foreach ($record in @($Diagnostics)) {
+    $records = @($Diagnostics) + @($ErrorRecords)
+    foreach ($record in $records) {
+        if ($null -eq $record) { continue }
         $level = switch ($record) {
+            { $_ -is [System.Management.Automation.ErrorRecord] } { [McpLoggingLevel]::Error }
             { $_ -is [System.Management.Automation.WarningRecord] } { [McpLoggingLevel]::Warning }
             { $_ -is [System.Management.Automation.VerboseRecord] } { [McpLoggingLevel]::Debug }
             { $_ -is [System.Management.Automation.DebugRecord] } { [McpLoggingLevel]::Debug }
             default { [McpLoggingLevel]::Info }
         }
-        $text = if ($record -is [System.Management.Automation.InformationRecord]) { [string] $record.MessageData } else { $record.Message }
-        Write-McpStderr -Level $level -Threshold $Threshold -Logger $ToolName -Message $text
+        $text = if ($record -is [System.Management.Automation.InformationRecord]) { [string] $record.MessageData } elseif ($record -is [System.Management.Automation.ErrorRecord]) { $record.ToString() } else { $record.Message }
+        if ($null -ne $Context -and $Context.PSObject.Properties['Sink']) {
+            Write-McpLog -Message $text -Level $level -Context $Context -Logger $Name
+        } else {
+            Write-McpStderr -Level $level -Threshold $Threshold -Logger $Name -Message $text
+        }
     }
 }

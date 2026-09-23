@@ -1,6 +1,7 @@
 # Client side: the session object (PSTypeName Mcp.Session), request/response over a transport with progress
-# and log notifications dispatched on the way, and the public object shapes (Mcp.ServerInfo, Mcp.Tool,
-# Mcp.ToolResult).
+# and log notifications dispatched on the way, the result cache that honours the servers' caching hints, list
+# pagination, and the public object shapes (Mcp.ServerInfo, Mcp.Tool, Mcp.ToolResult, Mcp.Content,
+# Mcp.Resource, Mcp.ResourceTemplate, Mcp.ResourceContent, Mcp.Prompt, Mcp.PromptResult, Mcp.Completion).
 
 $script:McpDefaultSession = $null
 
@@ -319,20 +320,365 @@ function ConvertTo-McpToolResultObject {
 
     $content = @()
     if ($Result.Contains('content') -and $null -ne $Result['content']) {
-        $content = @($Result['content'] | ForEach-Object { if ($_ -is [System.Collections.IDictionary]) { [pscustomobject] $_ } else { $_ } })
+        $content = @($Result['content'] | ForEach-Object { ConvertTo-McpClientContentObject -Block $_ })
     }
-    $text = ($content | Where-Object { $_.PSObject.Properties['type'] -and $_.type -eq 'text' } | ForEach-Object { [string] $_.text }) -join "`n"
     [pscustomobject]@{
         PSTypeName        = 'Mcp.ToolResult'
         ToolName          = $ToolName
         IsError           = [bool] ($Result.Contains('isError') -and $Result['isError'])
-        Text              = $text
+        Text              = Get-McpContentText -Content $content
         Content           = $content
         StructuredContent = if ($Result.Contains('structuredContent')) { $Result['structuredContent'] } else { $null }
         ResultType        = if ($Result.Contains('resultType')) { [string] $Result['resultType'] } else { 'complete' }
         Meta              = if ($Result.Contains('_meta')) { $Result['_meta'] } else { $null }
         Raw               = $Result
     }
+}
+
+function Get-McpWireValue {
+    <#
+    .SYNOPSIS
+        A member of a wire object, or $null when it is absent.
+    #>
+    [CmdletBinding()]
+    [OutputType([object], [object[]])]
+    param(
+        [AllowNull()]
+        [object] $Object,
+
+        [Parameter(Mandatory)]
+        [string] $Key
+    )
+
+    if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($Key)) { return , $Object[$Key] }
+    $null
+}
+
+function ConvertTo-McpClientContentObject {
+    <#
+    .SYNOPSIS
+        A content block received from a server as Mcp.Content (its wire members as properties; GetBytes() decodes binary data).
+    #>
+    [CmdletBinding()]
+    [OutputType('Mcp.Content')]
+    param(
+        [AllowNull()]
+        [object] $Block
+    )
+
+    if ($Block -isnot [System.Collections.IDictionary]) { return $Block }
+    $object = [pscustomobject] $Block
+    $object.PSObject.TypeNames.Insert(0, 'Mcp.Content')
+    $object
+}
+
+function Get-McpContentText {
+    <#
+    .SYNOPSIS
+        The text of the text blocks of a content list, joined with newlines.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]] $Content
+    )
+
+    (@($Content) | Where-Object { $null -ne $_ -and $_.PSObject.Properties['type'] -and $_.type -eq 'text' } | ForEach-Object { [string] $_.text }) -join "`n"
+}
+
+function ConvertTo-McpResourceObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.Resource')]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Resource
+    )
+
+    [pscustomobject]@{
+        PSTypeName  = 'Mcp.Resource'
+        Uri         = Get-McpWireValue -Object $Resource -Key 'uri'
+        Name        = Get-McpWireValue -Object $Resource -Key 'name'
+        Title       = Get-McpWireValue -Object $Resource -Key 'title'
+        Description = Get-McpWireValue -Object $Resource -Key 'description'
+        MimeType    = Get-McpWireValue -Object $Resource -Key 'mimeType'
+        Size        = Get-McpWireValue -Object $Resource -Key 'size'
+        Annotations = Get-McpWireValue -Object $Resource -Key 'annotations'
+        Icons       = Get-McpWireValue -Object $Resource -Key 'icons'
+        Meta        = Get-McpWireValue -Object $Resource -Key '_meta'
+        Raw         = $Resource
+    }
+}
+
+function ConvertTo-McpResourceTemplateObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.ResourceTemplate')]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Template
+    )
+
+    [pscustomobject]@{
+        PSTypeName  = 'Mcp.ResourceTemplate'
+        UriTemplate = Get-McpWireValue -Object $Template -Key 'uriTemplate'
+        Name        = Get-McpWireValue -Object $Template -Key 'name'
+        Title       = Get-McpWireValue -Object $Template -Key 'title'
+        Description = Get-McpWireValue -Object $Template -Key 'description'
+        MimeType    = Get-McpWireValue -Object $Template -Key 'mimeType'
+        Annotations = Get-McpWireValue -Object $Template -Key 'annotations'
+        Icons       = Get-McpWireValue -Object $Template -Key 'icons'
+        Meta        = Get-McpWireValue -Object $Template -Key '_meta'
+        Raw         = $Template
+    }
+}
+
+function ConvertTo-McpResourceContentObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.ResourceContent')]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Content
+    )
+
+    [pscustomobject]@{
+        PSTypeName = 'Mcp.ResourceContent'
+        Uri        = Get-McpWireValue -Object $Content -Key 'uri'
+        MimeType   = Get-McpWireValue -Object $Content -Key 'mimeType'
+        Text       = Get-McpWireValue -Object $Content -Key 'text'
+        Blob       = Get-McpWireValue -Object $Content -Key 'blob'
+        Meta       = Get-McpWireValue -Object $Content -Key '_meta'
+        Raw        = $Content
+    }
+}
+
+function ConvertTo-McpPromptObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.Prompt')]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Prompt
+    )
+
+    $wireArguments = Get-McpWireValue -Object $Prompt -Key 'arguments'
+    $arguments = @(@($wireArguments) | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object {
+            [pscustomobject]@{
+                PSTypeName  = 'Mcp.PromptArgument'
+                Name        = Get-McpWireValue -Object $_ -Key 'name'
+                Title       = Get-McpWireValue -Object $_ -Key 'title'
+                Description = Get-McpWireValue -Object $_ -Key 'description'
+                Required    = [bool] (Get-McpWireValue -Object $_ -Key 'required')
+            }
+        })
+    [pscustomobject]@{
+        PSTypeName  = 'Mcp.Prompt'
+        Name        = Get-McpWireValue -Object $Prompt -Key 'name'
+        Title       = Get-McpWireValue -Object $Prompt -Key 'title'
+        Description = Get-McpWireValue -Object $Prompt -Key 'description'
+        Arguments   = $arguments
+        Icons       = Get-McpWireValue -Object $Prompt -Key 'icons'
+        Meta        = Get-McpWireValue -Object $Prompt -Key '_meta'
+        Raw         = $Prompt
+    }
+}
+
+function ConvertTo-McpPromptResultObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.PromptResult')]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Result,
+
+        [Parameter(Mandatory)]
+        [string] $Name
+    )
+
+    $wireMessages = Get-McpWireValue -Object $Result -Key 'messages'
+    $messages = @(@($wireMessages) | Where-Object { $_ -is [System.Collections.IDictionary] } | ForEach-Object {
+            [pscustomobject]@{
+                PSTypeName = 'Mcp.PromptMessage'
+                Role       = Get-McpWireValue -Object $_ -Key 'role'
+                Content    = ConvertTo-McpClientContentObject -Block (Get-McpWireValue -Object $_ -Key 'content')
+            }
+        })
+    [pscustomobject]@{
+        PSTypeName  = 'Mcp.PromptResult'
+        Name        = $Name
+        Description = Get-McpWireValue -Object $Result -Key 'description'
+        Messages    = $messages
+        Text        = Get-McpContentText -Content @($messages | ForEach-Object { $_.Content })
+        Meta        = Get-McpWireValue -Object $Result -Key '_meta'
+        Raw         = $Result
+    }
+}
+
+function ConvertTo-McpCompletionObject {
+    [CmdletBinding()]
+    [OutputType('Mcp.Completion')]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary] $Result
+    )
+
+    $completion = Get-McpWireValue -Object $Result -Key 'completion'
+    $values = Get-McpWireValue -Object $completion -Key 'values'
+    [pscustomobject]@{
+        PSTypeName = 'Mcp.Completion'
+        Values     = [string[]] @(@($values) | Where-Object { $null -ne $_ } | ForEach-Object { [string] $_ })
+        Total      = Get-McpWireValue -Object $completion -Key 'total'
+        HasMore    = [bool] (Get-McpWireValue -Object $completion -Key 'hasMore')
+        Raw        = $Result
+    }
+}
+
+function Get-McpResultCacheHint {
+    <#
+    .SYNOPSIS
+        The ttlMs and cacheScope of a result; a result without a valid ttlMs is not cached.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [AllowNull()]
+        [object] $Result
+    )
+
+    $ttl = Get-McpWireValue -Object $Result -Key 'ttlMs'
+    $scope = Get-McpWireValue -Object $Result -Key 'cacheScope'
+    @{
+        TtlMs      = if (($ttl -is [long] -or $ttl -is [int]) -and $ttl -ge 0) { [long] $ttl } else { [long] 0 }
+        CacheScope = if ($scope -in @('public', 'private')) { [string] $scope } else { 'private' }
+    }
+}
+
+function Get-McpClientCacheEntry {
+    <#
+    .SYNOPSIS
+        A fresh entry of the session's result cache, or $null when there is none or it has expired.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [string] $Key
+    )
+
+    $entry = $Session.Cache[$Key]
+    if ($null -eq $entry) { return $null }
+    if ([datetime]::UtcNow -ge $entry.ExpiresAt) {
+        $Session.Cache.Remove($Key)
+        return $null
+    }
+    $entry
+}
+
+function Set-McpClientCacheEntry {
+    <#
+    .SYNOPSIS
+        Caches a value for the result's ttlMs; a ttlMs of 0 (immediately stale) removes the entry instead.
+    .DESCRIPTION
+        The cache belongs to one session, so private and public results are both reusable; the scope is kept
+        with the entry.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Changes an in-memory cache.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [string] $Key,
+
+        [AllowNull()]
+        [object] $Value,
+
+        [Parameter(Mandatory)]
+        [hashtable] $CacheHint
+    )
+
+    if ($CacheHint.TtlMs -le 0) {
+        $Session.Cache.Remove($Key)
+        return
+    }
+    $Session.Cache[$Key] = @{
+        Value      = $Value
+        ExpiresAt  = [datetime]::UtcNow.AddMilliseconds([double] $CacheHint.TtlMs)
+        CacheScope = $CacheHint.CacheScope
+    }
+}
+
+function Invoke-McpClientListRequest {
+    <#
+    .SYNOPSIS
+        Calls a list method and follows nextCursor through all pages.
+    .OUTPUTS
+        A hashtable with Items (the wire items), and the CacheHint of the whole list: the shortest ttlMs of
+        its pages and private when any page is private.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [string] $Method,
+
+        # The member of the result that holds the items (tools, resources, resourceTemplates, prompts).
+        [Parameter(Mandatory)]
+        [string] $ItemKey
+    )
+
+    $items = [System.Collections.Generic.List[object]]::new()
+    $hint = $null
+    $cursor = $null
+    $pages = 0
+    do {
+        $params = [ordered]@{}
+        if ($null -ne $cursor) { $params['cursor'] = $cursor }
+        $result = Invoke-McpClientRequest -Session $Session -Method $Method -Params $params
+        if ($result -isnot [System.Collections.IDictionary] -or -not $result.Contains($ItemKey)) {
+            throw [System.InvalidOperationException]::new("The $Method result has no $ItemKey member.")
+        }
+        foreach ($item in @($result[$ItemKey])) {
+            if ($item -is [System.Collections.IDictionary]) { $items.Add($item) }
+        }
+        $pageHint = Get-McpResultCacheHint -Result $result
+        if ($null -eq $hint) {
+            $hint = $pageHint
+        } else {
+            $hint = @{
+                TtlMs      = [math]::Min($hint.TtlMs, $pageHint.TtlMs)
+                CacheScope = if ($hint.CacheScope -eq 'private' -or $pageHint.CacheScope -eq 'private') { 'private' } else { 'public' }
+            }
+        }
+        $cursor = if ($result.Contains('nextCursor') -and $null -ne $result['nextCursor']) { [string] $result['nextCursor'] } else { $null }
+        $pages++
+        if ($pages -gt 10000) { throw [System.InvalidOperationException]::new("$Method paged more than 10000 times.") }
+    } while ($null -ne $cursor)
+    @{
+        Items     = $items.ToArray()
+        CacheHint = $hint
+    }
+}
+
+function Test-McpResourceNotFoundError {
+    <#
+    .SYNOPSIS
+        Whether an error response reports an unknown resource: -32602 with data.uri (2026-07-28) or -32002 (earlier revisions).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [McpProtocolException] $Exception
+    )
+
+    if ($Exception.Code -eq -32002) { return $true }
+    $Exception.Code -eq $script:McpErrorCode.InvalidParams -and $Exception.Data -is [System.Collections.IDictionary] -and $Exception.Data.Contains('uri')
 }
 
 function Start-McpBackgroundServer {

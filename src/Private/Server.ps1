@@ -67,9 +67,15 @@ function Get-McpServerCapability {
         [pscustomobject] $Server
     )
 
-    $capabilities = [ordered]@{
-        tools = [ordered]@{ listChanged = [bool] $Server.Options.ListChanged }
+    # Resources, prompts and completions are declared only when something is registered: their methods answer
+    # -32601 otherwise, and a declared capability must be backed by working methods.
+    $capabilities = [ordered]@{}
+    if (Test-McpCompletionCapability -Server $Server) { $capabilities['completions'] = [ordered]@{} }
+    if ($Server.Prompts.Count -gt 0) { $capabilities['prompts'] = [ordered]@{ listChanged = [bool] $Server.Options.ListChanged } }
+    if (Test-McpResourceCapability -Server $Server) {
+        $capabilities['resources'] = [ordered]@{ subscribe = $false; listChanged = [bool] $Server.Options.ListChanged }
     }
+    $capabilities['tools'] = [ordered]@{ listChanged = [bool] $Server.Options.ListChanged }
     $capabilities
 }
 

@@ -117,6 +117,32 @@ try {
             Write-ClientLog "tools/call $($call.name) failed: $($_.Exception.Message)"
         }
     }
+
+    # Resources and prompts, when the server declares them (http-standard-headers checks the Mcp-Method and
+    # Mcp-Name headers of resources/read and prompts/get).
+    $capabilities = $info.Capabilities
+    if ($capabilities -is [System.Collections.IDictionary] -and $capabilities.Contains('resources')) {
+        try {
+            foreach ($resource in @(Get-McpResource -Session $session)) {
+                $contents = @(Read-McpResource -Uri $resource.Uri -Session $session -ErrorAction Continue)
+                Write-ClientLog "resources/read $($resource.Uri): $($contents.Count) content(s)"
+            }
+        } catch {
+            Write-ClientLog "resources failed: $($_.Exception.Message)"
+        }
+    }
+    if ($capabilities -is [System.Collections.IDictionary] -and $capabilities.Contains('prompts')) {
+        try {
+            foreach ($prompt in @(Get-McpPrompt -Session $session)) {
+                $promptArguments = @{}
+                foreach ($argument in @($prompt.Arguments | Where-Object { $_.Required })) { $promptArguments[$argument.Name] = 'value' }
+                $rendered = Invoke-McpPrompt -Name $prompt.Name -Arguments $promptArguments -Session $session
+                Write-ClientLog "prompts/get $($prompt.Name): $(@($rendered.Messages).Count) message(s)"
+            }
+        } catch {
+            Write-ClientLog "prompts failed: $($_.Exception.Message)"
+        }
+    }
 } finally {
     Disconnect-McpServer -Session $session
 }

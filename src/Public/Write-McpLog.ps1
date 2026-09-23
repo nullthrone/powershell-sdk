@@ -13,7 +13,7 @@ function Write-McpLog {
     .PARAMETER Context
         The request context (the handler's Context parameter).
     .PARAMETER Logger
-        An optional logger name.
+        The logger name; defaults to the name of the tool or prompt or the URI of the resource being served.
     .PARAMETER Data
         Structured data sent instead of the message text in the notification (any JSON-serialisable value).
     .EXAMPLE
@@ -35,7 +35,7 @@ function Write-McpLog {
     )
 
     $threshold = if ($null -ne $Context -and $Context.PSObject.Properties['ServerLogLevel'] -and $null -ne $Context.ServerLogLevel) { $Context.ServerLogLevel } else { $script:McpDefaultLogLevel }
-    $loggerName = if ($Logger) { $Logger } elseif ($null -ne $Context -and $Context.PSObject.Properties['ToolName']) { $Context.ToolName } else { $null }
+    $loggerName = if ($Logger) { $Logger } elseif ($null -ne $Context -and $Context.PSObject.Properties['Name']) { $Context.Name } else { $null }
     Write-McpStderr -Level $Level -Threshold $threshold -Logger $loggerName -Message $Message
 
     if ($null -eq $Context -or -not $Context.PSObject.Properties['LogLevel'] -or $null -eq $Context.LogLevel -or $null -eq $Context.Sink) { return }

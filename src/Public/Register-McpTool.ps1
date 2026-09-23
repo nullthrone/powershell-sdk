@@ -97,89 +97,17 @@ function Register-McpTool {
     )
 
     $target = Resolve-McpServer -Server $Server
-    $handler = @{
-        Kind             = $null
-        CommandName      = $null
-        Definition       = $null
-        ModuleName       = $null
-        ModulePath       = $null
-        CommandInfo      = $null
-        ScriptBlock      = $null
-        ArgumentStyle    = 'Splat'
-        ContextParameter = $null
-        ParameterTypes   = @{}
-    }
-    $ast = $null
-    $parameters = $null
-
     if ($PSCmdlet.ParameterSetName -eq 'ScriptBlock') {
         if (-not $Name) { throw [System.ArgumentException]::new('A script block tool needs a -Name.') }
-        $handler.Kind = 'ScriptBlock'
-        $handler.ScriptBlock = $ScriptBlock
-        $handler.Definition = $ScriptBlock.ToString()
-        $handler.CommandName = 'McpTool_' + ($Name -replace '[^A-Za-z0-9_]', '_')
-        $ast = $ScriptBlock.Ast
-        $temporaryName = 'McpTemporaryTool_' + [guid]::NewGuid().ToString('n')
-        Set-Item -Path "function:script:$temporaryName" -Value $ScriptBlock
-        try {
-            $parameters = (Get-Command -Name $temporaryName -CommandType Function).Parameters
-        } finally {
-            Remove-Item -Path "function:script:$temporaryName" -ErrorAction SilentlyContinue
-        }
+        $descriptor = New-McpHandlerDescriptor -Prefix 'McpTool' -Key $Name -ScriptBlock $ScriptBlock
     } else {
-        $commandInfo = $Command
-        if ($Command -is [string]) {
-            # Resolve the name in the caller's scope first so that functions of the calling script are found;
-            # functions defined in nested scopes must be passed as CommandInfo (Get-Command) or script block.
-            $commandInfo = $PSCmdlet.SessionState.InvokeCommand.GetCommand($Command, [System.Management.Automation.CommandTypes]::All)
-            if ($null -eq $commandInfo) {
-                $commandInfo = Get-Command -Name $Command -ErrorAction SilentlyContinue | Select-Object -First 1
-            }
-            if ($null -eq $commandInfo) {
-                throw [System.Management.Automation.CommandNotFoundException]::new("The command '$Command' was not found. Pass the result of Get-Command for functions defined in a nested scope.")
-            }
-        }
-        if ($commandInfo -isnot [System.Management.Automation.CommandInfo]) {
-            throw [System.ArgumentException]::new('-Command must be a command name or a CommandInfo object.')
-        }
-        if ($commandInfo -is [System.Management.Automation.AliasInfo]) {
-            $commandInfo = $commandInfo.ResolvedCommand
-        }
-        $handler.CommandInfo = $commandInfo
+        $commandInfo = Resolve-McpHandlerCommand -Command $Command -Cmdlet $PSCmdlet
         if (-not $Name) { $Name = $commandInfo.Name }
-        switch ($commandInfo.GetType().Name) {
-            'FunctionInfo' {
-                $handler.Kind = 'Function'
-                $handler.CommandName = $commandInfo.Name
-                $ast = $commandInfo.ScriptBlock.Ast
-                if ($commandInfo.Module -and $commandInfo.Module.Path) {
-                    $handler.ModuleName = $commandInfo.Module.Name
-                    $handler.ModulePath = $commandInfo.Module.Path
-                } else {
-                    $handler.Definition = $commandInfo.Definition
-                }
-            }
-            'CmdletInfo' {
-                $handler.Kind = 'Cmdlet'
-                $handler.CommandName = $commandInfo.Name
-                if ($commandInfo.Module) {
-                    $handler.ModuleName = $commandInfo.Module.Name
-                    $handler.ModulePath = $commandInfo.Module.Path
-                } elseif ($commandInfo.ModuleName) {
-                    $handler.ModuleName = $commandInfo.ModuleName
-                }
-            }
-            'ExternalScriptInfo' {
-                $handler.Kind = 'Script'
-                $handler.CommandName = $commandInfo.Path
-                $ast = $commandInfo.ScriptBlock.Ast
-            }
-            default {
-                throw [System.ArgumentException]::new("Commands of type $($commandInfo.CommandType) cannot be registered as tools.")
-            }
-        }
-        $parameters = $commandInfo.Parameters
+        $descriptor = New-McpHandlerDescriptor -Prefix 'McpTool' -Key $Name -CommandInfo $commandInfo
     }
+    $handler = $descriptor.Handler
+    $ast = $descriptor.Ast
+    $parameters = $descriptor.Parameters
 
     if ($Name -notmatch $script:McpToolNamePattern) {
         throw [System.ArgumentException]::new("'$Name' is not a valid tool name: 1-128 characters from A-Z, a-z, 0-9, '_', '-' and '.'.")
@@ -193,9 +121,6 @@ function Register-McpTool {
         $Description = if ($help.Synopsis) { $help.Synopsis } elseif ($help.Description) { $help.Description } else { $null }
     }
     if ($null -ne $parameters) {
-        foreach ($entry in $parameters.GetEnumerator()) {
-            if ($entry.Key -ieq 'Context') { $handler.ContextParameter = $entry.Value.Name }
-        }
         $generated = New-McpToolInputSchema -Parameters $parameters -Help $help -Defaults (Get-McpParameterDefaultValue -Ast $ast) -AllowAdditionalProperties:$AllowAdditionalProperties
         $handler.ParameterTypes = $generated.ParameterTypes
         $schema = $generated.Schema
@@ -233,7 +158,7 @@ function Register-McpTool {
         InputSchema      = $schema
         OutputSchema     = $outputSchemaObject
         Annotations      = ConvertTo-McpAnnotationObject -Annotations $Annotations
-        Icons            = $Icons
+        Icons            = ConvertTo-McpIconList -Icons $Icons
         Meta             = $Meta
         HeaderParameters = $headerParameters
         Handler          = $handler
