@@ -435,6 +435,12 @@ function Invoke-McpInboundRequest {
     $method = [string] $Message['method']
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
     $key = Get-McpRequestKey -Id $id
+    if ($State.InFlight.ContainsKey($key) -and ($State.InFlight[$key].Responded -or $State.InFlight[$key].Cancelled)) {
+        # Answered or cancelled, only its worker is still winding down: the client may reuse the id. The entry
+        # stays under a private key until Update-McpInFlightRequest disposes the worker.
+        $State.InFlight["$key#retired-" + [guid]::NewGuid().ToString('n')] = $State.InFlight[$key]
+        $State.InFlight.Remove($key)
+    }
     if ($State.InFlight.ContainsKey($key) -or $State.Listeners.ContainsKey($key)) {
         Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InvalidRequest -Message "A request with id '$id' is already in flight."))
         return

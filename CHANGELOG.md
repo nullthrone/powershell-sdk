@@ -122,6 +122,8 @@ support, dependency and breaking-change policy.
 
 ### Fixed
 
+- A request id can be reused as soon as its response was sent; before, a request that arrived while the
+  previous request with the same id was still winding down in its worker was rejected with `-32600`.
 - `Connect-McpServer -Server` fails at once for a server object that is already running, instead of waiting
   for the `server/discover` timeout.
 - `build.ps1 -Bootstrap` reports why a dependency could not be installed instead of failing with a strict-mode

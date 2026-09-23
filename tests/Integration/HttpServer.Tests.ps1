@@ -270,6 +270,13 @@ Describe 'Raw Streamable HTTP behaviour' -Tag 'Integration' {
         if ($Status -eq 400) { $response.Json['error']['code'] | Should -Be -32020 } else { $response.Json['result']['content'][0]['text'] | Should -Be 'Hello/42/q' }
     }
 
+    It 'accepts a request id again as soon as its response was sent' {
+        # The worker of an answered request may still be winding down; its id must be free nonetheless.
+        $headers = @{ 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = 'echo' }
+        $statuses = @(1..50 | ForEach-Object { (Send-Raw -Body $script:echoCall -Headers $headers).Status })
+        @($statuses | Where-Object { $_ -ne 200 }).Count | Should -Be 0
+    }
+
     It 'treats values without the full sentinel as literals' {
         $body = "{`"jsonrpc`":`"2.0`",`"id`":12,`"method`":`"tools/call`",`"params`":{$($script:meta),`"name`":`"region`",`"arguments`":{`"Region`":`"=?base64?SGVsbG8=`",`"Query`":`"q`"}}}"
         (Send-Raw -Body $body -Headers @{ 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = 'region'; 'Mcp-Param-Region' = '=?base64?SGVsbG8=' }).Json['result']['content'][0]['text'] | Should -Be '=?base64?SGVsbG8=/1/q'
