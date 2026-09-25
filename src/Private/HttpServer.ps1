@@ -476,7 +476,8 @@ function Stop-McpHttpChannelRequest {
         [hashtable] $Channel
     )
 
-    $key = Get-McpRequestKey -Id $Channel.RequestId
+    if ($null -eq $Channel.RequestId -and $null -eq $Channel.RequestKey) { return }
+    $key = if ($Channel.RequestKey) { $Channel.RequestKey } else { Get-McpRequestKey -Id $Channel.RequestId }
     if ($State.Listeners.ContainsKey($key) -and $State.Listeners[$key].Channel -eq $Channel) {
         Remove-McpListener -State $State -Key $key -Reason 'ended: the client closed the stream'
         return

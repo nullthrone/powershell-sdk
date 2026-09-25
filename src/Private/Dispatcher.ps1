@@ -6,6 +6,10 @@
 # Over stdio and in memory all messages share one line writer. Over Streamable HTTP every request owns a
 # channel (its HTTP response, sent as one JSON object or as a request-scoped SSE stream); accepting
 # connections, header validation and SSE writing live in HttpServer.ps1.
+#
+# A dual-era server also serves legacy sessions (initialize handshake, LegacySession.ps1): every request is
+# routed by its era (Get-McpMessageEra), legacy responses are converted in Send-McpDispatcherMessage and in the
+# worker, and the requests of a legacy session are keyed with the session's prefix.
 
 function Get-McpRequestKey {
     [CmdletBinding()]
@@ -88,6 +92,9 @@ function Invoke-McpDispatcher {
         Pool        = $null
         EofReceived = $false
         Stopping    = $false
+        # Legacy sessions: the process-wide one of a line transport, and those of Streamable HTTP by Mcp-Session-Id.
+        LineSession = $null
+        Sessions    = @{}
         ServerInfo  = Get-McpServerInfoObject -Server $Server
         LogLevel    = $Server.Options.LogLevel
     }
@@ -112,6 +119,7 @@ function Invoke-McpDispatcher {
         }
     } finally {
         Close-McpAllListener -State $state
+        foreach ($session in @(Get-McpLegacySession -State $state)) { Close-McpLegacySession -State $state -Session $session -Reason 'ended: the server stopped' }
         Stop-McpAllInFlightRequest -State $state
         Send-McpOutboundQueue -State $state
         if ($null -ne $state.Pool) {
@@ -182,9 +190,14 @@ function Send-McpDispatcherMessage {
         [System.Collections.IDictionary] $Message,
 
         [AllowNull()]
-        [hashtable] $Channel
+        [hashtable] $Channel,
+
+        # The era of the request being answered: legacy results and errors are converted (Era.ps1).
+        [ValidateSet('Modern', 'Legacy')]
+        [string] $Era = 'Modern'
     )
 
+    $Message = ConvertTo-McpEraMessage -Message $Message -Era $Era
     if ($null -ne $Channel -and $Channel.Kind -eq 'Http') {
         $errorCode = $null
         if ($Message.Contains('error') -and $Message['error'] -is [System.Collections.IDictionary] -and $Message['error'].Contains('code')) { $errorCode = $Message['error']['code'] }
@@ -216,12 +229,19 @@ function Send-McpOutboundQueue {
             $params = if ($item.ParamsJson) { ConvertFrom-McpJson -Json $item.ParamsJson } else { $null }
             Send-McpListenerNotification -State $State -Method $item.Method -Params $params
             if ($State.Stopping) { return }
+            Send-McpLegacyNotification -State $State -Method $item.Method -Params $params
+            if ($State.Stopping) { return }
             continue
         }
         $entry = $null
         if ($null -ne $item.RequestId) {
-            $key = Get-McpRequestKey -Id $item.RequestId
+            $key = [string] $item.KeyPrefix + (Get-McpRequestKey -Id $item.RequestId)
             if ($State.InFlight.ContainsKey($key)) { $entry = $State.InFlight[$key] }
+        }
+        if ($item.Kind -eq 'ServerRequest') {
+            Send-McpServerRequest -State $State -Item $item -Entry $entry
+            if ($State.Stopping) { return }
+            continue
         }
         if ($null -ne $entry -and ($entry.Cancelled -or $entry.Responded)) { continue }
         if ($item.Kind -eq 'Response' -and $null -ne $entry) { $entry.Responded = $true }
@@ -277,8 +297,12 @@ function Invoke-McpInboundLine {
     switch ($kind) {
         'Request' { Invoke-McpInboundRequest -State $State -Message $message }
         'Notification' { Invoke-McpInboundNotification -State $State -Message $message }
-        'Response' { Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message 'Ignoring a JSON-RPC response: clients do not send responses in revision 2026-07-28.' }
-        'ErrorResponse' { Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message 'Ignoring a JSON-RPC error response.' }
+        { $_ -in @('Response', 'ErrorResponse') } {
+            # Answers to server-initiated requests of the legacy session; modern clients send no responses.
+            if ($null -eq $State.LineSession -or -not (Complete-McpLegacyServerRequest -Session $State.LineSession -Message $message)) {
+                Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message 'Ignoring a JSON-RPC response that answers no open server request.'
+            }
+        }
         default {
             $id = $null
             if ($message -is [System.Collections.IDictionary] -and $message.Contains('id') -and (Test-McpRequestId -Id $message['id'])) { $id = $message['id'] }
@@ -294,10 +318,19 @@ function Invoke-McpInboundNotification {
         [hashtable] $State,
 
         [Parameter(Mandatory)]
-        [System.Collections.IDictionary] $Message
+        [System.Collections.IDictionary] $Message,
+
+        # The legacy session of a Streamable HTTP request (Mcp-Session-Id); line transports use the process-wide one.
+        [AllowNull()]
+        [hashtable] $Session
     )
 
     $method = [string] $Message['method']
+    if ($null -eq $Session -and $State.Transport.Kind -ne 'Http') { $Session = $State.LineSession }
+    if ($method -eq 'notifications/initialized' -and $null -ne $Session) {
+        $Session.Initialized = $true
+        return
+    }
     if ($method -ne 'notifications/cancelled') {
         Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Ignoring notification '$method'."
         return
@@ -305,6 +338,7 @@ function Invoke-McpInboundNotification {
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
     if ($params -isnot [System.Collections.IDictionary] -or -not $params.Contains('requestId') -or -not (Test-McpRequestId -Id $params['requestId'])) { return }
     $key = Get-McpRequestKey -Id $params['requestId']
+    if ($null -ne $Session -and $State.InFlight.ContainsKey($Session.KeyPrefix + $key)) { $key = $Session.KeyPrefix + $key }
     if ($State.Listeners.ContainsKey($key)) {
         Remove-McpListener -State $State -Key $key -Reason 'cancelled by the client'
         return
@@ -397,7 +431,7 @@ function Update-McpInFlightRequest {
                 Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)) timed out after $timeout s."
                 Stop-McpInFlightRequest -Entry $entry
                 $entry.Responded = $true
-                Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message "The request timed out after $timeout seconds."))
+                Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Era $entry.Era -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message "The request timed out after $timeout seconds."))
             }
             continue
         }
@@ -408,12 +442,48 @@ function Update-McpInFlightRequest {
             $text = if ($reason) { $reason.Message } else { 'The worker failed.' }
             Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)) failed in the worker: $text"
             $entry.Responded = $true
-            Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $text))
+            Send-McpDispatcherMessage -State $State -Channel $entry.Channel -Era $entry.Era -Message (New-McpErrorResponse -Id $entry.Id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $text))
         }
         Close-McpRequestChannel -State $State -Entry $entry
         try { $entry.PowerShell.Dispose() } catch { Write-Debug 'Disposing a worker failed.' }
         try { $entry.Cts.Dispose() } catch { Write-Debug 'Disposing a token source failed.' }
         $State.InFlight.Remove($key)
+    }
+}
+
+function Send-McpServerRequest {
+    <#
+    .SYNOPSIS
+        Delivers a server-initiated request of a legacy session: on the line transport, on the SSE stream of the request that asked, or on the session's GET stream.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State,
+
+        [Parameter(Mandatory)]
+        [hashtable] $Item,
+
+        [AllowNull()]
+        [hashtable] $Entry
+    )
+
+    if ($null -ne $Entry -and ($Entry.Cancelled -or $Entry.Responded)) { return }
+    Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message ("-> ServerRequest {0} for request {1}" -f $Item.ServerRequestId, $Item.RequestId)
+    if ($State.Transport.Kind -ne 'Http') {
+        try {
+            Send-McpTransportLine -Transport $State.Transport -Line $Item.Json
+        } catch [System.IO.IOException] {
+            Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Writing to the transport failed: $($_.Exception.Message)"
+            $State.Stopping = $true
+        }
+        return
+    }
+    $session = if ($null -ne $Entry) { $Entry.Session } else { $null }
+    if ($null -ne $Entry -and $null -ne $Entry.Channel -and -not $Entry.Channel.Closed -and (Send-McpHttpNotification -State $State -Channel $Entry.Channel -Json $Item.Json)) { return }
+    if ($null -ne $session -and $null -ne $session.GetChannel -and (Write-McpSseChunk -State $State -Channel $session.GetChannel -Text "event: message`ndata: $($Item.Json)`n`n")) { return }
+    if ($null -ne $session) {
+        Stop-McpLegacyServerRequest -Session $session -Id $Item.ServerRequestId -Reason 'The request could not be delivered to the client: no open stream.'
     }
 }
 
@@ -427,14 +497,27 @@ function Invoke-McpInboundRequest {
         [System.Collections.IDictionary] $Message,
 
         [AllowNull()]
-        [hashtable] $Channel
+        [hashtable] $Channel,
+
+        # The legacy session of a Streamable HTTP request, resolved from its Mcp-Session-Id header.
+        [AllowNull()]
+        [hashtable] $Session
     )
 
     $server = $State.Server
     $id = $Message['id']
     $method = [string] $Message['method']
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
+    $isHttp = $null -ne $Channel -and $Channel.Kind -eq 'Http'
+    $era = Get-McpMessageEra -State $State -Method $method -Params $params -Session $Session -Http:$isHttp
+    # A modern-only server answers initialize with -32022 in the modern shape (the versions it supports).
+    if ($method -ceq 'initialize' -and @(Get-McpServerVersion -Server $server -Era Legacy).Count -eq 0) { $era = 'Modern' }
+    if ($era -eq 'Legacy' -and $null -eq $Session -and -not $isHttp) { $Session = $State.LineSession }
+    if ($isHttp) { $Channel.Era = $era }
+    $reply = @{ State = $State; Channel = $Channel; Era = $era }
     $key = Get-McpRequestKey -Id $id
+    if ($null -ne $Session) { $key = $Session.KeyPrefix + $key }
+    if ($isHttp) { $Channel.RequestKey = $key }
     if ($State.InFlight.ContainsKey($key) -and ($State.InFlight[$key].Responded -or $State.InFlight[$key].Cancelled)) {
         # Answered or cancelled, only its worker is still winding down: the client may reuse the id. The entry
         # stays under a private key until Update-McpInFlightRequest disposes the worker.
@@ -442,20 +525,57 @@ function Invoke-McpInboundRequest {
         $State.InFlight.Remove($key)
     }
     if ($State.InFlight.ContainsKey($key) -or $State.Listeners.ContainsKey($key)) {
-        Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InvalidRequest -Message "A request with id '$id' is already in flight."))
+        Send-McpDispatcherMessage @reply -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InvalidRequest -Message "A request with id '$id' is already in flight."))
         return
     }
     try {
-        if ($method -eq 'initialize') {
-            throw [McpProtocolException]::new($script:McpErrorCode.MethodNotFound, "This server speaks the stateless lifecycle of protocol version(s) $($server.SupportedVersions -join ', '); the initialize handshake of earlier revisions is not supported.")
+        if ($method -ceq 'initialize') {
+            if ($null -ne $Session -or (-not $isHttp -and $null -ne $State.LineSession)) {
+                throw [McpProtocolException]::new($script:McpErrorCode.InvalidRequest, 'The session is already initialized.')
+            }
+            $sessionId = if ($isHttp) { [guid]::NewGuid().ToString() } else { $null }
+            $opened = Invoke-McpLegacyInitialize -Server $server -Params $params -SessionId $sessionId
+            if ($isHttp) {
+                $State.Sessions[$sessionId] = $opened
+                $Channel.Headers = @{ 'Mcp-Session-Id' = $sessionId }
+            } else {
+                $State.LineSession = $opened
+            }
+            $client = $opened.ClientInfo
+            Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $server.Name -Message ("Legacy session {0}opened: protocol version {1}, client {2} {3}." -f $(if ($sessionId) { "$sessionId " } else { '' }), $opened.ProtocolVersion, $client['name'], $client['version'])
+            Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Get-McpLegacyInitializeResult -Server $server -Session $opened))
+            return
         }
-        $meta = Get-McpRequestMeta -Params $params -SupportedVersions $server.SupportedVersions
+        if ($era -eq 'Legacy') {
+            $Session.LastSeen = [datetime]::UtcNow
+            $legacyResult = Invoke-McpLegacyMethod -Server $server -Session $Session -Method $method -Params $params
+            if ($null -ne $legacyResult) {
+                Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result $legacyResult)
+                return
+            }
+            if ($method -in @('server/discover', 'subscriptions/listen')) {
+                throw [McpProtocolException]::new($script:McpErrorCode.MethodNotFound, "Method not found: $method (revision $($Session.ProtocolVersion) of this session does not have it).")
+            }
+            $meta = Get-McpLegacyRequestMeta -Session $Session -Params $params
+        } else {
+            $modernVersions = @(Get-McpServerVersion -Server $server -Era Modern)
+            if ($modernVersions.Count -eq 0) {
+                # A legacy-only server answers like the servers of those revisions before initialize.
+                throw [McpProtocolException]::new($script:McpErrorCode.InvalidRequest, "The server is not initialized: send initialize first (protocol versions $((Get-McpServerVersion -Server $server -Era Legacy) -join ', ')).")
+            }
+            if ($method -in $script:McpLegacyOnlyMethods) {
+                throw [McpProtocolException]::new($script:McpErrorCode.MethodNotFound, "Method not found: $method (removed in revision 2026-07-28; available in a legacy session after initialize).")
+            }
+            $meta = Get-McpRequestMeta -Params $params -SupportedVersions $modernVersions
+        }
+        if ($null -eq $params) { $params = [ordered]@{} }
+        $worker = @{ State = $State; Id = $id; Key = $key; Meta = $meta; Channel = $Channel; Era = $era; Session = $Session }
         switch ($method) {
             'server/discover' {
-                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpDiscoverResult -Server $server))
+                Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Get-McpDiscoverResult -Server $server))
             }
             'tools/list' {
-                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpToolListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+                Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Get-McpToolListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
             }
             'tools/call' {
                 if (-not $params.Contains('name') -or $params['name'] -isnot [string]) {
@@ -469,23 +589,23 @@ function Invoke-McpInboundRequest {
                     }
                 }
                 $registration = Get-McpToolRegistration -Server $server -Name $params['name']
-                if ($null -ne $Channel -and $Channel.Kind -eq 'Http') {
+                if ($isHttp -and $era -eq 'Modern') {
                     Test-McpToolParameterHeader -HeaderParameters $registration.HeaderParameters -Arguments $arguments -Headers $Channel.Context.Request.Headers
                 }
                 $payload = New-McpInputPayload -Server $server -Method $method -Name $registration.Name -Params $params
                 $payload['Arguments'] = $arguments
-                Start-McpWorkerRequest -State $State -Id $id -Kind Tool -Method $method -Name $registration.Name -Registration $registration -Payload $payload -Meta $meta -Channel $Channel
+                Start-McpWorkerRequest @worker -Kind Tool -Method $method -Name $registration.Name -Registration $registration -Payload $payload
             }
             'subscriptions/listen' {
                 Start-McpListener -State $State -Id $id -Params $params -Channel $Channel
             }
             'resources/list' {
                 Assert-McpServerCapability -Server $server -Capability resources -Method $method
-                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpResourceListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+                Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Get-McpResourceListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
             }
             'resources/templates/list' {
                 Assert-McpServerCapability -Server $server -Capability resources -Method $method
-                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpResourceTemplateListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+                Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Get-McpResourceTemplateListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
             }
             'resources/read' {
                 Assert-McpServerCapability -Server $server -Capability resources -Method $method
@@ -499,31 +619,31 @@ function Invoke-McpInboundRequest {
                 $cacheHint = Get-McpResourceCacheHint -Server $server -Registration $registration
                 if ($registration.Source -eq 'Content') {
                     $result = Invoke-McpResourceHandler -Registration $registration -Uri $uri -CacheHint $cacheHint
-                    Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result $result -Server $server))
+                    Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result $result -Server $server))
                 } else {
                     $payload['Variables'] = $resolved.Variables
                     $payload['CacheHint'] = $cacheHint
-                    Start-McpWorkerRequest -State $State -Id $id -Kind Resource -Method $method -Name $uri -Registration $registration -Payload $payload -Meta $meta -Channel $Channel
+                    Start-McpWorkerRequest @worker -Kind Resource -Method $method -Name $uri -Registration $registration -Payload $payload
                 }
             }
             'prompts/list' {
                 Assert-McpServerCapability -Server $server -Capability prompts -Method $method
-                Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Get-McpPromptListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
+                Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Get-McpPromptListResult -Server $server -Cursor (Get-McpCursorParam -Params $params)))
             }
             'prompts/get' {
                 Assert-McpServerCapability -Server $server -Capability prompts -Method $method
                 $registration = Get-McpPromptRegistration -Server $server -Name $params['name']
                 $payload = New-McpInputPayload -Server $server -Method $method -Name $registration.Name -Params $params
                 $payload['Arguments'] = Test-McpPromptArgument -Registration $registration -Arguments $(if ($params.Contains('arguments')) { $params['arguments'] } else { $null })
-                Start-McpWorkerRequest -State $State -Id $id -Kind Prompt -Method $method -Name $registration.Name -Registration $registration -Payload $payload -Meta $meta -Channel $Channel
+                Start-McpWorkerRequest @worker -Kind Prompt -Method $method -Name $registration.Name -Registration $registration -Payload $payload
             }
             'completion/complete' {
                 Assert-McpServerCapability -Server $server -Capability completions -Method $method
                 $request = Resolve-McpCompletionRequest -Server $server -Params $params
                 if ($null -eq $request.Source -or $null -eq $request.Source.Handler) {
-                    Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result (Invoke-McpCompletionHandler -Request $request) -Server $server))
+                    Send-McpDispatcherMessage @reply -Message (New-McpResultResponse -Id $id -Result (Add-McpResultMeta -Result (Invoke-McpCompletionHandler -Request $request) -Server $server))
                 } else {
-                    Start-McpWorkerRequest -State $State -Id $id -Kind Completion -Method $method -Name $request.Label -Registration $null -Payload @{ Completion = $request } -Meta $meta -Channel $Channel
+                    Start-McpWorkerRequest @worker -Kind Completion -Method $method -Name $request.Label -Registration $null -Payload @{ Completion = $request }
                 }
             }
             default {
@@ -531,15 +651,15 @@ function Invoke-McpInboundRequest {
             }
         }
     } catch [McpProtocolException] {
-        Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $_.Exception))
+        Send-McpDispatcherMessage @reply -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $_.Exception -Era $era))
     } catch {
         $exception = $_.Exception
         if ($exception -is [System.Management.Automation.RuntimeException] -and $exception.InnerException -is [McpProtocolException]) {
-            Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $exception.InnerException))
+            Send-McpDispatcherMessage @reply -Message (New-McpErrorResponse -Id $id -ErrorObject (ConvertTo-McpErrorObject -Exception $exception.InnerException -Era $era))
             return
         }
         Write-McpStderr -Level Error -Threshold $State.LogLevel -Logger $server.Name -Message "Request $id ($method) failed: $($exception.Message)"
-        Send-McpDispatcherMessage -State $State -Channel $Channel -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $exception.Message))
+        Send-McpDispatcherMessage @reply -Message (New-McpErrorResponse -Id $id -ErrorObject (New-McpError -Code $script:McpErrorCode.InternalError -Message $exception.Message))
     }
 }
 
@@ -646,11 +766,22 @@ function Start-McpWorkerRequest {
         [hashtable] $Meta,
 
         [AllowNull()]
-        [hashtable] $Channel
+        [hashtable] $Channel,
+
+        # The in-flight key (the request id, prefixed with the session's prefix in a legacy session).
+        [Parameter(Mandatory)]
+        [string] $Key,
+
+        [ValidateSet('Modern', 'Legacy')]
+        [string] $Era = 'Modern',
+
+        [AllowNull()]
+        [hashtable] $Session
     )
 
     $server = $State.Server
     $cts = [System.Threading.CancellationTokenSource]::new()
+    $keyPrefix = if ($null -ne $Session) { $Session.KeyPrefix } else { '' }
     $envelope = @{
         RequestId         = $Id
         Kind              = $Kind
@@ -658,19 +789,21 @@ function Start-McpWorkerRequest {
         Name              = $Name
         Registration      = $Registration
         Meta              = $Meta
-        Sink              = @{ Queue = $State.Outbound; Signal = $State.Signal }
+        Era               = $Era
+        Legacy            = if ($null -ne $Session) { @{ Pending = $Session.Pending; TimeoutSeconds = [int] $server.Options.RequestTimeoutSeconds } } else { $null }
+        Sink              = @{ Queue = $State.Outbound; Signal = $State.Signal; KeyPrefix = $keyPrefix }
         CancellationToken = $cts.Token
         ServerName        = $server.Name
         ServerLogLevel    = $server.Options.LogLevel
         ServerInfo        = $State.ServerInfo
         IncludeServerInfo = [bool] $server.Options.IncludeServerInfo
     }
-    foreach ($key in $Payload.Keys) { $envelope[$key] = $Payload[$key] }
+    foreach ($member in $Payload.Keys) { $envelope[$member] = $Payload[$member] }
     $worker = [powershell]::Create()
     $worker.RunspacePool = $State.Pool
     $null = $worker.AddScript($script:McpWorkerScript).AddArgument($envelope)
     $handle = $worker.BeginInvoke()
-    $State.InFlight[(Get-McpRequestKey -Id $Id)] = @{
+    $State.InFlight[$Key] = @{
         Id         = $Id
         Label      = "$Method $Name"
         PowerShell = $worker
@@ -680,5 +813,7 @@ function Start-McpWorkerRequest {
         Cancelled  = $false
         Responded  = $false
         Channel    = $Channel
+        Era        = $Era
+        Session    = $Session
     }
 }

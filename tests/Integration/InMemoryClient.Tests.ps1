@@ -173,7 +173,7 @@ Describe 'Connect-McpServer over the in-memory transport' {
     }
 
     It 'answers raw protocol violations like the specification requires' {
-        $raw = New-McpServer -Name 'raw' -Version '1'
+        $raw = New-McpServer -Name 'raw' -Version '1' -SupportedVersions '2026-07-28'
         Register-McpTool -Name 'echo' -ScriptBlock { param([string] $Text) $Text } -Server $raw
         $pair = Invoke-McpInModule { New-McpInMemoryTransportPair }
         $background = Invoke-McpInModule { param($s, $e) Start-McpBackgroundServer -Server $s -Endpoint $e } $raw $pair.Server
@@ -197,8 +197,11 @@ Describe 'Connect-McpServer over the in-memory transport' {
             $version['error']['code'] | Should -Be -32022
             $version['error']['data']['supported'] | Should -Be @('2026-07-28')
             & $send '{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"legacy","version":"1"}}}'
+            # A modern-only server names the versions it supports in its answer to initialize.
             $legacy = & $receive
-            $legacy['error']['code'] | Should -Be -32601
+            $legacy['error']['code'] | Should -Be -32022
+            $legacy['error']['data']['supported'] | Should -Be @('2026-07-28')
+            $legacy['error']['data']['requested'] | Should -Be '2025-11-25'
             $legacy['error']['message'] | Should -Match '2026-07-28'
             & $send '{"jsonrpc":"2.0","id":4,"method":"nothing/here","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
             (& $receive)['error']['code'] | Should -Be -32601

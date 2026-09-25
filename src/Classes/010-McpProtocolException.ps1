@@ -27,3 +27,11 @@ class McpInputRequiredException : McpProtocolException {
         $this.InputRequests = $inputRequests
     }
 }
+
+# A URI that names no resource. Revision 2026-07-28 answers it with -32602 and data.uri (SEP-2164); the legacy
+# revisions use -32002. The subclass marks the error so that the era-aware serialization can pick the code.
+[NoRunspaceAffinity()]
+class McpResourceNotFoundException : McpProtocolException {
+    McpResourceNotFoundException([string] $uri) : base(-32602, 'Resource not found', [ordered]@{ uri = $uri }) {
+    }
+}
