@@ -281,6 +281,11 @@ function Invoke-McpClientStrayMessage {
         Invoke-McpClientNotificationHandler -Session $Session -Message $Message
         return
     }
+    if ($kind -eq 'Request') {
+        # A request of a legacy server outside of a client request (the GET stream, or read by the pump).
+        Invoke-McpClientServerRequest -Session $Session -Message $Message
+        return
+    }
     if ($kind -notin @('Response', 'ErrorResponse')) { return }
     $subscription = Get-McpClientSubscriptionById -Session $Session -Id $(if ($Message.Contains('id')) { $Message['id'] } else { $null })
     if ($null -eq $subscription) {
@@ -341,6 +346,13 @@ function Invoke-McpClientEventPump {
     }
     $item = $null
     while ($Session.Inbox.TryDequeue([ref] $item)) {
+        if ($item.Kind -eq 'Legacy') {
+            # A message of the GET stream of a legacy session.
+            $message = $null
+            try { $message = ConvertFrom-McpJson -Json $item.Json } catch { $message = $null }
+            if ($message -is [System.Collections.IDictionary]) { Invoke-McpClientStrayMessage -Session $Session -Message $message }
+            continue
+        }
         $subscription = $Session.Subscriptions[[string] $item.Subscription]
         if ($null -eq $subscription) { continue }
         switch ($item.Kind) {
@@ -388,7 +400,16 @@ function Close-McpClientSubscription {
     )
 
     $Subscription.StopRequested = $true
-    if ($Session.Kind -eq 'Http') {
+    if ($Subscription.Legacy) {
+        # resources/unsubscribe for the URIs no other subscription of the session still needs.
+        $kept = @($Session.Subscriptions.Values | Where-Object { -not [object]::ReferenceEquals($_, $Subscription) -and $_.Honoured -is [System.Collections.IDictionary] -and $_.Honoured.Contains('resourceSubscriptions') } | ForEach-Object { $_.Honoured['resourceSubscriptions'] })
+        if (-not $Session.Closed -and $Subscription.Honoured -is [System.Collections.IDictionary] -and $Subscription.Honoured.Contains('resourceSubscriptions')) {
+            foreach ($uri in $Subscription.Honoured['resourceSubscriptions']) {
+                if ($uri -cin $kept) { continue }
+                try { $null = Invoke-McpClientRequest -Session $Session -Method 'resources/unsubscribe' -Params ([ordered]@{ uri = $uri }) } catch { Write-Debug "resources/unsubscribe of $uri failed: $($_.Exception.Message)" }
+            }
+        }
+    } elseif ($Session.Kind -eq 'Http') {
         try { $Subscription.Cts.Cancel() } catch { Write-Debug 'Cancelling the listen request failed.' }
         Stop-McpClientBackgroundRunspace -Background $Subscription.Reader -TimeoutMs 5000
         $Subscription.Reader = $null

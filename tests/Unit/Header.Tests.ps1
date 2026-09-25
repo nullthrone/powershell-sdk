@@ -253,7 +253,7 @@ Describe 'HTTP status codes and Origin validation' {
 }
 
 Describe 'SSE parsing' {
-    It 'reads events with data lines, ignores comments, ids and unknown fields, and reports end of stream' {
+    It 'reads events with data lines, ignores comments and unknown fields, and reports end of stream' {
         $lines = @(': connected', '', 'event: message', 'data: {"a":1}', '', ': keep-alive', '', 'id: 7', 'retry: 100', 'data: first', 'data: second', '', 'event: other', 'data: x', '', 'data:{"b":2}', '')
         $text = ($lines -join "`n") + "`n"
         $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($text))
@@ -276,5 +276,25 @@ Describe 'SSE parsing' {
         $events[2].Event | Should -Be 'other'
         $events[3].Data | Should -Be '{"b":2}'
         $events[4].Status | Should -Be 'Eof'
+    }
+
+    It 'keeps the last event id and the retry time for resumption and dispatches priming events' {
+        $text = "id: ev-1`nretry: 500`ndata:`n`nretry: soon`ndata: x`n`nid: ev-2`ndata: y`n`n"
+        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($text))
+        $state = Invoke-McpInModule {
+            param($s)
+            $sse = New-McpSseReader -Stream $s
+            $first = Receive-McpSseEvent -Sse $sse -TimeoutMs 2000
+            $second = Receive-McpSseEvent -Sse $sse -TimeoutMs 2000
+            $third = Receive-McpSseEvent -Sse $sse -TimeoutMs 2000
+            @{ First = $first; Second = $second; Third = $third; Retry = $sse.Retry; LastEventId = $sse.LastEventId }
+        } -Parameters @{ s = $stream }
+        $state.First.Status | Should -Be 'Event'
+        $state.First.Data | Should -Be ''
+        $state.First.Id | Should -Be 'ev-1'
+        $state.Second.Id | Should -Be 'ev-1'
+        $state.Third.Id | Should -Be 'ev-2'
+        $state.Retry | Should -Be 500
+        $state.LastEventId | Should -Be 'ev-2'
     }
 }

@@ -23,6 +23,8 @@ function Get-McpServerInfo {
     )
 
     $target = Resolve-McpSession -Session $Session
+    # A legacy session learned about the server once, in initialize.
+    if ($target.Era -eq 'Legacy') { return $target.ServerInfo }
     if (-not $Refresh) {
         $entry = Get-McpClientCacheEntry -Session $target -Key 'server/discover'
         if ($null -ne $entry) { return $entry.Value }

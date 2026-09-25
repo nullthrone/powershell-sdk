@@ -3,6 +3,10 @@
 # x-mcp-header annotated tool parameters), and responses read either as one JSON object or as a request-scoped
 # SSE stream whose notifications are dispatched while the final response is awaited. A timeout closes the
 # response stream, which is the cancellation signal of this transport.
+#
+# In a legacy session (ClientLegacy.ps1) requests carry Mcp-Session-Id and the negotiated MCP-Protocol-Version
+# instead of the per-request headers, requests of the server on a response stream are answered with a POST, and
+# a response stream that ends before the response is resumed with GET and Last-Event-ID.
 
 function New-McpHttpClientTransport {
     <#
@@ -113,16 +117,21 @@ function New-McpSseReader {
         PendingRead = $null
         Data        = [System.Collections.Generic.List[string]]::new()
         EventName   = $null
+        # The last event id and the reconnection time (ms) the server announced, for resumption.
+        LastEventId = $null
+        Retry       = $null
+        HasData     = $false
     }
 }
 
 function Receive-McpSseEvent {
     <#
     .SYNOPSIS
-        Reads the next SSE event: a hashtable with Status (Event, Eof or Timeout), Data (the joined data lines) and Event (the event name).
+        Reads the next SSE event: a hashtable with Status (Event, Eof or Timeout), Data (the joined data lines), Event (the event name) and Id (the last event id).
     .DESCRIPTION
-        Comment lines (starting with ':') and the id and retry fields are ignored; an empty line dispatches the
-        event collected so far. The pending line read survives a timeout so that no bytes are lost.
+        Comment lines (starting with ':') are ignored; the id and retry fields are kept on the reader
+        (LastEventId, Retry) for resumption. An empty line dispatches the event collected so far, also an event
+        with an empty data line (a priming event). The pending line read survives a timeout so that no bytes are lost.
     #>
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -154,14 +163,14 @@ function Receive-McpSseEvent {
             throw $failure
         }
         $line = $task.Result
-        if ($null -eq $line) { return @{ Status = 'Eof'; Data = $null; Event = $null } }
+        if ($null -eq $line) { return @{ Status = 'Eof'; Data = $null; Event = $null; Id = $Sse.LastEventId } }
         if ($line.Length -eq 0) {
             if ($Sse.Data.Count -eq 0) { $Sse.EventName = $null; continue }
             $data = $Sse.Data -join "`n"
             $name = $Sse.EventName
             $Sse.Data.Clear()
             $Sse.EventName = $null
-            return @{ Status = 'Event'; Data = $data; Event = $name }
+            return @{ Status = 'Event'; Data = $data; Event = $name; Id = $Sse.LastEventId }
         }
         if ($line[0] -eq ':') { continue }
         $colon = $line.IndexOf(':')
@@ -174,6 +183,8 @@ function Receive-McpSseEvent {
         switch ($field) {
             'data' { $Sse.Data.Add($value) }
             'event' { $Sse.EventName = $value }
+            'id' { if ($value.IndexOf([char] 0) -lt 0) { $Sse.LastEventId = $value } }
+            'retry' { $retry = 0; if ([int]::TryParse($value, [ref] $retry) -and $retry -ge 0) { $Sse.Retry = $retry } }
             default { Write-Debug "Ignoring the SSE field '$field'." }
         }
     }
@@ -271,6 +282,8 @@ function Receive-McpSseResponse {
     $failure = Get-McpTaskFailure -Task $streamTask
     if ($null -ne $failure) { throw [System.IO.IOException]::new("Opening the response stream of '$Method' (id $Id) failed: $($failure.Message)", $failure) }
     $sse = New-McpSseReader -Stream $streamTask.Result
+    $resumed = $null
+    $resumptions = 0
     try {
         while ($true) {
             $remaining = ($Deadline - [datetime]::UtcNow).TotalMilliseconds
@@ -281,8 +294,25 @@ function Receive-McpSseResponse {
             $received = Receive-McpSseEvent -Sse $sse -TimeoutMs ([int] [math]::Min(500, $remaining))
             if ($received.Status -eq 'Timeout') { continue }
             if ($received.Status -eq 'Eof') {
+                # A legacy server may close the stream after announcing an event id and a retry time: the
+                # response then arrives on a GET stream opened with Last-Event-ID.
+                if ($Session.Era -eq 'Legacy' -and $null -ne $sse.LastEventId -and $resumptions -lt 3) {
+                    $resumptions++
+                    $delay = if ($null -ne $sse.Retry) { [int] $sse.Retry } else { 1000 }
+                    $until = [datetime]::UtcNow.AddMilliseconds($delay)
+                    while ([datetime]::UtcNow -lt $until) { Start-Sleep -Milliseconds ([int] [math]::Max(1, [math]::Min(50, ($until - [datetime]::UtcNow).TotalMilliseconds))) }
+                    try { $sse.Reader.Dispose() } catch { Write-Debug 'Disposing the SSE reader failed.' }
+                    if ($null -ne $resumed) { try { $resumed.Dispose() } catch { Write-Debug 'Disposing the resumed response failed.' } }
+                    $resumed = Open-McpHttpResumedStream -Session $Session -LastEventId $sse.LastEventId -Deadline $Deadline -Cts $Cts -Method $Method -Id $Id
+                    $retry = $sse.Retry
+                    $sse = New-McpSseReader -Stream ($resumed.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+                    $sse.Retry = $retry
+                    continue
+                }
                 throw [System.IO.IOException]::new("The server closed the response stream of '$Method' (id $Id) before the response arrived; the request may be re-issued with a new id.")
             }
+            # A priming event (an id with an empty data line) carries no message.
+            if ([string]::IsNullOrWhiteSpace($received.Data)) { continue }
             if ($null -ne $received.Event -and $received.Event -ne 'message') {
                 Write-Debug "Ignoring an SSE event named '$($received.Event)'."
                 continue
@@ -311,7 +341,7 @@ function Receive-McpSseResponse {
                     Invoke-McpClientNotificationHandler -Session $Session -Message $message -ProgressToken $ProgressToken -OnProgress $OnProgress
                 }
                 'Request' {
-                    Write-Warning "Ignoring a request '$($message['method'])' from the server: servers do not send requests in protocol version $($Session.ProtocolVersion)."
+                    Invoke-McpClientServerRequest -Session $Session -Message $message -RequestMethod $Method
                 }
                 default {
                     Write-Warning 'Ignoring an invalid JSON-RPC message on the response stream.'
@@ -320,6 +350,101 @@ function Receive-McpSseResponse {
         }
     } finally {
         try { $sse.Reader.Dispose() } catch { Write-Debug 'Disposing the SSE reader failed.' }
+        if ($null -ne $resumed) { try { $resumed.Dispose() } catch { Write-Debug 'Disposing the resumed response failed.' } }
+    }
+}
+
+function Add-McpHttpSessionHeader {
+    <#
+    .SYNOPSIS
+        Adds the headers of a legacy session to a request: Mcp-Session-Id (when the server assigned one) and the negotiated MCP-Protocol-Version.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [System.Net.Http.HttpRequestMessage] $Message
+    )
+
+    if ($Session.SessionId) { $null = $Message.Headers.TryAddWithoutValidation('Mcp-Session-Id', $Session.SessionId) }
+    if ($null -ne $Session.InitializeResult) { $null = $Message.Headers.TryAddWithoutValidation('MCP-Protocol-Version', $Session.ProtocolVersion) }
+    foreach ($key in $Session.Transport.Headers.Keys) {
+        $null = $Message.Headers.TryAddWithoutValidation($key, $Session.Transport.Headers[$key])
+    }
+}
+
+function New-McpHttpGetMessage {
+    <#
+    .SYNOPSIS
+        A GET request for the stream of a legacy session, optionally resuming after an event id.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Creates an in-memory object.')]
+    [CmdletBinding()]
+    [OutputType([System.Net.Http.HttpRequestMessage])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [AllowNull()]
+        [string] $LastEventId
+    )
+
+    $message = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Session.Transport.Url)
+    $null = $message.Headers.TryAddWithoutValidation('Accept', 'text/event-stream')
+    if ($LastEventId) { $null = $message.Headers.TryAddWithoutValidation('Last-Event-ID', $LastEventId) }
+    Add-McpHttpSessionHeader -Session $Session -Message $message
+    $message
+}
+
+function Open-McpHttpResumedStream {
+    <#
+    .SYNOPSIS
+        Resumes an interrupted response stream of a legacy session: GET with Last-Event-ID; returns the SSE response.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Net.Http.HttpResponseMessage])]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [string] $LastEventId,
+
+        [Parameter(Mandatory)]
+        [datetime] $Deadline,
+
+        [Parameter(Mandatory)]
+        [System.Threading.CancellationTokenSource] $Cts,
+
+        [Parameter(Mandatory)]
+        [string] $Method,
+
+        [Parameter(Mandatory)]
+        [object] $Id
+    )
+
+    $message = New-McpHttpGetMessage -Session $Session -LastEventId $LastEventId
+    try {
+        Write-Debug "-> GET $($Session.Transport.Url) Last-Event-ID $LastEventId (resuming '$Method' id=$Id)"
+        $task = $Session.Transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $Cts.Token)
+        if (-not (Wait-McpTask -Task $task -Deadline $Deadline)) {
+            $Cts.Cancel()
+            throw [System.TimeoutException]::new("Resuming the response stream of '$Method' (id $Id) timed out.")
+        }
+        $failure = Get-McpTaskFailure -Task $task
+        if ($null -ne $failure) { throw [System.IO.IOException]::new("Resuming the response stream of '$Method' (id $Id) failed: $($failure.Message)", $failure) }
+        $response = $task.Result
+        $mediaType = if ($null -ne $response.Content.Headers.ContentType) { $response.Content.Headers.ContentType.MediaType } else { $null }
+        if (-not $response.IsSuccessStatusCode -or $mediaType -ne 'text/event-stream') {
+            $status = [int] $response.StatusCode
+            $response.Dispose()
+            throw [System.IO.IOException]::new("The server refused to resume the response stream of '$Method' (id $Id): HTTP $status.")
+        }
+        $response
+    } finally {
+        $message.Dispose()
     }
 }
 
@@ -348,6 +473,11 @@ function New-McpHttpRequestMessage {
     $message.Content = [System.Net.Http.ByteArrayContent]::new([System.Text.Encoding]::UTF8.GetBytes($Json))
     $message.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new('application/json')
     $null = $message.Headers.TryAddWithoutValidation('Accept', 'application/json, text/event-stream')
+    if ($Session.Era -eq 'Legacy') {
+        # A legacy session: the session id and the negotiated version (after initialize), no per-request headers.
+        Add-McpHttpSessionHeader -Session $Session -Message $message
+        return $message
+    }
     $null = $message.Headers.TryAddWithoutValidation('MCP-Protocol-Version', $Session.ProtocolVersion)
     $null = $message.Headers.TryAddWithoutValidation('Mcp-Method', $Method)
     $bodyName = Get-McpStandardHeaderName -Method $Method -Params $Params
@@ -388,7 +518,10 @@ function Invoke-McpHttpClientRequest {
 
         [int] $TimeoutMs = 0,
 
-        [hashtable] $Headers
+        [hashtable] $Headers,
+
+        # Internal: the retry after a legacy session expired (no further re-initialization).
+        [switch] $NoReinitialize
     )
 
     $transport = $Session.Transport
@@ -398,7 +531,8 @@ function Invoke-McpHttpClientRequest {
     $Session.NextId = $id + 1
     $progressToken = if ($OnProgress) { "p-$id" } else { $null }
     $requestParams = [ordered]@{}
-    $requestParams['_meta'] = New-McpClientRequestMeta -Session $Session -ProgressToken $progressToken -LogLevel $LogLevel
+    $meta = New-McpClientRequestMeta -Session $Session -ProgressToken $progressToken -LogLevel $LogLevel
+    if ($meta.Count -gt 0) { $requestParams['_meta'] = $meta }
     if ($null -ne $Params) {
         foreach ($key in $Params.Keys) {
             if ([string] $key -eq '_meta') { continue }
@@ -423,6 +557,19 @@ function Invoke-McpHttpClientRequest {
         }
         $response = $sendTask.Result
         $status = [int] $response.StatusCode
+        if ($Session.Era -eq 'Legacy') {
+            if ($Method -eq 'initialize') {
+                $values = $null
+                if ($response.Headers.TryGetValues('Mcp-Session-Id', [ref] $values)) { $Session.SessionId = @($values)[0] }
+            } elseif ($status -eq 404 -and $Session.SessionId -and -not $NoReinitialize) {
+                # The server ended the session: start a new one and send the request once more.
+                Write-Verbose "Session $($Session.SessionId) expired (HTTP 404); initializing a new session."
+                $response.Dispose()
+                $response = $null
+                Initialize-McpLegacyClient -Session $Session -TimeoutMs $TimeoutMs
+                return Invoke-McpHttpClientRequest -Session $Session -Method $Method -Params $Params -OnProgress $OnProgress -LogLevel $LogLevel -TimeoutMs $TimeoutMs -Headers $Headers -NoReinitialize
+            }
+        }
         $mediaType = $null
         if ($null -ne $response.Content -and $null -ne $response.Content.Headers.ContentType) { $mediaType = $response.Content.Headers.ContentType.MediaType }
         Write-Debug "<- HTTP $status $mediaType for $Method id=$id"
@@ -464,10 +611,35 @@ function Send-McpHttpClientNotification {
         [int] $TimeoutMs = 10000
     )
 
+    $json = ConvertTo-McpJson -InputObject (New-McpNotification -Method $Method -Params $Params)
+    Send-McpHttpClientMessage -Session $Session -Json $json -Method $Method -Params $Params -TimeoutMs $TimeoutMs
+}
+
+function Send-McpHttpClientMessage {
+    <#
+    .SYNOPSIS
+        Posts a notification or a response (to a request of a legacy server); the server answers 202 without a body.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session,
+
+        [Parameter(Mandatory)]
+        [string] $Json,
+
+        # The method of the notification, or of the server request being answered (for diagnostics and headers).
+        [Parameter(Mandatory)]
+        [string] $Method,
+
+        [System.Collections.IDictionary] $Params,
+
+        [int] $TimeoutMs = 10000
+    )
+
     $transport = $Session.Transport
     if ($transport.Closed) { throw [System.IO.IOException]::new('The transport is closed.') }
-    $json = ConvertTo-McpJson -InputObject (New-McpNotification -Method $Method -Params $Params)
-    $message = New-McpHttpRequestMessage -Session $Session -Method $Method -Params $Params -Json $json
+    $message = New-McpHttpRequestMessage -Session $Session -Method $Method -Params $Params -Json $Json
     $cts = [System.Threading.CancellationTokenSource]::new()
     $response = $null
     try {
