@@ -198,6 +198,18 @@ Describe 'HTTP status codes and Origin validation' {
         Invoke-McpInModule { param($c) Get-McpHttpStatusCode -ErrorCode $c } -Parameters @{ c = $Code } | Should -Be $Expected
     }
 
+    It 'maps the errors of a legacy session to 200 except malformed messages' -TestCases @(
+        @{ Code = $null; Expected = 200 }
+        @{ Code = -32700; Expected = 400 }
+        @{ Code = -32600; Expected = 400 }
+        @{ Code = -32602; Expected = 200 }
+        @{ Code = -32601; Expected = 200 }
+        @{ Code = -32002; Expected = 200 }
+        @{ Code = -32603; Expected = 200 }
+    ) {
+        Invoke-McpInModule { param($c) Get-McpHttpStatusCode -ErrorCode $c -Era Legacy } -Parameters @{ c = $Code } | Should -Be $Expected
+    }
+
     It 'accepts only Host headers that name the endpoint host and port' {
         $test = { param($u, $h) Invoke-McpInModule { param($u, $h) Test-McpHttpHost -Transport @{ Url = [uri] $u } -HostHeader $h } -Parameters @{ u = $u; h = $h } }
         & $test 'http://127.0.0.1:8080/mcp/' '127.0.0.1:8080' | Should -BeTrue

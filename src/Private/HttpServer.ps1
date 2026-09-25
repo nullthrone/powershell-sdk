@@ -2,6 +2,11 @@
 # loop in Dispatcher.ps1 calls Invoke-McpHttpDispatcherLoop; every accepted POST becomes a channel (the HTTP
 # response) that receives either one JSON object or a request-scoped SSE stream of notifications followed by
 # the final response. Nothing here touches the console: diagnostics go through Write-McpStderr.
+#
+# A server with legacy revisions also speaks the Streamable HTTP of 2025-11-25 and 2025-06-18: initialize
+# mints an Mcp-Session-Id, requests carrying it belong to that legacy session, GET opens the session's stream
+# for unsolicited notifications and server-initiated requests, DELETE ends the session, and responses to
+# server-initiated requests are POSTed back. Sessions expire after an idle timeout; their number is capped.
 
 # Built on first use: the error code table (JsonRpc.ps1) is assembled after this file.
 $script:McpHttpStatusByErrorCode = $null
@@ -10,15 +15,25 @@ function Get-McpHttpStatusCode {
     <#
     .SYNOPSIS
         The HTTP status of a JSON-RPC response: 400 for malformed requests, headers and versions, 404 for unknown methods, 200 otherwise.
+    .DESCRIPTION
+        In a legacy session only malformed messages are 400; every other error is a JSON-RPC response with
+        status 200, because 404 tells a client of those revisions that its session is gone.
     #>
     [CmdletBinding()]
     [OutputType([int])]
     param(
         [AllowNull()]
-        [object] $ErrorCode
+        [object] $ErrorCode,
+
+        [ValidateSet('Modern', 'Legacy')]
+        [string] $Era = 'Modern'
     )
 
     if ($null -eq $ErrorCode) { return 200 }
+    if ($Era -eq 'Legacy') {
+        if ([int] $ErrorCode -in @($script:McpErrorCode.ParseError, $script:McpErrorCode.InvalidRequest)) { return 400 }
+        return 200
+    }
     if ($null -eq $script:McpHttpStatusByErrorCode) {
         $table = @{}
         foreach ($name in 'ParseError', 'InvalidRequest', 'InvalidParams', 'HeaderMismatch', 'MissingRequiredClientCapability', 'UnsupportedProtocolVersion') {
@@ -52,7 +67,13 @@ function New-McpHttpServerTransport {
 
         [int] $KeepAliveSeconds = 5,
 
-        [int] $BodyTimeoutSeconds = 30
+        [int] $BodyTimeoutSeconds = 30,
+
+        # Legacy sessions: seconds without a request after which a session without an open GET stream ends.
+        [int] $SessionIdleTimeoutSeconds = 1800,
+
+        # Legacy sessions: the maximum number of open sessions; initialize beyond it is answered with 503.
+        [int] $MaxSessions = 100
     )
 
     if (-not $Url.IsAbsoluteUri -or $Url.Scheme -notin @('http', 'https')) {
@@ -80,6 +101,8 @@ function New-McpHttpServerTransport {
         MaxBodyBytes       = $MaxBodyBytes
         KeepAliveSeconds   = $KeepAliveSeconds
         BodyTimeoutSeconds = $BodyTimeoutSeconds
+        SessionIdleTimeout = $SessionIdleTimeoutSeconds
+        MaxSessions        = $MaxSessions
         PendingBodies      = [System.Collections.Generic.List[hashtable]]::new()
         OpenChannels       = [System.Collections.Generic.List[hashtable]]::new()
         Stopped            = $false
@@ -206,14 +229,20 @@ function New-McpHttpChannel {
     )
 
     @{
-        Kind      = 'Http'
-        Context   = $Context
-        Response  = $Context.Response
-        Mode      = $null
-        Stream    = $null
-        Closed    = $false
-        LastWrite = [datetime]::UtcNow
-        RequestId = $null
+        Kind       = 'Http'
+        Context    = $Context
+        Response   = $Context.Response
+        Mode       = $null
+        Stream     = $null
+        Closed     = $false
+        LastWrite  = [datetime]::UtcNow
+        RequestId  = $null
+        # Set by the router: the in-flight key and the era of the request, headers of the response
+        # (Mcp-Session-Id of initialize), and the legacy session of a GET stream.
+        RequestKey = $null
+        Era        = 'Modern'
+        Headers    = $null
+        Session    = $null
     }
 }
 
@@ -288,8 +317,10 @@ function Send-McpHttpStatus {
     try {
         $response = $Channel.Response
         $response.StatusCode = $StatusCode
-        if ($Headers) {
-            foreach ($name in $Headers.Keys) { $response.AddHeader([string] $name, [string] $Headers[$name]) }
+        foreach ($table in @($Channel.Headers, $Headers)) {
+            if ($table) {
+                foreach ($name in $table.Keys) { $response.AddHeader([string] $name, [string] $table[$name]) }
+            }
         }
         if ($Json) {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
@@ -332,6 +363,9 @@ function Start-McpHttpSse {
         $response.SendChunked = $true
         $response.AddHeader('Cache-Control', 'no-cache')
         $response.AddHeader('X-Accel-Buffering', 'no')
+        if ($Channel.Headers) {
+            foreach ($name in $Channel.Headers.Keys) { $response.AddHeader([string] $name, [string] $Channel.Headers[$name]) }
+        }
         $Channel.Stream = $response.OutputStream
         $Channel.Mode = 'Sse'
         $Channel.LastWrite = [datetime]::UtcNow
@@ -422,7 +456,7 @@ function Send-McpHttpResponse {
         Close-McpHttpChannel -State $State -Channel $Channel
         return $written
     }
-    Send-McpHttpStatus -State $State -Channel $Channel -StatusCode (Get-McpHttpStatusCode -ErrorCode $ErrorCode) -Json $Json
+    Send-McpHttpStatus -State $State -Channel $Channel -StatusCode (Get-McpHttpStatusCode -ErrorCode $ErrorCode -Era $Channel.Era) -Json $Json
 }
 
 function Update-McpHttpChannel {
@@ -476,6 +510,11 @@ function Stop-McpHttpChannelRequest {
         [hashtable] $Channel
     )
 
+    if ($null -ne $Channel.Session -and $Channel.Session.GetChannel -eq $Channel) {
+        # The GET stream of a legacy session: the session stays, only its stream is gone.
+        $Channel.Session.GetChannel = $null
+        return
+    }
     if ($null -eq $Channel.RequestId -and $null -eq $Channel.RequestKey) { return }
     $key = if ($Channel.RequestKey) { $Channel.RequestKey } else { Get-McpRequestKey -Id $Channel.RequestId }
     if ($State.Listeners.ContainsKey($key) -and $State.Listeners[$key].Channel -eq $Channel) {
@@ -540,10 +579,91 @@ function Test-McpHttpRequestHeader {
     }
 }
 
+function Test-McpHttpLegacy {
+    <#
+    .SYNOPSIS
+        Whether the server speaks a legacy revision, and with it sessions, GET streams and DELETE.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State
+    )
+
+    @(Get-McpServerVersion -Server $State.Server -Era Legacy).Count -gt 0
+}
+
+function Resolve-McpHttpSession {
+    <#
+    .SYNOPSIS
+        The legacy session named by the Mcp-Session-Id header of a request; answers 404 and returns $null when there is no such session.
+    .OUTPUTS
+        The session, or $null when the request carries no session id (or the server has no legacy revisions).
+        Found is $false when the response was already sent.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State,
+
+        [Parameter(Mandatory)]
+        [hashtable] $Channel,
+
+        [AllowNull()]
+        [object] $Id
+    )
+
+    $sessionId = $Channel.Context.Request.Headers['Mcp-Session-Id']
+    # A modern-only server ignores the header: it never mints or echoes session ids.
+    if ([string]::IsNullOrWhiteSpace($sessionId) -or -not (Test-McpHttpLegacy -State $State)) { return @{ Found = $true; Session = $null } }
+    $sessionId = $sessionId.Trim()
+    $session = if ($State.Sessions.ContainsKey($sessionId)) { $State.Sessions[$sessionId] } else { $null }
+    if ($null -eq $session -or $session.Closed -or $session.Id -cne $sessionId) {
+        $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 404 -Json (New-McpHttpErrorJson -Code $script:McpErrorCode.InvalidRequest -Message "Session '$sessionId' not found or expired; send initialize to start a new session." -Id $Id)
+        return @{ Found = $false; Session = $null }
+    }
+    $session.LastSeen = [datetime]::UtcNow
+    $Channel.Era = 'Legacy'
+    @{ Found = $true; Session = $session }
+}
+
+function Test-McpHttpLegacyVersionHeader {
+    <#
+    .SYNOPSIS
+        Validates MCP-Protocol-Version on a request of a legacy session (optional; absent means 2025-03-26); answers 400 and returns $false for an unsupported version.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State,
+
+        [Parameter(Mandatory)]
+        [hashtable] $Channel,
+
+        [AllowNull()]
+        [object] $Id
+    )
+
+    $version = $Channel.Context.Request.Headers['MCP-Protocol-Version']
+    if ($null -eq $version) { return $true }
+    $version = $version.Trim()
+    $accepted = @(Get-McpServerVersion -Server $State.Server -Era Legacy -Accepted)
+    if ($version -in $accepted) { return $true }
+    $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 400 -Json (New-McpHttpErrorJson -Code $script:McpErrorCode.InvalidRequest -Message "Unsupported MCP-Protocol-Version '$version' for a session; supported: $($accepted -join ', ')." -Id $Id)
+    $false
+}
+
 function Invoke-McpInboundHttpMessage {
     <#
     .SYNOPSIS
         Handles the body of an accepted POST: parse errors and invalid messages answer 400, notifications 202, requests go to the dispatcher.
+    .DESCRIPTION
+        A POST with Mcp-Session-Id belongs to a legacy session: its requests skip the header validation of
+        revision 2026-07-28, its notifications are dispatched, and responses to server-initiated requests are
+        accepted with 202.
     #>
     [CmdletBinding()]
     param(
@@ -568,10 +688,23 @@ function Invoke-McpInboundHttpMessage {
     }
     $kind = Get-McpMessageKind -Message $message
     Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $logger -Message ("<- {0} {1} {2}" -f $kind, $(if ($message -is [System.Collections.IDictionary] -and $message.Contains('method')) { $message['method'] } else { '' }), $(if ($message -is [System.Collections.IDictionary] -and $message.Contains('id')) { "id=$($message['id'])" } else { '' }))
+    $messageId = if ($kind -eq 'Request') { $message['id'] } else { $null }
+    $resolved = Resolve-McpHttpSession -State $State -Channel $Channel -Id $messageId
+    if (-not $resolved.Found) { return }
+    $session = $resolved.Session
     switch ($kind) {
         'Request' {
             $Channel.RequestId = $message['id']
-            if ([string] $message['method'] -ne 'initialize') {
+            $method = [string] $message['method']
+            if ($null -ne $session) {
+                if (-not (Test-McpHttpLegacyVersionHeader -State $State -Channel $Channel -Id $message['id'])) { return }
+            } elseif ($method -ceq 'initialize') {
+                if ((Test-McpHttpLegacy -State $State) -and $State.Sessions.Count -ge $State.Transport.MaxSessions) {
+                    Write-McpStderr -Level Warning -Threshold $State.LogLevel -Logger $logger -Message "Refused initialize: $($State.Sessions.Count) legacy sessions are open (the limit)."
+                    $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 503 -Headers @{ 'Retry-After' = '30' } -Json (New-McpHttpErrorJson -Code $script:McpErrorCode.InternalError -Message 'Too many open sessions; try again later.' -Id $message['id'])
+                    return
+                }
+            } else {
                 try {
                     Test-McpHttpRequestHeader -Request $Channel.Context.Request -Message $message
                 } catch [McpProtocolException] {
@@ -579,13 +712,24 @@ function Invoke-McpInboundHttpMessage {
                     return
                 }
             }
-            Invoke-McpInboundRequest -State $State -Message $message -Channel $Channel
+            Invoke-McpInboundRequest -State $State -Message $message -Channel $Channel -Session $session
         }
         'Notification' {
-            Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $logger -Message "Accepted notification '$($message['method'])' (revision 2026-07-28 defines no client notifications over Streamable HTTP)."
+            if ($null -ne $session) {
+                Invoke-McpInboundNotification -State $State -Message $message -Session $session
+            } else {
+                Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $logger -Message "Accepted notification '$($message['method'])' (revision 2026-07-28 defines no client notifications over Streamable HTTP)."
+            }
             $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 202
         }
         { $_ -in @('Response', 'ErrorResponse') } {
+            if ($null -ne $session) {
+                if (-not (Complete-McpLegacyServerRequest -Session $session -Message $message)) {
+                    Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $logger -Message "Ignoring a response that answers no open request of session $($session.Id)."
+                }
+                $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 202
+                return
+            }
             $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 400 -Json (New-McpHttpErrorJson -Code $script:McpErrorCode.InvalidRequest -Message 'Clients do not send JSON-RPC responses in revision 2026-07-28; server-to-client interactions are input requests inside results.')
         }
         default {
@@ -593,6 +737,75 @@ function Invoke-McpInboundHttpMessage {
             if ($message -is [System.Collections.IDictionary] -and $message.Contains('id') -and (Test-McpRequestId -Id $message['id'])) { $id = $message['id'] }
             $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 400 -Json (New-McpHttpErrorJson -Code $script:McpErrorCode.InvalidRequest -Message 'Invalid Request' -Id $id)
         }
+    }
+}
+
+function Invoke-McpHttpSessionRequest {
+    <#
+    .SYNOPSIS
+        GET and DELETE on the endpoint of a legacy session: GET opens the session's stream, DELETE ends the session.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State,
+
+        [Parameter(Mandatory)]
+        [hashtable] $Channel
+    )
+
+    $resolved = Resolve-McpHttpSession -State $State -Channel $Channel -Id $null
+    if (-not $resolved.Found) { return }
+    $session = $resolved.Session
+    $invalidRequest = $script:McpErrorCode.InvalidRequest
+    if ($Channel.Context.Request.HttpMethod -ceq 'DELETE') {
+        Close-McpLegacySession -State $State -Session $session -Reason 'ended by the client'
+        $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 200
+        return
+    }
+    if (-not (Test-McpHttpLegacyVersionHeader -State $State -Channel $Channel -Id $null)) { return }
+    $accept = $Channel.Context.Request.Headers['Accept']
+    if (-not [string]::IsNullOrWhiteSpace($accept) -and $accept -notmatch 'text/event-stream|\*/\*') {
+        $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 406 -Json (New-McpHttpErrorJson -Code $invalidRequest -Message 'The GET stream is text/event-stream; the Accept header must allow it.')
+        return
+    }
+    if ($null -ne $session.GetChannel -and -not $session.GetChannel.Closed) {
+        $null = Send-McpHttpStatus -State $State -Channel $Channel -StatusCode 409 -Json (New-McpHttpErrorJson -Code $invalidRequest -Message "Session $($session.Id) already has an open GET stream.")
+        return
+    }
+    $Channel.Session = $session
+    $Channel.Era = 'Legacy'
+    if (-not (Start-McpHttpSse -State $State -Channel $Channel)) { return }
+    # A comment flushes the headers, so that the client sees the stream open at once.
+    if (-not (Write-McpSseChunk -State $State -Channel $Channel -Text ": stream open`n`n")) { return }
+    $session.GetChannel = $Channel
+    Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Session $($session.Id): GET stream open."
+}
+
+function Update-McpHttpSession {
+    <#
+    .SYNOPSIS
+        Ends legacy sessions that were idle longer than the idle timeout (no request, no open GET stream, nothing in flight).
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal housekeeping of the dispatcher loop.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $State
+    )
+
+    $timeout = [int] $State.Transport.SessionIdleTimeout
+    if ($timeout -le 0 -or $State.Sessions.Count -eq 0) { return }
+    $now = [datetime]::UtcNow
+    foreach ($session in @($State.Sessions.Values)) {
+        if (($now - $session.LastSeen).TotalSeconds -lt $timeout) { continue }
+        if ($null -ne $session.GetChannel -and -not $session.GetChannel.Closed) { continue }
+        $busy = $false
+        foreach ($key in $State.InFlight.Keys) {
+            if (([string] $key).StartsWith($session.KeyPrefix, [System.StringComparison]::Ordinal) -and -not $State.InFlight[$key].Responded) { $busy = $true; break }
+        }
+        if ($busy) { continue }
+        Close-McpLegacySession -State $State -Session $session -Reason "expired after $timeout s without requests"
     }
 }
 
@@ -633,7 +846,11 @@ function Invoke-McpHttpAccept {
         return
     }
     if ($request.HttpMethod -cne 'POST') {
-        $null = Send-McpHttpStatus -State $State -Channel $channel -StatusCode 405 -Headers @{ Allow = 'POST' } -Json (New-McpHttpErrorJson -Code $invalidRequest -Message 'The MCP endpoint accepts POST only: revision 2026-07-28 has neither a GET stream nor sessions.')
+        if ($request.HttpMethod -cin @('GET', 'DELETE') -and -not [string]::IsNullOrWhiteSpace($request.Headers['Mcp-Session-Id']) -and (Test-McpHttpLegacy -State $State)) {
+            Invoke-McpHttpSessionRequest -State $State -Channel $channel
+            return
+        }
+        $null = Send-McpHttpStatus -State $State -Channel $channel -StatusCode 405 -Headers @{ Allow = 'POST' } -Json (New-McpHttpErrorJson -Code $invalidRequest -Message 'The MCP endpoint accepts POST only: revision 2026-07-28 has neither a GET stream nor sessions (a legacy session opens its GET stream with its Mcp-Session-Id).')
         return
     }
     $contentType = $request.ContentType
@@ -738,6 +955,7 @@ function Invoke-McpHttpDispatcherLoop {
         Send-McpOutboundQueue -State $State
         Update-McpInFlightRequest -State $State
         Update-McpHttpChannel -State $State
+        Update-McpHttpSession -State $State
         if ($State.Stopping) { break }
         if ($server.State.StopRequested) {
             if ($State.Listeners.Count -gt 0) { Close-McpAllListener -State $State }

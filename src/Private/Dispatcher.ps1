@@ -510,8 +510,10 @@ function Invoke-McpInboundRequest {
     $params = if ($Message.Contains('params')) { $Message['params'] } else { $null }
     $isHttp = $null -ne $Channel -and $Channel.Kind -eq 'Http'
     $era = Get-McpMessageEra -State $State -Method $method -Params $params -Session $Session -Http:$isHttp
-    # A modern-only server answers initialize with -32022 in the modern shape (the versions it supports).
-    if ($method -ceq 'initialize' -and @(Get-McpServerVersion -Server $server -Era Legacy).Count -eq 0) { $era = 'Modern' }
+    # A modern-only server answers the initialize of a legacy client with -32022 in the modern shape (the
+    # versions it supports); initialize with modern _meta is a modern request for a removed method (-32601).
+    $handshake = $method -ceq 'initialize' -and $era -eq 'Legacy'
+    if ($handshake -and @(Get-McpServerVersion -Server $server -Era Legacy).Count -eq 0) { $era = 'Modern' }
     if ($era -eq 'Legacy' -and $null -eq $Session -and -not $isHttp) { $Session = $State.LineSession }
     if ($isHttp) { $Channel.Era = $era }
     $reply = @{ State = $State; Channel = $Channel; Era = $era }
@@ -529,7 +531,7 @@ function Invoke-McpInboundRequest {
         return
     }
     try {
-        if ($method -ceq 'initialize') {
+        if ($handshake) {
             if ($null -ne $Session -or (-not $isHttp -and $null -ne $State.LineSession)) {
                 throw [McpProtocolException]::new($script:McpErrorCode.InvalidRequest, 'The session is already initialized.')
             }

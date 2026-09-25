@@ -13,7 +13,8 @@ Describe 'Era selection' {
 
     It 'chooses <Expected> for <Method> (session: <HasSession>, line session: <HasLineSession>, HTTP: <Http>, modern _meta: <Modern>)' -ForEach @(
         @{ Method = 'initialize'; HasSession = $false; HasLineSession = $false; Http = $false; Modern = $false; Expected = 'Legacy' }
-        @{ Method = 'initialize'; HasSession = $false; HasLineSession = $false; Http = $true; Modern = $true; Expected = 'Legacy' }
+        @{ Method = 'initialize'; HasSession = $false; HasLineSession = $false; Http = $true; Modern = $true; Expected = 'Modern' }
+        @{ Method = 'initialize'; HasSession = $false; HasLineSession = $false; Http = $true; Modern = $false; Expected = 'Legacy' }
         @{ Method = 'tools/list'; HasSession = $false; HasLineSession = $false; Http = $false; Modern = $true; Expected = 'Modern' }
         @{ Method = 'tools/list'; HasSession = $false; HasLineSession = $false; Http = $false; Modern = $false; Expected = 'Modern' }
         @{ Method = 'tools/list'; HasSession = $false; HasLineSession = $true; Http = $false; Modern = $false; Expected = 'Legacy' }

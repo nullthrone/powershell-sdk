@@ -46,8 +46,9 @@ function Get-McpMessageEra {
         The era of an inbound request: Legacy for initialize and for requests of an initialized legacy session, Modern otherwise.
     .DESCRIPTION
         Over Streamable HTTP the session is resolved from the Mcp-Session-Id header before (HttpServer.ps1) and
-        passed in. Over the line transports (stdio, in memory) a request whose _meta carries the modern protocol
-        version is modern; any other request belongs to the process-wide legacy session once one was opened.
+        passed in. Otherwise a request whose _meta carries the modern protocol version is modern, initialize
+        without it opens a legacy session, and over the line transports (stdio, in memory) any other request
+        belongs to the process-wide legacy session once one was opened.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -67,12 +68,14 @@ function Get-McpMessageEra {
         [switch] $Http
     )
 
-    if ($Method -ceq 'initialize') { return 'Legacy' }
     if ($null -ne $Session) { return 'Legacy' }
-    if ($Http) { return 'Modern' }
+    # The per-request _meta of revision 2026-07-28 makes a request modern, also initialize (a modern client
+    # probing for the removed method gets -32601); legacy clients never send it.
     if ($Params -is [System.Collections.IDictionary] -and $Params['_meta'] -is [System.Collections.IDictionary] -and $Params['_meta'].Contains($script:McpMetaKey.ProtocolVersion)) {
         return 'Modern'
     }
+    if ($Method -ceq 'initialize') { return 'Legacy' }
+    if ($Http) { return 'Modern' }
     if ($null -ne $State.LineSession) { return 'Legacy' }
     'Modern'
 }
