@@ -4,7 +4,7 @@ PowerShell SDK for building and consuming [Model Context Protocol](https://model
 and clients, targeting specification revision **2026-07-28** with dual-era support for 2025-11-25 and
 2025-06-18.
 
-> **Status: milestone M4 (input requests and subscriptions).** Servers expose PowerShell functions, cmdlets,
+> **Status: milestone M5 (dual era).** Servers expose PowerShell functions, cmdlets,
 > scripts and script blocks as tools, resources (fixed content, files, directories, handlers, RFC 6570
 > templates) and prompts, with argument completion and caching hints, over stdio and Streamable HTTP with the
 > stateless 2026-07-28 lifecycle (`server/discover`, per-request `_meta`, request metadata headers, progress,
@@ -12,9 +12,13 @@ and clients, targeting specification revision **2026-07-28** with dual-era suppo
 > and roots through multi-round-trip requests with a signed `requestState`; clients subscribe to list changes
 > and resource updates with `subscriptions/listen`, and tools, resources and prompts can be registered while
 > the server runs. The client side consumes all of it over both transports and caches results for the
-> `ttlMs` the server sends. The official conformance suite runs in CI: every 2026-07-28 server scenario
-> passes, and on the client side everything but authorization, which is listed in
-> [conformance-baseline.yml](conformance-baseline.yml) and follows in M6. The milestones are in
+> `ttlMs` the server sends. Both sides also speak the `initialize` handshake of 2025-11-25 and 2025-06-18:
+> a server serves both eras on the same process and endpoint (legacy sessions with `Mcp-Session-Id`, GET
+> stream, DELETE, server-initiated elicitation, sampling and roots requests), a client detects the era of the
+> server and falls back to the handshake. The official conformance suite runs in CI for both requirement
+> sets: every server scenario of 2026-07-28 and 2025-11-25 passes, and on the client side everything but
+> authorization, which is listed in [conformance-baseline.yml](conformance-baseline.yml) and follows in M6.
+> The milestones are in
 > [ROADMAP.md](ROADMAP.md); the design is in [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Requirements

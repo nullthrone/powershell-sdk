@@ -178,6 +178,9 @@ function Invoke-McpInputRequest {
     <#
     .SYNOPSIS
         The answer to an input request when the client sent it; otherwise records the request and, unless deferred, throws McpInputRequiredException.
+    .DESCRIPTION
+        In a legacy session the request is sent to the client as a server-initiated request and the answer
+        returned at once, also with -Defer (Wait-McpInput then has nothing left to wait for).
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.IDictionary])]
@@ -204,6 +207,10 @@ function Invoke-McpInputRequest {
         return $response
     }
     foreach ($required in $Capability) { Assert-McpInputCapability -Context $Context -Capability $required }
+    if ($Context.Era -eq 'Legacy') {
+        # A legacy session has no input rounds: the request goes to the client now and the handler waits.
+        return Invoke-McpLegacyInputRequest -Context $Context -Key $Key -Request $Request
+    }
     $Context.PendingInput[$Key] = $Request
     if (-not $Defer) {
         throw [McpInputRequiredException]::new($Context.PendingInput)

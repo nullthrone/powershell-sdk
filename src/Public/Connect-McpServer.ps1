@@ -8,8 +8,16 @@ function Connect-McpServer {
         with the request metadata headers of revision 2026-07-28 (MCP-Protocol-Version, Mcp-Method, Mcp-Name,
         Mcp-Param-*); responses arrive as JSON or as a request-scoped SSE stream. The session probes the server
         with server/discover, selects a protocol version from the server's supported versions and caches the
-        server info. Servers that only speak the initialize handshake of earlier revisions are not supported by
-        this milestone.
+        server info.
+
+        Servers of the earlier revisions (2025-11-25, 2025-06-18, 2025-03-26) are detected by the probe (-Era
+        Auto): an answer that is neither a DiscoverResult nor one of the errors only revision 2026-07-28 has
+        (-32020, -32021, -32022), or no answer within five seconds, makes the session speak their initialize
+        handshake instead. Such a legacy session negotiates version and capabilities once, sends
+        Mcp-Session-Id over HTTP, answers the server's elicitation, sampling and roots requests with the same
+        callbacks as input requests, resumes an interrupted response stream with GET and Last-Event-ID, and
+        sends DELETE on disconnect. The era of an HTTP endpoint is remembered for later connections of this
+        process; the session's Era property tells which one was chosen.
 
         With -Server, the given server object runs in a background runspace of this process over an in-memory
         transport: the way to test a server without a child process.
@@ -53,7 +61,11 @@ function Connect-McpServer {
     .PARAMETER MaxInputRounds
         The maximum number of input rounds of one request before it fails (default: 10).
     .PARAMETER ProtocolVersion
-        The preferred protocol version (default: 2026-07-28).
+        The preferred protocol version (default: 2026-07-28). A legacy version (2025-11-25, 2025-06-18) is the
+        version requested in initialize when the server turns out to be a legacy one.
+    .PARAMETER Era
+        Auto (default) detects the server's era; Modern only speaks revision 2026-07-28; Legacy skips the probe
+        and starts with initialize.
     .PARAMETER RequestTimeoutSeconds
         The default timeout for requests (default: 60).
     .PARAMETER ConnectTimeoutSeconds
@@ -123,6 +135,9 @@ function Connect-McpServer {
         [ValidateNotNullOrEmpty()]
         [string] $ProtocolVersion = '2026-07-28',
 
+        [ValidateSet('Auto', 'Modern', 'Legacy')]
+        [string] $Era = 'Auto',
+
         [ValidateRange(1, 86400)]
         [int] $RequestTimeoutSeconds = 60,
 
@@ -171,77 +186,59 @@ function Connect-McpServer {
         $stderrPath = $transport.StandardErrorPath
     }
 
+    $legacyRequested = $ProtocolVersion -in $script:McpClientLegacyVersions
+    if ($legacyRequested -and $Era -eq 'Modern') {
+        throw [System.ArgumentException]::new("-ProtocolVersion $ProtocolVersion is a legacy revision; it cannot be used with -Era Modern.")
+    }
+    $modernVersion = if ($legacyRequested) { $script:McpLatestProtocolVersion } else { $ProtocolVersion }
     $session = [pscustomobject]@{
-        PSTypeName         = 'Mcp.Session'
-        Name               = $null
-        Kind               = $transport.Kind
-        Endpoint           = $target
-        Transport          = $transport
-        Background         = $background
-        ClientInfo         = $clientInfoObject
-        ClientCapabilities = $capabilityObject
-        ProtocolVersion    = $ProtocolVersion
-        Era                = 'Modern'
-        ServerInfo         = $null
-        Tools              = $null
-        ToolHeaders        = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
-        Cache              = [hashtable]::new([System.StringComparer]::Ordinal)
-        NextId             = 1
-        RequestTimeoutMs   = $RequestTimeoutSeconds * 1000
-        LogLevel           = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $null }
-        OnLog              = $OnLog
-        OnElicitation      = $OnElicitation
-        OnSampling         = $OnSampling
-        OnRoots            = $OnRoots
-        MaxInputRounds     = $MaxInputRounds
-        Log                = [System.Collections.Generic.List[object]]::new()
-        Notifications      = [System.Collections.Generic.Queue[object]]::new()
-        Subscriptions      = [ordered]@{}
-        SubscriptionIds    = @{}
-        Inbox              = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
-        PendingEvents      = [System.Collections.Generic.List[object]]::new()
-        StandardErrorPath  = $stderrPath
-        Closed             = $false
+        PSTypeName             = 'Mcp.Session'
+        Name                   = $null
+        Kind                   = $transport.Kind
+        Endpoint               = $target
+        Transport              = $transport
+        Background             = $background
+        ClientInfo             = $clientInfoObject
+        ClientCapabilities     = $capabilityObject
+        ProtocolVersion        = $modernVersion
+        Era                    = if ($Era -eq 'Legacy') { 'Legacy' } else { 'Modern' }
+        # Legacy sessions: the Mcp-Session-Id of HTTP, the InitializeResult, the log level set with
+        # logging/setLevel, the background reader of the GET stream, and the versions preferred per era.
+        SessionId              = $null
+        InitializeResult       = $null
+        LegacyLogLevel         = $null
+        LegacyStream           = $null
+        LegacyInbox            = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        PreferredLegacyVersion = if ($legacyRequested) { $ProtocolVersion } else { $null }
+        PreferredModernVersion = $modernVersion
+        ServerInfo             = $null
+        Tools                  = $null
+        ToolHeaders            = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+        Cache                  = [hashtable]::new([System.StringComparer]::Ordinal)
+        NextId                 = 1
+        RequestTimeoutMs       = $RequestTimeoutSeconds * 1000
+        LogLevel               = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $null }
+        OnLog                  = $OnLog
+        OnElicitation          = $OnElicitation
+        OnSampling             = $OnSampling
+        OnRoots                = $OnRoots
+        MaxInputRounds         = $MaxInputRounds
+        Log                    = [System.Collections.Generic.List[object]]::new()
+        Notifications          = [System.Collections.Generic.Queue[object]]::new()
+        Subscriptions          = [ordered]@{}
+        SubscriptionIds        = @{}
+        Inbox                  = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+        PendingEvents          = [System.Collections.Generic.List[object]]::new()
+        StandardErrorPath      = $stderrPath
+        Closed                 = $false
     }
 
     try {
-        $discover = $null
-        try {
-            $discover = Invoke-McpClientRequest -Session $session -Method 'server/discover' -TimeoutMs ($ConnectTimeoutSeconds * 1000)
-        } catch [McpProtocolException] {
-            $exception = $_.Exception
-            if ($exception.Code -eq $script:McpErrorCode.UnsupportedProtocolVersion -and $exception.Data -is [System.Collections.IDictionary] -and $exception.Data.Contains('supported')) {
-                $mutual = @($exception.Data['supported'] | Where-Object { $_ -in $script:McpModernProtocolVersions })
-                if ($mutual.Count -eq 0) {
-                    throw [System.InvalidOperationException]::new("The server supports protocol version(s) $(@($exception.Data['supported']) -join ', '), none of which this client speaks ($($script:McpModernProtocolVersions -join ', ')).")
-                }
-                $session.ProtocolVersion = $mutual[0]
-                $discover = Invoke-McpClientRequest -Session $session -Method 'server/discover' -TimeoutMs ($ConnectTimeoutSeconds * 1000)
-            } else {
-                throw [System.InvalidOperationException]::new("server/discover failed with $($exception.Code): $($exception.Message). Servers that only implement the initialize handshake of revisions before 2026-07-28 are not supported by this milestone.")
-            }
-        } catch [System.Net.Http.HttpRequestException] {
-            throw [System.InvalidOperationException]::new("server/discover at $Url failed: $($_.Exception.Message) A response without a JSON-RPC error body indicates a server of a revision before 2026-07-28; its initialize handshake is not supported by this milestone.", $_.Exception)
-        }
-        if ($discover -isnot [System.Collections.IDictionary] -or -not $discover.Contains('supportedVersions')) {
-            throw [System.InvalidOperationException]::new('The server/discover result is not a DiscoverResult.')
-        }
-        $supported = @($discover['supportedVersions'])
-        if ($session.ProtocolVersion -notin $supported) {
-            $mutual = @($supported | Where-Object { $_ -in $script:McpModernProtocolVersions })
-            if ($mutual.Count -eq 0) {
-                throw [System.InvalidOperationException]::new("The server supports protocol version(s) $($supported -join ', '), none of which this client speaks.")
-            }
-            $session.ProtocolVersion = $mutual[0]
-        }
-        $session.ServerInfo = ConvertTo-McpServerInfoObject -DiscoverResult $discover -ProtocolVersion $session.ProtocolVersion
-        $session.Name = $session.ServerInfo.Name
-        Set-McpClientCacheEntry -Session $session -Key 'server/discover' -Value $session.ServerInfo -CacheHint (Get-McpResultCacheHint -Result $discover)
+        Initialize-McpClientSession -Session $session -Era $Era -ConnectTimeoutMs ($ConnectTimeoutSeconds * 1000)
     } catch {
         try { Disconnect-McpServer -Session $session -Confirm:$false } catch { Write-Debug 'Cleanup after a failed connection failed.' }
         throw
     }
-
     if ($SetDefault -or $null -eq $script:McpDefaultSession -or $script:McpDefaultSession.Closed) {
         $script:McpDefaultSession = $session
     }

@@ -175,7 +175,7 @@ function Get-McpResourceTemplateListResult {
 function New-McpResourceNotFoundException {
     <#
     .SYNOPSIS
-        The error for a URI that names no resource: -32602 with the URI in data (SEP-2164).
+        The error for a URI that names no resource: -32602 with the URI in data (SEP-2164); -32002 in the legacy revisions.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Creates an exception object.')]
     [CmdletBinding()]
@@ -186,7 +186,7 @@ function New-McpResourceNotFoundException {
         [string] $Uri
     )
 
-    [McpProtocolException]::new($script:McpErrorCode.InvalidParams, 'Resource not found', [ordered]@{ uri = $Uri })
+    [McpResourceNotFoundException]::new($Uri)
 }
 
 function Resolve-McpResourceRequest {

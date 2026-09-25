@@ -31,6 +31,9 @@ function Disconnect-McpServer {
     foreach ($subscription in @($target.Subscriptions.Values)) {
         try { Close-McpClientSubscription -Session $target -Subscription $subscription } catch { Write-Debug "Closing subscription $($subscription.Id) failed." }
     }
+    if ($target.Era -eq 'Legacy') {
+        try { Close-McpLegacyClientSession -Session $target } catch { Write-Debug "Ending the legacy session failed: $($_.Exception.Message)" }
+    }
     $target.Closed = $true
     Stop-McpTransportPump -Transport $target.Transport
     Close-McpTransport -Transport $target.Transport -ExitTimeoutSeconds $ExitTimeoutSeconds

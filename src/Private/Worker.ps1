@@ -29,7 +29,7 @@ function New-McpRequestContext {
         Method             = $Envelope.Method
         Name               = $Envelope.Name
         ToolName           = if ($Envelope.Kind -eq 'Tool') { $Envelope.Name } else { $null }
-        Era                = 'Modern'
+        Era                = if ($Envelope.Era) { $Envelope.Era } else { 'Modern' }
         ProtocolVersion    = $meta.ProtocolVersion
         ClientInfo         = $meta.ClientInfo
         ClientCapabilities = $meta.ClientCapabilities
@@ -39,6 +39,8 @@ function New-McpRequestContext {
         Sink               = $Envelope.Sink
         ServerName         = $Envelope.ServerName
         ServerLogLevel     = $Envelope.ServerLogLevel
+        # Legacy sessions: the table of open server-initiated requests and their timeout.
+        Legacy             = $Envelope.Legacy
         ProgressState      = @{ Last = $null }
         # Multi-round-trip requests: the answers of this and earlier rounds, the requests of this round, the
         # answers the handler accepted, and handler state that survives the rounds (in the signed requestState).
@@ -78,7 +80,8 @@ function Send-McpSinkMessage {
         [object] $ErrorCode
     )
 
-    $Sink.Queue.Enqueue(@{ Kind = $Kind; RequestId = $RequestId; Json = $Json; ErrorCode = $ErrorCode })
+    # KeyPrefix: requests of a legacy session are keyed per session (request ids are unique per session only).
+    $Sink.Queue.Enqueue(@{ Kind = $Kind; RequestId = $RequestId; KeyPrefix = $Sink.KeyPrefix; Json = $Json; ErrorCode = $ErrorCode })
     $null = $Sink.Signal.Set()
 }
 
@@ -147,6 +150,7 @@ function Invoke-McpWorkerRequest {
             $meta[$script:McpMetaKey.ServerInfo] = $Envelope.ServerInfo
             $result['_meta'] = $meta
         }
+        if ($context.Era -eq 'Legacy') { $result = ConvertTo-McpLegacyResult -Result $result }
         $response = New-McpResultResponse -Id $Envelope.RequestId -Result $result
     } catch [System.Management.Automation.PipelineStoppedException] {
         throw
@@ -163,7 +167,7 @@ function Invoke-McpWorkerRequest {
             Send-McpSinkMessage -Sink $Envelope.Sink -Kind Response -RequestId $Envelope.RequestId -Json (ConvertTo-McpJson -InputObject (New-McpResultResponse -Id $Envelope.RequestId -Result $result))
             return
         }
-        $errorObject = ConvertTo-McpErrorObject -Exception $exception
+        $errorObject = ConvertTo-McpErrorObject -Exception $exception -Era $context.Era
         $errorCode = $errorObject['code']
         $response = New-McpErrorResponse -Id $Envelope.RequestId -ErrorObject $errorObject
     }

@@ -14,7 +14,7 @@ param(
     [string[]] $TestTag,
     [string[]] $ExcludeTestTag,
     [string] $OutputDirectory = (Join-Path $PSScriptRoot 'output'),
-    [string[]] $ConformanceRequirements = @('2026-07-28'),
+    [string[]] $ConformanceRequirements = @('2026-07-28', '2025-11-25'),
     [string[]] $ConformanceLeg,
     [string] $ConformanceScenario
 )
@@ -371,7 +371,8 @@ function Start-ConformanceServer {
     $probe.Stop()
     $pwsh = (Get-Process -Id $PID).Path
     $script = Join-Path $script:TestsPath 'Conformance' 'everything-server.ps1'
-    $process = Start-Process -FilePath $pwsh -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script, '-Port', $port) -RedirectStandardError $LogPath -PassThru -NoNewWindow
+    # The dual-era fixture serves both requirement sets: 2026-07-28 statelessly, 2025-11-25 in legacy sessions.
+    $process = Start-Process -FilePath $pwsh -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script, '-Era', 'Dual', '-Port', $port) -RedirectStandardError $LogPath -PassThru -NoNewWindow
     $deadline = [datetime]::UtcNow.AddSeconds(60)
     while ([datetime]::UtcNow -lt $deadline) {
         if ($process.HasExited) { throw "The conformance server exited with code $($process.ExitCode); see $LogPath." }

@@ -211,15 +211,14 @@ Describe 'Raw Streamable HTTP behaviour' -Tag 'Integration' {
         $noMeta.Status | Should -Be 400
         $noMeta.Json['error']['code'] | Should -Be -32602
         $noMeta.Json['id'] | Should -Be 3
+        # Methods of the legacy revisions exist only in a legacy session: a modern request (with _meta) for them,
+        # initialize included, is a request for a removed method.
         foreach ($method in 'initialize', 'ping', 'logging/setLevel', 'resources/subscribe', 'nothing/here') {
             $response = Send-Raw -Body "{`"jsonrpc`":`"2.0`",`"id`":4,`"method`":`"$method`",`"params`":{$($script:meta)}}" -Headers @{ 'Mcp-Method' = $method }
             $response.Status | Should -Be 404
             $response.Json['error']['code'] | Should -Be -32601
             $response.Json['id'] | Should -Be 4
         }
-        $legacy = Send-Raw -Body '{"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"old","version":"1"}}}' -NoVersion
-        $legacy.Status | Should -Be 404
-        $legacy.Json['error']['message'] | Should -Match '2026-07-28'
     }
 
     It 'validates Mcp-Name for tools/call including whitespace and the Base64 sentinel' {
