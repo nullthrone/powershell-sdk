@@ -173,7 +173,7 @@ Describe 'Compatibility matrix' -Tag 'Integration' {
 Describe 'Legacy sessions of the client over Streamable HTTP' -Tag 'Integration' {
     BeforeAll {
         $script:httpServer = New-TestServer -SupportedVersions '2025-11-25' -Name 'legacy-http'
-        $script:handle = Start-McpTestHttpServer -Server $script:httpServer -Parameters @{ KeepAliveSeconds = 1; SessionIdleTimeoutSeconds = 2 }
+        $script:handle = Start-McpTestHttpServer -Server $script:httpServer -Parameters @{ KeepAliveSeconds = 1 }
     }
 
     AfterAll {
@@ -200,9 +200,13 @@ Describe 'Legacy sessions of the client over Streamable HTTP' -Tag 'Integration'
     It 'receives notifications on the GET stream of the session' {
         $session = Connect-McpServer -Url $script:handle.Url -ConnectTimeoutSeconds 10
         try {
+            # The session opened its GET stream after initialize.
             $subscription = Register-McpSubscription -ToolsListChanged -Session $session
             $deadline = [datetime]::UtcNow.AddSeconds(10)
-            while ($session.LegacyStream.Status -ne 'Open' -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+            while ($session.LegacyStream.Status -ne 'Open' -and [datetime]::UtcNow -lt $deadline) {
+                Invoke-McpInModule { param($s) Invoke-McpLegacyInbox -Session $s } $session
+                Start-Sleep -Milliseconds 50
+            }
             $session.LegacyStream.Status | Should -Be 'Open'
             $null = Send-McpToolListChanged -Server $script:httpServer
             (Receive-McpNotification -Subscription $subscription -TimeoutSeconds 10).Method | Should -Be 'notifications/tools/list_changed'
@@ -215,7 +219,8 @@ Describe 'Legacy sessions of the client over Streamable HTTP' -Tag 'Integration'
         $session = Connect-McpServer -Url $script:handle.Url -ConnectTimeoutSeconds 10
         try {
             $first = $session.SessionId
-            Start-Sleep -Seconds 4
+            # The server ends the session (as after an expiry): the next request gets 404.
+            (Invoke-McpRawHttp -Url $script:handle.Url -Method DELETE -Body $null -Headers @{ 'Mcp-Session-Id' = $first }).Status | Should -Be 200
             (Invoke-McpTool -Name 'echo' -Arguments @{ Text = 'again' } -Session $session).Text | Should -Be 'again'
             $session.SessionId | Should -Not -Be $first
         } finally {

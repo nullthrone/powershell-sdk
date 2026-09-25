@@ -2,7 +2,8 @@
 # memory, the modern POST whose answer is inspected over Streamable HTTP), the initialize handshake with the
 # servers of 2025-11-25, 2025-06-18 and 2025-03-26, answers to server-initiated requests (elicitation, sampling
 # and roots through the session's callbacks, ping), resumption of an interrupted SSE response stream with GET
-# and Last-Event-ID, the session's GET stream, and DELETE when the session ends. The request path in
+# and Last-Event-ID, the session's GET stream (read without blocking on the caller's thread whenever a client
+# command runs or waits for a response), and DELETE when the session ends. The request path in
 # Client.ps1 and HttpClient.ps1 consults Session.Era for the per-request metadata and headers.
 
 # The era of HTTP endpoints this process has talked to (keyed by URL), so that a second connection to a legacy
@@ -180,6 +181,7 @@ function Initialize-McpLegacyClient {
     )
 
     $requested = if ($Session.PreferredLegacyVersion) { $Session.PreferredLegacyVersion } else { $script:McpClientLegacyVersions[0] }
+    Stop-McpLegacyClientStream -Session $Session
     $Session.Era = 'Legacy'
     $Session.SessionId = $null
     $Session.InitializeResult = $null
@@ -202,6 +204,8 @@ function Initialize-McpLegacyClient {
     $Session.ServerInfo = ConvertTo-McpLegacyServerInfoObject -InitializeResult $result
     $Session.Name = $Session.ServerInfo.Name
     Send-McpClientNotification -Session $Session -Method 'notifications/initialized'
+    # Servers send unsolicited notifications and requests that belong to no client request on the GET stream.
+    if ($Session.Kind -eq 'Http') { Start-McpLegacyClientStream -Session $Session }
     $Session.LegacyLogLevel = $null
     if ($null -ne $Session.LogLevel) { Set-McpLegacyClientLogLevel -Session $Session -Level $Session.LogLevel }
 }
@@ -367,74 +371,12 @@ function Send-McpLegacyNotificationToSubscription {
     }
 }
 
-function Invoke-McpHttpLegacyStreamLoop {
-    <#
-    .SYNOPSIS
-        Background loop of the GET stream of a legacy session: reads its events into the session inbox, reconnecting with Last-Event-ID; ends when the server refuses the stream (405).
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [pscustomobject] $Session,
-
-        [Parameter(Mandatory)]
-        [hashtable] $Stream
-    )
-
-    $inbox = $Session.Inbox
-    $attempt = 0
-    $lastEventId = $null
-    while (-not $Stream.StopRequested) {
-        $message = New-McpHttpGetMessage -Session $Session -LastEventId $lastEventId
-        $response = $null
-        try {
-            $sendTask = $Session.Transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $Stream.Cts.Token)
-            while (-not $sendTask.IsCompleted -and -not $Stream.StopRequested) { $null = $sendTask.Wait(250) }
-            if ($Stream.StopRequested) { break }
-            $failure = Get-McpTaskFailure -Task $sendTask
-            if ($null -ne $failure) { throw $failure }
-            $response = $sendTask.Result
-            $mediaType = if ($null -ne $response.Content.Headers.ContentType) { $response.Content.Headers.ContentType.MediaType } else { $null }
-            if (-not $response.IsSuccessStatusCode -or $mediaType -ne 'text/event-stream') {
-                $Stream.Status = "HTTP $([int] $response.StatusCode)"
-                break
-            }
-            $Stream.Status = 'Open'
-            $sse = New-McpSseReader -Stream ($response.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
-            try {
-                while (-not $Stream.StopRequested) {
-                    $received = Receive-McpSseEvent -Sse $sse -TimeoutMs 250
-                    if ($received.Status -eq 'Timeout') { continue }
-                    if ($received.Status -eq 'Eof') { break }
-                    if ($null -ne $received.Id) { $lastEventId = $received.Id }
-                    if ([string]::IsNullOrWhiteSpace($received.Data) -or ($null -ne $received.Event -and $received.Event -ne 'message')) { continue }
-                    $attempt = 0
-                    $inbox.Enqueue(@{ Kind = 'Legacy'; Json = $received.Data })
-                }
-            } finally {
-                try { $sse.Reader.Dispose() } catch { Write-Debug 'Disposing the SSE reader failed.' }
-            }
-        } catch {
-            $Stream.Status = "failed: $($_.Exception.Message)"
-        } finally {
-            if ($null -ne $response) { try { $response.Dispose() } catch { Write-Debug 'Disposing the GET response failed.' } }
-            $message.Dispose()
-        }
-        if ($Stream.StopRequested) { break }
-        $attempt++
-        if ($attempt -gt 5) { break }
-        $until = [datetime]::UtcNow.AddSeconds([math]::Min(16, [math]::Pow(2, $attempt - 1)))
-        while ([datetime]::UtcNow -lt $until -and -not $Stream.StopRequested) { Start-Sleep -Milliseconds 100 }
-    }
-    if ($Stream.Status -eq 'Open') { $Stream.Status = 'Closed' }
-}
-
 function Start-McpLegacyClientStream {
     <#
     .SYNOPSIS
-        Opens the GET stream of a legacy HTTP session in the background (once per session).
+        Opens the GET stream of a legacy HTTP session (once per session); it is read on the caller's thread by Update-McpLegacyClientStream.
     #>
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal background reader.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal stream bookkeeping.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -442,13 +384,136 @@ function Start-McpLegacyClientStream {
     )
 
     if ($Session.Kind -ne 'Http' -or $null -ne $Session.LegacyStream) { return }
-    $stream = @{ StopRequested = $false; Cts = [System.Threading.CancellationTokenSource]::new(); Status = 'Opening'; Reader = $null }
-    $stream.Reader = New-McpClientBackgroundRunspace -FunctionName 'Invoke-McpHttpLegacyStreamLoop' -Parameters @{ Session = $Session; Stream = $stream }
-    $Session.LegacyStream = $stream
+    $Session.LegacyStream = @{
+        Cts         = [System.Threading.CancellationTokenSource]::new()
+        Message     = $null
+        Pending     = $null
+        Response    = $null
+        Sse         = $null
+        Status      = 'Opening'
+        LastEventId = $null
+        Attempts    = 0
+        RetryAt     = [datetime]::MinValue
+    }
+    Open-McpLegacyClientStreamRequest -Session $Session
+}
+
+function Open-McpLegacyClientStreamRequest {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal stream bookkeeping.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session
+    )
+
+    $stream = $Session.LegacyStream
+    $stream.Message = New-McpHttpGetMessage -Session $Session -LastEventId $stream.LastEventId
+    $stream.Pending = $Session.Transport.Client.SendAsync($stream.Message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $stream.Cts.Token)
+}
+
+function Close-McpLegacyClientStreamResponse {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $Stream
+    )
+
+    if ($null -ne $Stream.Sse) { try { $Stream.Sse.Reader.Dispose() } catch { Write-Debug 'Disposing the SSE reader failed.' } }
+    if ($null -ne $Stream.Response) { try { $Stream.Response.Dispose() } catch { Write-Debug 'Disposing the GET response failed.' } }
+    if ($null -ne $Stream.Message) { try { $Stream.Message.Dispose() } catch { Write-Debug 'Disposing the GET request failed.' } }
+    $Stream.Sse = $null
+    $Stream.Response = $null
+    $Stream.Message = $null
+    $Stream.Pending = $null
+}
+
+function Update-McpLegacyClientStream {
+    <#
+    .SYNOPSIS
+        Reads what the GET stream of a legacy session has received so far into the session's legacy inbox, without blocking; reconnects with Last-Event-ID after an abrupt end.
+    .DESCRIPTION
+        A refusal (405 or another error status) ends the stream for the session: the server offers none.
+        An abrupt end is retried with the announced retry time or a backoff of 1, 2, 4, 8 and 16 seconds.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal stream bookkeeping.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session
+    )
+
+    $stream = $Session.LegacyStream
+    if ($null -eq $stream -or $stream.Status -in @('Refused', 'Failed', 'Stopped')) { return }
+    if ($null -eq $stream.Pending -and $null -eq $stream.Sse) {
+        if ([datetime]::UtcNow -lt $stream.RetryAt) { return }
+        Open-McpLegacyClientStreamRequest -Session $Session
+    }
+    if ($null -ne $stream.Pending -and $null -eq $stream.Response) {
+        if (-not $stream.Pending.IsCompleted) { return }
+        $failure = Get-McpTaskFailure -Task $stream.Pending
+        if ($null -eq $failure) {
+            $stream.Response = $stream.Pending.Result
+            $mediaType = if ($null -ne $stream.Response.Content.Headers.ContentType) { $stream.Response.Content.Headers.ContentType.MediaType } else { $null }
+            if (-not $stream.Response.IsSuccessStatusCode -or $mediaType -ne 'text/event-stream') {
+                Write-Verbose "The server offers no GET stream for session $($Session.SessionId) (HTTP $([int] $stream.Response.StatusCode))."
+                Close-McpLegacyClientStreamResponse -Stream $stream
+                $stream.Status = 'Refused'
+                return
+            }
+            $stream.Sse = New-McpSseReader -Stream ($stream.Response.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+            $stream.Status = 'Open'
+        } else {
+            Close-McpLegacyClientStreamResponse -Stream $stream
+            $stream.Attempts++
+            if ($stream.Attempts -gt 5) { $stream.Status = 'Failed'; return }
+            $stream.RetryAt = [datetime]::UtcNow.AddSeconds([math]::Min(16, [math]::Pow(2, $stream.Attempts - 1)))
+            return
+        }
+    }
+    while ($null -ne $stream.Sse) {
+        $received = Receive-McpSseEvent -Sse $stream.Sse -TimeoutMs 1
+        if ($received.Status -eq 'Timeout') { return }
+        if ($received.Status -eq 'Eof') {
+            if ($null -ne $stream.Sse.LastEventId) { $stream.LastEventId = $stream.Sse.LastEventId }
+            $retry = $stream.Sse.Retry
+            Close-McpLegacyClientStreamResponse -Stream $stream
+            $stream.Attempts++
+            if ($stream.Attempts -gt 5) { $stream.Status = 'Failed'; return }
+            $stream.Status = 'Reconnecting'
+            $delay = if ($null -ne $retry) { [double] $retry } else { 1000 * [math]::Min(16, [math]::Pow(2, $stream.Attempts - 1)) }
+            $stream.RetryAt = [datetime]::UtcNow.AddMilliseconds($delay)
+            return
+        }
+        if ($null -ne $received.Id) { $stream.LastEventId = $received.Id }
+        if ([string]::IsNullOrWhiteSpace($received.Data) -or ($null -ne $received.Event -and $received.Event -ne 'message')) { continue }
+        $stream.Attempts = 0
+        $Session.LegacyInbox.Enqueue($received.Data)
+    }
+}
+
+function Invoke-McpLegacyInbox {
+    <#
+    .SYNOPSIS
+        Handles what the GET stream of a legacy session received: answers the server's requests and dispatches its notifications (also while a request of the session is pending).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject] $Session
+    )
+
+    if ($null -eq $Session.LegacyInbox) { return }
+    Update-McpLegacyClientStream -Session $Session
+    $json = $null
+    while ($Session.LegacyInbox.TryDequeue([ref] $json)) {
+        $message = $null
+        try { $message = ConvertFrom-McpJson -Json $json } catch { $message = $null }
+        if ($message -is [System.Collections.IDictionary]) { Invoke-McpClientStrayMessage -Session $Session -Message $message }
+    }
 }
 
 function Stop-McpLegacyClientStream {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal background reader.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal stream bookkeeping.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -457,10 +522,10 @@ function Stop-McpLegacyClientStream {
 
     $stream = $Session.LegacyStream
     if ($null -eq $stream) { return }
-    $stream.StopRequested = $true
     try { $stream.Cts.Cancel() } catch { Write-Debug 'Cancelling the GET stream failed.' }
-    Stop-McpClientBackgroundRunspace -Background $stream.Reader -TimeoutMs 5000
+    Close-McpLegacyClientStreamResponse -Stream $stream
     try { $stream.Cts.Dispose() } catch { Write-Debug 'Disposing the token source failed.' }
+    $stream.Status = 'Stopped'
     $Session.LegacyStream = $null
 }
 

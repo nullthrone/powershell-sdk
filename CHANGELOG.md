@@ -11,6 +11,34 @@ support, dependency and breaking-change policy.
 
 ### Added
 
+- Milestone M5 (dual era): a server serves the `initialize` handshake of revisions 2025-11-25 and 2025-06-18
+  (and 2025-03-26 as a version string) next to the stateless 2026-07-28 core on the same process and endpoint.
+  `New-McpServer -SupportedVersions` now defaults to `2026-07-28, 2025-11-25, 2025-06-18`; the era of every
+  request is chosen from its `_meta` and its session. A legacy session negotiates version and capabilities
+  in `initialize`, answers `ping`, `logging/setLevel` (session-wide log notifications),
+  `resources/subscribe` and `resources/unsubscribe`, sends list changes and resource updates unsolicited,
+  and its results carry no `resultType`, `ttlMs` or `cacheScope` (unknown resources are `-32002`).
+- In a legacy session `Request-McpElicitation`, `Request-McpSampling` and `Request-McpRoot` send
+  server-initiated requests and wait for the answer, so handlers are era-agnostic.
+- Streamable HTTP legacy sessions: `Mcp-Session-Id` from `initialize`, the GET stream of a session, DELETE,
+  404 for unknown or expired sessions, JSON-RPC errors of a session with status 200, responses to
+  server-initiated requests accepted with 202; `Start-McpServer -SessionIdleTimeoutSeconds` and
+  `-MaxSessions` bound the sessions.
+- Client: `Connect-McpServer -Era Auto|Modern|Legacy` (default Auto) detects the server's era with the
+  `server/discover` probe and falls back to `initialize`; the era of an HTTP endpoint is remembered. Legacy
+  sessions send `Mcp-Session-Id` and the negotiated `MCP-Protocol-Version`, answer the server's elicitation,
+  sampling, roots and ping requests with the `-OnElicitation`, `-OnSampling` and `-OnRoots` callbacks (on
+  stdio, response streams and the session's GET stream), map `Register-McpSubscription` to unsolicited
+  notifications and `resources/subscribe`, start a new session after HTTP 404, resume a response stream that
+  ends before its response with GET and `Last-Event-ID` after the announced retry time, and send DELETE on
+  disconnect. `Set-McpLogLevel` sets the log level in both eras (`logging/setLevel` in a legacy session).
+- Conformance: the fixture server serves both requirement sets as one dual-era instance (new tools
+  `test_tool_with_logging`, `test_sampling`, `test_elicitation`, `test_elicitation_sep1034_defaults`,
+  `test_elicitation_sep1330_enums`, `test_reconnection` and the resource `test://watched-resource`); the
+  fixture client detects the era and fills forms from schema defaults; the `Conformance` task and workflow
+  run the 2026-07-28 and 2025-11-25 requirement sets. All 30 scored server scenarios of 2025-11-25 pass; the
+  client baseline still holds only the authorization scenarios.
+
 - Milestone M4 (multi-round-trip requests and subscriptions): handlers ask for input with
   `Request-McpElicitation` (form mode with the flat primitive schema subset, or URL mode),
   `Request-McpSampling` and `Request-McpRoot`; the request is answered with an `InputRequiredResult`, and on
@@ -119,6 +147,13 @@ support, dependency and breaking-change policy.
   dry run and gated PowerShell Gallery publish; label sync; issue and pull request templates; Dependabot.
 - Governance: roadmap, dependency and support policy, security policy, contributing guide, code of conduct,
   conformance baseline file, documentation skeleton.
+
+### Changed
+
+- A modern-only server answers `initialize` with `-32022` and the versions it supports instead of `-32601`;
+  `initialize` with the per-request `_meta` of 2026-07-28 is a request for a removed method (404, `-32601`).
+- The SSE reader keeps the `id` and `retry` fields of events (for resumption) and passes priming events
+  with empty data on.
 
 ### Fixed
 

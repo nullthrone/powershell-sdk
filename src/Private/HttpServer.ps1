@@ -775,6 +775,9 @@ function Invoke-McpHttpSessionRequest {
     }
     $Channel.Session = $session
     $Channel.Era = 'Legacy'
+    # The connection of a long-lived stream is not reused afterwards (Connection: close): the managed listener
+    # resets connections whose streamed response ended while the client was still reading it.
+    try { $Channel.Response.KeepAlive = $false } catch { Write-Debug 'Disabling keep-alive failed.' }
     if (-not (Start-McpHttpSse -State $State -Channel $Channel)) { return }
     # A comment flushes the headers, so that the client sees the stream open at once.
     if (-not (Write-McpSseChunk -State $State -Channel $Channel -Text ": stream open`n`n")) { return }

@@ -21,7 +21,7 @@ function Register-McpSubscription {
         In a legacy session (a server of revision 2025-11-25 or earlier) there is no listen request: the server
         sends list changes unsolicited and resource updates after resources/subscribe, which this command sends
         for -ResourceUri (Unregister-McpSubscription sends resources/unsubscribe). Over Streamable HTTP they arrive
-        on the session's GET stream, which the first subscription opens.
+        on the session's GET stream, which the session opens after initialize.
     .PARAMETER ToolsListChanged
         Subscribe to notifications/tools/list_changed.
     .PARAMETER PromptsListChanged

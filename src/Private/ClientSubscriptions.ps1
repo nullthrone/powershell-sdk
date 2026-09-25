@@ -345,14 +345,8 @@ function Invoke-McpClientEventPump {
         }
     }
     $item = $null
+    Invoke-McpLegacyInbox -Session $Session
     while ($Session.Inbox.TryDequeue([ref] $item)) {
-        if ($item.Kind -eq 'Legacy') {
-            # A message of the GET stream of a legacy session.
-            $message = $null
-            try { $message = ConvertFrom-McpJson -Json $item.Json } catch { $message = $null }
-            if ($message -is [System.Collections.IDictionary]) { Invoke-McpClientStrayMessage -Session $Session -Message $message }
-            continue
-        }
         $subscription = $Session.Subscriptions[[string] $item.Subscription]
         if ($null -eq $subscription) { continue }
         switch ($item.Kind) {

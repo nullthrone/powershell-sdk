@@ -73,17 +73,22 @@ function Wait-McpTask {
         [System.Threading.Tasks.Task] $Task,
 
         [Parameter(Mandatory)]
-        [datetime] $Deadline
+        [datetime] $Deadline,
+
+        # Invoked between the slices (every 100 ms), for example to answer requests of a legacy server meanwhile.
+        [scriptblock] $OnTick
     )
 
+    $slice = if ($OnTick) { 100 } else { 500 }
     while (-not $Task.IsCompleted) {
         $remaining = ($Deadline - [datetime]::UtcNow).TotalMilliseconds
         if ($remaining -le 0) { return $false }
         try {
-            $null = $Task.Wait([int] [math]::Min(500, [math]::Max(1, $remaining)))
+            $null = $Task.Wait([int] [math]::Min($slice, [math]::Max(1, $remaining)))
         } catch [System.AggregateException] {
             return $true
         }
+        if ($OnTick -and -not $Task.IsCompleted) { & $OnTick }
     }
     $true
 }
@@ -291,19 +296,23 @@ function Receive-McpSseResponse {
                 $Cts.Cancel()
                 throw [System.TimeoutException]::new("No response to '$Method' (id $Id) within the timeout; the response stream was closed, which cancels the request.")
             }
-            $received = Receive-McpSseEvent -Sse $sse -TimeoutMs ([int] [math]::Min(500, $remaining))
-            if ($received.Status -eq 'Timeout') { continue }
+            $slice = if ($Session.Era -eq 'Legacy') { 100 } else { 500 }
+            $received = Receive-McpSseEvent -Sse $sse -TimeoutMs ([int] [math]::Min($slice, $remaining))
+            if ($received.Status -eq 'Timeout') {
+                # The server may ask something on the session's GET stream while this request waits for it.
+                if ($Session.Era -eq 'Legacy') { Invoke-McpLegacyInbox -Session $Session }
+                continue
+            }
             if ($received.Status -eq 'Eof') {
                 # A legacy server may close the stream after announcing an event id and a retry time: the
                 # response then arrives on a GET stream opened with Last-Event-ID.
                 if ($Session.Era -eq 'Legacy' -and $null -ne $sse.LastEventId -and $resumptions -lt 3) {
                     $resumptions++
                     $delay = if ($null -ne $sse.Retry) { [int] $sse.Retry } else { 1000 }
-                    $until = [datetime]::UtcNow.AddMilliseconds($delay)
-                    while ([datetime]::UtcNow -lt $until) { Start-Sleep -Milliseconds ([int] [math]::Max(1, [math]::Min(50, ($until - [datetime]::UtcNow).TotalMilliseconds))) }
+                    $reconnectAt = [datetime]::UtcNow.AddMilliseconds($delay)
                     try { $sse.Reader.Dispose() } catch { Write-Debug 'Disposing the SSE reader failed.' }
                     if ($null -ne $resumed) { try { $resumed.Dispose() } catch { Write-Debug 'Disposing the resumed response failed.' } }
-                    $resumed = Open-McpHttpResumedStream -Session $Session -LastEventId $sse.LastEventId -Deadline $Deadline -Cts $Cts -Method $Method -Id $Id
+                    $resumed = Open-McpHttpResumedStream -Session $Session -LastEventId $sse.LastEventId -Deadline $Deadline -Cts $Cts -Method $Method -Id $Id -NotBefore $reconnectAt
                     $retry = $sse.Retry
                     $sse = New-McpSseReader -Stream ($resumed.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
                     $sse.Retry = $retry
@@ -393,6 +402,8 @@ function New-McpHttpGetMessage {
 
     $message = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Session.Transport.Url)
     $null = $message.Headers.TryAddWithoutValidation('Accept', 'text/event-stream')
+    # A stream connection is never reused for requests after the stream ended.
+    $message.Headers.ConnectionClose = $true
     if ($LastEventId) { $null = $message.Headers.TryAddWithoutValidation('Last-Event-ID', $LastEventId) }
     Add-McpHttpSessionHeader -Session $Session -Message $message
     $message
@@ -422,11 +433,19 @@ function Open-McpHttpResumedStream {
         [string] $Method,
 
         [Parameter(Mandatory)]
-        [object] $Id
+        [object] $Id,
+
+        # The reconnection time the server asked for (the retry field): the request is prepared, then sent at this time.
+        [datetime] $NotBefore = [datetime]::MinValue
     )
 
     $message = New-McpHttpGetMessage -Session $Session -LastEventId $LastEventId
     try {
+        while ([datetime]::UtcNow -lt $NotBefore) {
+            if ($Session.Era -eq 'Legacy') { Invoke-McpLegacyInbox -Session $Session }
+            $wait = ($NotBefore - [datetime]::UtcNow).TotalMilliseconds
+            if ($wait -gt 0) { [System.Threading.Thread]::Sleep([int] [math]::Min(20, [math]::Ceiling($wait))) }
+        }
         Write-Debug "-> GET $($Session.Transport.Url) Last-Event-ID $LastEventId (resuming '$Method' id=$Id)"
         $task = $Session.Transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $Cts.Token)
         if (-not (Wait-McpTask -Task $task -Deadline $Deadline)) {
@@ -546,8 +565,10 @@ function Invoke-McpHttpClientRequest {
     $response = $null
     try {
         Write-Debug "-> POST $($transport.Url) $Method id=$id ($($json.Length) bytes)"
+        # In a legacy session the server may ask something on the GET stream before it answers this request.
+        $tick = if ($Session.Era -eq 'Legacy') { { Invoke-McpLegacyInbox -Session $Session } } else { $null }
         $sendTask = $transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token)
-        if (-not (Wait-McpTask -Task $sendTask -Deadline $deadline)) {
+        if (-not (Wait-McpTask -Task $sendTask -Deadline $deadline -OnTick $tick)) {
             $cts.Cancel()
             throw [System.TimeoutException]::new("No response headers from $($transport.Url) for '$Method' (id $id) within $TimeoutMs ms.")
         }
@@ -577,7 +598,7 @@ function Invoke-McpHttpClientRequest {
             return Receive-McpSseResponse -Session $Session -Response $response -Id $id -Method $Method -Deadline $deadline -Cts $cts -ProgressToken $progressToken -OnProgress $OnProgress
         }
         $readTask = $response.Content.ReadAsStringAsync()
-        if (-not (Wait-McpTask -Task $readTask -Deadline $deadline)) {
+        if (-not (Wait-McpTask -Task $readTask -Deadline $deadline -OnTick $tick)) {
             $cts.Cancel()
             throw [System.TimeoutException]::new("The body of the response to '$Method' (id $id) did not arrive within $TimeoutMs ms.")
         }

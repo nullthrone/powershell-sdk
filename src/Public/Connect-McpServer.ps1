@@ -208,6 +208,7 @@ function Connect-McpServer {
         InitializeResult       = $null
         LegacyLogLevel         = $null
         LegacyStream           = $null
+        LegacyInbox            = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
         PreferredLegacyVersion = if ($legacyRequested) { $ProtocolVersion } else { $null }
         PreferredModernVersion = $modernVersion
         ServerInfo             = $null
