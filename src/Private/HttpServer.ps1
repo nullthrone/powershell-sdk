@@ -370,7 +370,6 @@ function Start-McpHttpSse {
         $Channel.Mode = 'Sse'
         $Channel.LastWrite = [datetime]::UtcNow
         $State.Transport.OpenChannels.Add($Channel)
-        Write-McpReproTrace "server id=$($Channel.RequestId) switched to SSE"
         Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message ("-> HTTP 200 text/event-stream id={0}" -f $Channel.RequestId)
         return $true
     } catch {
@@ -400,10 +399,8 @@ function Write-McpSseChunk {
         $Channel.Stream.Write($bytes, 0, $bytes.Length)
         $Channel.Stream.Flush()
         $Channel.LastWrite = [datetime]::UtcNow
-        if ($Text.StartsWith(':')) { Write-McpReproTrace "server id=$($Channel.RequestId) keep-alive write OK" }
         return $true
     } catch {
-        Write-McpReproTrace "server id=$($Channel.RequestId) SSE write FAILED: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
         Write-McpStderr -Level Debug -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Writing to an SSE stream failed (id=$($Channel.RequestId)): $($_.Exception.Message)"
         Close-McpHttpChannel -State $State -Channel $Channel -Abort
         return $false
@@ -528,7 +525,6 @@ function Stop-McpHttpChannelRequest {
     $entry = $State.InFlight[$key]
     if ($entry.Cancelled -or $entry.Responded) { return }
     Write-McpStderr -Level Info -Threshold $State.LogLevel -Logger $State.Server.Name -Message "Request $($entry.Id) ($($entry.Label)): the client closed the connection; cancelling."
-    Write-McpReproTrace "server id=$($entry.Id) Stop-McpHttpChannelRequest -> cancelling"
     Stop-McpInFlightRequest -Entry $entry
     $entry.Responded = $true
 }
@@ -940,10 +936,7 @@ function Invoke-McpHttpDispatcherLoop {
     $listener = $transport.Listener
     $acceptTask = $listener.GetContextAsync()
     $stopDeadline = $null
-    $reproTick = [System.Diagnostics.Stopwatch]::StartNew()
     while ($true) {
-        if ($reproTick.ElapsedMilliseconds -gt 400) { Write-McpReproTrace "server dispatcher tick took $($reproTick.ElapsedMilliseconds) ms (in flight: $($State.InFlight.Count), open channels: $($transport.OpenChannels.Count))" }
-        $reproTick.Restart()
         $handles = [System.Collections.Generic.List[System.Threading.WaitHandle]]::new()
         if (-not $transport.Stopped) { $handles.Add((Get-McpTaskWaitHandle -Task $acceptTask)) }
         $handles.Add($State.Signal)
