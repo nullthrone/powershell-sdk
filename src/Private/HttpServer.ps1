@@ -940,7 +940,10 @@ function Invoke-McpHttpDispatcherLoop {
     $listener = $transport.Listener
     $acceptTask = $listener.GetContextAsync()
     $stopDeadline = $null
+    $reproTick = [System.Diagnostics.Stopwatch]::StartNew()
     while ($true) {
+        if ($reproTick.ElapsedMilliseconds -gt 400) { Write-McpReproTrace "server dispatcher tick took $($reproTick.ElapsedMilliseconds) ms (in flight: $($State.InFlight.Count), open channels: $($transport.OpenChannels.Count))" }
+        $reproTick.Restart()
         $handles = [System.Collections.Generic.List[System.Threading.WaitHandle]]::new()
         if (-not $transport.Stopped) { $handles.Add((Get-McpTaskWaitHandle -Task $acceptTask)) }
         $handles.Add($State.Signal)

@@ -116,6 +116,7 @@ function Stop-McpHttpSendTask {
     )
 
     try { $Cts.Cancel() } catch { Write-Debug 'Cancelling the send failed.' }
+    if ($env:MCP_REPRO_NOFIX) { return } # TEMPORARY (issue #7 baseline)
     if (-not $Task.IsCompleted) {
         try { $null = $Task.Wait($SettleMs) } catch [System.AggregateException] { Write-Debug 'The cancelled send ended with an error.' }
     }

@@ -15,7 +15,7 @@ env:
 
 jobs:
   repro:
-    name: Repro (${{ matrix.os }}, pwsh ${{ matrix.pwsh }})
+    name: Repro (${{ matrix.os }}, pwsh ${{ matrix.pwsh }}, nofix=${{ matrix.nofix }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -23,9 +23,7 @@ jobs:
       matrix:
         os: [windows-latest]
         pwsh: ['7.4.20', '7.5.11', '7.6.6']
-        include:
-          - os: ubuntu-latest
-            pwsh: '7.6.6'
+        nofix: ['1']
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,17 +34,21 @@ jobs:
       - name: Build
         shell: pwsh
         run: ./build.ps1 -Bootstrap -Task Build
-      - name: Repeated test runs
+      - name: Whole HttpServer.Tests.ps1, 30 runs
         shell: pwsh
-        run: ./tools/repro/Invoke-Issue7Repro.ps1 -Iterations 30
-      - name: Timeout sweep
+        env:
+          MCP_REPRO_NOFIX: ${{ matrix.nofix }}
+        run: ./tools/repro/Invoke-Issue7Repro.ps1 -Iterations 30 -WholeFiles
+      - name: Unit tests plus HttpServer.Tests.ps1, 8 runs
         if: always()
         shell: pwsh
-        run: ./tools/repro/Invoke-Issue7Sweep.ps1
+        env:
+          MCP_REPRO_NOFIX: ${{ matrix.nofix }}
+        run: ./tools/repro/Invoke-Issue7Repro.ps1 -Iterations 8 -WholeFiles -Path Unit, Integration/HttpServer.Tests.ps1 -LogDirectory output/repro/suite
       - name: Upload traces
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: repro-${{ matrix.os }}-pwsh${{ matrix.pwsh }}
+          name: repro-${{ matrix.os }}-pwsh${{ matrix.pwsh }}-nofix${{ matrix.nofix }}
           path: output/repro/
           if-no-files-found: warn
