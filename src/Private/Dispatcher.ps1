@@ -360,6 +360,7 @@ function Stop-McpInFlightRequest {
     )
 
     $Entry.Cancelled = $true
+    Write-McpReproTrace "server id=$($Entry.Id) Stop-McpInFlightRequest (Cts.Cancel + BeginStop)"
     try { $Entry.Cts.Cancel() } catch { Write-Debug 'Cancelling the request token failed.' }
     try { $null = $Entry.PowerShell.BeginStop($null, $null) } catch { Write-Debug 'Stopping the worker pipeline failed.' }
 }
@@ -435,6 +436,7 @@ function Update-McpInFlightRequest {
             }
             continue
         }
+        Write-McpReproTrace "server id=$($entry.Id) worker finished: $invocationState (cancelled=$($entry.Cancelled), responded=$($entry.Responded))"
         # A worker enqueues its response before it completes: deliver whatever is queued while the entry exists.
         Send-McpOutboundQueue -State $State
         if ($invocationState -eq [System.Management.Automation.PSInvocationState]::Failed -and -not $entry.Cancelled -and -not $entry.Responded) {

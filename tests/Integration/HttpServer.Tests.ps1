@@ -105,7 +105,18 @@ Describe 'Connect-McpServer over Streamable HTTP' -Tag 'Integration' {
             { Invoke-McpTool -Name 'count' -Arguments @{ To = 200; DelayMs = 50; MarkerPath = $marker } -TimeoutSeconds 1 -Session $script:session } | Should -Throw -ExceptionType ([System.TimeoutException])
             (Invoke-McpTool -Name 'echo' -Arguments @{ Text = 'alive' } -Session $script:session).Text | Should -Be 'alive'
             $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not (Test-Path -Path $marker) -and $stopwatch.Elapsed.TotalSeconds -lt 8) { Start-Sleep -Milliseconds 100 }
+            # TEMPORARY (issue #7 diagnostics): TCP states of the loopback connections to the server port.
+            $nextSnapshot = 0
+            while (-not (Test-Path -Path $marker) -and $stopwatch.Elapsed.TotalSeconds -lt 8) {
+                if ($env:MCP_REPRO_LOG -and $IsWindows -and $stopwatch.Elapsed.TotalSeconds -ge $nextSnapshot) {
+                    $nextSnapshot += 1
+                    $port = $script:handle.Port
+                    $rows = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq $port -or $_.RemotePort -eq $port } | ForEach-Object { '{0}:{1}->{2}:{3} {4} pid={5}' -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort, $_.State, $_.OwningProcess })
+                    [System.IO.File]::AppendAllText($env:MCP_REPRO_LOG, ('{0} test tcp@{1:n1}s: {2}{3}' -f [datetime]::UtcNow.ToString('HH:mm:ss.fff'), $stopwatch.Elapsed.TotalSeconds, ($rows -join ' | '), [Environment]::NewLine))
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            if ($env:MCP_REPRO_LOG) { [System.IO.File]::AppendAllText($env:MCP_REPRO_LOG, ('{0} test marker after {1:n1}s: {2}{3}' -f [datetime]::UtcNow.ToString('HH:mm:ss.fff'), $stopwatch.Elapsed.TotalSeconds, $(if (Test-Path $marker) { [System.IO.File]::ReadAllText($marker) } else { 'MISSING' }), [Environment]::NewLine)) }
             Test-Path -Path $marker | Should -BeTrue
             $text = [System.IO.File]::ReadAllText($marker)
             $text | Should -Match '^stopped at (\d+) of 200$'

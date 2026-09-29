@@ -293,6 +293,7 @@ function Receive-McpSseResponse {
         while ($true) {
             $remaining = ($Deadline - [datetime]::UtcNow).TotalMilliseconds
             if ($remaining -le 0) {
+                Write-McpReproTrace "client id=$Id SSE read timeout; disposing the reader"
                 $Cts.Cancel()
                 throw [System.TimeoutException]::new("No response to '$Method' (id $Id) within the timeout; the response stream was closed, which cancels the request.")
             }
@@ -569,7 +570,11 @@ function Invoke-McpHttpClientRequest {
         $tick = if ($Session.Era -eq 'Legacy') { { Invoke-McpLegacyInbox -Session $Session } } else { $null }
         $sendTask = $transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token)
         if (-not (Wait-McpTask -Task $sendTask -Deadline $deadline -OnTick $tick)) {
+            Write-McpReproTrace "client id=$id header timeout; sendTask before Cancel: $($sendTask.Status)"
             $cts.Cancel()
+            Write-McpReproTrace "client id=$id sendTask after Cancel: $($sendTask.Status)"
+            try { $null = $sendTask.Wait(200) } catch { Write-Debug 'ignored' }
+            Write-McpReproTrace "client id=$id sendTask 200 ms after Cancel: $($sendTask.Status)$(if ($sendTask.Status -eq 'RanToCompletion') { ' -> LEAKED RESPONSE (never disposed)' })"
             throw [System.TimeoutException]::new("No response headers from $($transport.Url) for '$Method' (id $id) within $TimeoutMs ms.")
         }
         $failure = Get-McpTaskFailure -Task $sendTask
@@ -594,6 +599,7 @@ function Invoke-McpHttpClientRequest {
         $mediaType = $null
         if ($null -ne $response.Content -and $null -ne $response.Content.Headers.ContentType) { $mediaType = $response.Content.Headers.ContentType.MediaType }
         Write-Debug "<- HTTP $status $mediaType for $Method id=$id"
+        Write-McpReproTrace "client id=$id headers received: HTTP $status $mediaType ($([int] ($deadline - [datetime]::UtcNow).TotalMilliseconds) ms before deadline)"
         if ($mediaType -eq 'text/event-stream') {
             return Receive-McpSseResponse -Session $Session -Response $response -Id $id -Method $Method -Deadline $deadline -Cts $cts -ProgressToken $progressToken -OnProgress $OnProgress
         }
