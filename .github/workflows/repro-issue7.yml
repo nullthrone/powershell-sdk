@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [windows-latest]
         pwsh: ['7.4.20', '7.5.11', '7.6.6']
-        nofix: ['1']
+        nofix: ['']
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

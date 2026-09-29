@@ -33,7 +33,7 @@ if (`$r.PassedCount -ge 1 -and `$r.FailedCount -eq 0) { exit 0 } else { exit 1 }
     $output = & $pwsh -NoLogo -NoProfile -NonInteractive -Command $script 2>&1
     $passed = $LASTEXITCODE -eq 0
     $text = if (Test-Path $log) { Get-Content -Raw $log } else { '' }
-    $leak = $text -match 'LEAKED RESPONSE'
+    $leak = $text -match 'sendTask after Stop-McpHttpSendTask: RanToCompletion'
     $headerTimeout = $text -match 'header timeout'
     $sseTimeout = $text -match 'SSE read timeout'
     $writeFailed = $text -match 'SSE write FAILED'
@@ -60,8 +60,8 @@ Remove-Item Env:MCP_REPRO_LOG
 $failed = @($rows | Where-Object { -not $_.Passed }).Count
 $summary = @(
     "## Issue #7 repro ($($Path -join ', '), whole files: $([bool] $WholeFiles)): $($PSVersionTable.OS), pwsh $($PSVersionTable.PSVersion)", '',
-    "Failures: **$failed / $Iterations**; leaked responses: $(@($rows | Where-Object Leak).Count)", '',
-    '| Run | Passed | Client path | Leak | Keep-alives OK | Slow ticks | Write failed | Marker |', '|---|---|---|---|---|---|---|---|'
+    "Failures: **$failed / $Iterations**; late responses (headers arrived during the cancel): $(@($rows | Where-Object Leak).Count)", '',
+    '| Run | Passed | Client path | Late response | Keep-alives OK | Slow ticks | Write failed | Marker |', '|---|---|---|---|---|---|---|---|'
 ) + ($rows | ForEach-Object { '| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |' -f $_.Run, $_.Passed, $_.ClientPath, $_.Leak, $_.KeepAliveOk, $_.SlowTicks, $_.WriteFailed, $_.Marker })
 if ($env:GITHUB_STEP_SUMMARY) { $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY }
 $summary | Write-Host

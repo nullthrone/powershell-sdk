@@ -604,7 +604,7 @@ function Invoke-McpHttpClientRequest {
         if (-not (Wait-McpTask -Task $sendTask -Deadline $deadline -OnTick $tick)) {
             Write-McpReproTrace "client id=$id header timeout; sendTask before Cancel: $($sendTask.Status)"
             Stop-McpHttpSendTask -Task $sendTask -Cts $cts
-            Write-McpReproTrace "client id=$id sendTask after Stop-McpHttpSendTask: $($sendTask.Status)$(if ($sendTask.Status -eq 'RanToCompletion') { ' -> late response DISPOSED (fix path)' })"
+            Write-McpReproTrace "client id=$id sendTask after Stop-McpHttpSendTask: $($sendTask.Status)$(if ($sendTask.Status -eq 'RanToCompletion') { if ($env:MCP_REPRO_NOFIX) { ' -> LATE RESPONSE LEAKED (fix off)' } else { ' -> LATE RESPONSE disposed (fix on)' } })"
             throw [System.TimeoutException]::new("No response headers from $($transport.Url) for '$Method' (id $id) within $TimeoutMs ms.")
         }
         $failure = Get-McpTaskFailure -Task $sendTask
