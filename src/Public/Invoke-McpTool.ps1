@@ -49,7 +49,7 @@ function Invoke-McpTool {
     $level = if ($PSBoundParameters.ContainsKey('LogLevel')) { $LogLevel } else { $target.LogLevel }
     $timeoutMs = $TimeoutSeconds * 1000
     $result = $null
-    if ($target.Kind -ne 'Http') {
+    if ($target.Kind -ne 'Http' -or $target.Era -eq 'Legacy') {
         $result = (Invoke-McpClientRequestWithInput -Session $target -Method 'tools/call' -Params $params -OnProgress $OnProgress -LogLevel $level -TimeoutMs $timeoutMs).Result
     } else {
         # Streamable HTTP mirrors x-mcp-header parameters into Mcp-Param-* headers; the annotations come from the

@@ -17,7 +17,7 @@ LONG DESCRIPTION
     Supported transports are stdio and Streamable HTTP.
 
 CURRENT STATUS
-    Milestone M4 (input requests and subscriptions): servers expose PowerShell
+    Milestone M5 (dual era): servers expose PowerShell
     commands and script blocks as tools, resources (fixed content, files,
     directories, handlers, RFC 6570 templates) and prompts, with argument
     completion and caching hints, over stdio and over Streamable HTTP with the
@@ -26,9 +26,10 @@ CURRENT STATUS
     for user input (elicitation), sampling and roots through multi-round-trip
     requests; clients subscribe to list changes and resource updates with
     subscriptions/listen. Clients consume all of it over both transports and
-    cache results for the ttlMs the server sends. The official conformance
-    suite runs in CI. The legacy revisions, authorization and the extensions
-    follow in later milestones (ROADMAP.md).
+    cache results for the ttlMs the server sends. Both sides also speak the
+    initialize handshake of 2025-11-25 and 2025-06-18 (see DUAL ERA below). The
+    official conformance suite runs in CI for both requirement sets.
+    Authorization and the extensions follow in later milestones (ROADMAP.md).
 
 COMMANDS
     Server:   New-McpServer, Register-McpTool, Register-McpResource,
@@ -45,7 +46,7 @@ COMMANDS
               Get-McpTool, Invoke-McpTool, Get-McpResource, Read-McpResource,
               Get-McpPrompt, Invoke-McpPrompt, Get-McpCompletion,
               Register-McpSubscription, Unregister-McpSubscription,
-              Receive-McpNotification
+              Receive-McpNotification, Set-McpLogLevel
 
     Start-McpServer serves stdio by default; -Transport Http -Url serves a
     Streamable HTTP endpoint (POST-only, JSON or SSE responses, request
@@ -87,6 +88,28 @@ COMMANDS
     to the host reaches the client. Their warnings, information and verbose
     records are logged to stderr and, when the request asks for it, sent as
     notifications/message.
+
+DUAL ERA
+    New-McpServer serves 2026-07-28, 2025-11-25 and 2025-06-18 by default
+    (-SupportedVersions). A request with the per-request _meta of 2026-07-28 is
+    served statelessly; an initialize request opens a legacy session: one per
+    process over stdio, one per Mcp-Session-Id over Streamable HTTP (GET opens
+    the session's stream for list changes and resource updates, DELETE ends
+    it; Start-McpServer -SessionIdleTimeoutSeconds and -MaxSessions bound the
+    sessions). In a legacy session Request-McpElicitation, Request-McpSampling
+    and Request-McpRoot send a request to the client and wait for its answer
+    instead of an input round, so handlers work in both eras unchanged. Legacy
+    results carry no resultType, ttlMs or cacheScope; unknown resources are
+    -32002.
+
+    Connect-McpServer -Era Auto (default) probes with server/discover and
+    falls back to initialize when the server does not answer like a
+    2026-07-28 server; -Era Modern and -Era Legacy choose the era. The
+    session's Era property shows the result. A legacy session answers the
+    server's requests with the -OnElicitation, -OnSampling and -OnRoots
+    callbacks, sets the log level with logging/setLevel (Set-McpLogLevel),
+    resumes an interrupted response stream with GET and Last-Event-ID, and
+    sends DELETE on Disconnect-McpServer.
 
 REQUIREMENTS
     PowerShell 7.4 or later (Core edition). Windows PowerShell 5.1 is not

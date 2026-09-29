@@ -3,6 +3,9 @@
 
 $script:McpLatestProtocolVersion = '2026-07-28'
 $script:McpModernProtocolVersions = @('2026-07-28')
+# The revisions with the initialize handshake, newest first. 2025-03-26 is accepted as a version string without
+# features of its own (dual era, see Era.ps1).
+$script:McpLegacyProtocolVersions = @('2025-11-25', '2025-06-18', '2025-03-26')
 $script:McpDefaultServer = $null
 
 function Test-McpServerObject {
@@ -112,7 +115,7 @@ function Get-McpDiscoverResult {
 
     $result = [ordered]@{
         resultType        = 'complete'
-        supportedVersions = @($Server.SupportedVersions)
+        supportedVersions = @(Get-McpServerVersion -Server $Server -Era Modern)
         capabilities      = Get-McpServerCapability -Server $Server
     }
     if ($Server.Instructions) { $result['instructions'] = $Server.Instructions }

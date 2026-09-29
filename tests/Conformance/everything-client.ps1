@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     The conformance fixture client: connects to the scenario server of @modelcontextprotocol/conformance over
-    Streamable HTTP and exercises what the client scenarios of revision 2026-07-28 observe.
+    Streamable HTTP and exercises what the client scenarios of revisions 2026-07-28 and 2025-11-25 observe.
 .DESCRIPTION
     The suite runs it as
         pwsh -NoLogo -NoProfile -NonInteractive -File tests/Conformance/everything-client.ps1 <server-url>
@@ -10,8 +10,10 @@
     the tool calls to make) and MCP_CONFORMANCE_PROTOCOL_VERSION (when a spec version was requested). It
     discovers the server, lists the tools and calls them: the calls given in the context, or every listed tool
     with arguments derived from its input schema. Diagnostics go to stderr; the exit code is 0 unless the
-    connection fails. Input requests of multi-round-trip requests are answered by fixed callbacks. Scenarios
-    of later milestones (authorization) are listed in conformance-baseline.yml.
+    connection fails. The era of the scenario server is detected (Connect-McpServer -Era Auto): servers of the
+    legacy revisions get the initialize handshake. Input requests of multi-round-trip requests and the requests
+    of legacy servers are answered by fixed callbacks; form content takes the schema defaults. Scenarios of
+    later milestones (authorization) are listed in conformance-baseline.yml.
 #>
 [CmdletBinding()]
 param(
@@ -69,13 +71,9 @@ if ($env:MCP_CONFORMANCE_CONTEXT) {
 }
 $protocolVersion = if ($env:MCP_CONFORMANCE_PROTOCOL_VERSION) { $env:MCP_CONFORMANCE_PROTOCOL_VERSION } else { '2026-07-28' }
 Write-ClientLog "scenario '$scenario' at $url (protocol version $protocolVersion)"
-if ($protocolVersion -ne '2026-07-28') {
-    Write-ClientLog "Protocol version $protocolVersion uses the initialize handshake, which this client speaks from milestone M5 on."
-    exit 0
-}
 
-# Answers to the input requests of multi-round-trip requests: form content derived from the requested schema,
-# a fixed sampling reply and one root.
+# Answers to the input requests of multi-round-trip requests and to the requests of legacy servers: form content
+# from the requested schema (its defaults, otherwise a value of the right type), a fixed sampling reply and one root.
 $onElicitation = {
     param($Request)
     $content = [ordered]@{}
@@ -83,6 +81,10 @@ $onElicitation = {
     if ($schema -is [System.Collections.IDictionary] -and $schema['properties'] -is [System.Collections.IDictionary]) {
         foreach ($name in $schema['properties'].Keys) {
             $property = $schema['properties'][$name]
+            if ($property -is [System.Collections.IDictionary] -and $property.Contains('default')) {
+                $content[[string] $name] = $property['default']
+                continue
+            }
             $content[[string] $name] = switch ([string] $property['type']) {
                 'boolean' { $true }
                 'number' { 1 }

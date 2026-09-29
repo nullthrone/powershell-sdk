@@ -69,6 +69,11 @@ function New-McpClientRequestMeta {
     )
 
     $meta = [ordered]@{}
+    if ($Session.Era -eq 'Legacy') {
+        # A legacy session negotiated version and capabilities in initialize; the log level is set with logging/setLevel.
+        if ($null -ne $ProgressToken) { $meta[$script:McpMetaKey.ProgressToken] = $ProgressToken }
+        return $meta
+    }
     $meta[$script:McpMetaKey.ProtocolVersion] = $Session.ProtocolVersion
     $meta[$script:McpMetaKey.ClientCapabilities] = $Session.ClientCapabilities
     if ($null -ne $Session.ClientInfo) { $meta[$script:McpMetaKey.ClientInfo] = $Session.ClientInfo }
@@ -129,6 +134,9 @@ function Invoke-McpClientRequest {
         [hashtable] $Headers
     )
 
+    if ($Session.Era -eq 'Legacy' -and $null -ne $LogLevel -and $Method -notin @('initialize', 'logging/setLevel')) {
+        Set-McpLegacyClientLogLevel -Session $Session -Level $LogLevel
+    }
     if ($Session.Transport.Kind -eq 'Http') {
         return Invoke-McpHttpClientRequest -Session $Session -Method $Method -Params $Params -OnProgress $OnProgress -LogLevel $LogLevel -TimeoutMs $TimeoutMs -Headers $Headers
     }
@@ -137,7 +145,8 @@ function Invoke-McpClientRequest {
     $Session.NextId = $id + 1
     $progressToken = if ($OnProgress) { "p-$id" } else { $null }
     $requestParams = [ordered]@{}
-    $requestParams['_meta'] = New-McpClientRequestMeta -Session $Session -ProgressToken $progressToken -LogLevel $LogLevel
+    $meta = New-McpClientRequestMeta -Session $Session -ProgressToken $progressToken -LogLevel $LogLevel
+    if ($meta.Count -gt 0) { $requestParams['_meta'] = $meta }
     if ($null -ne $Params) {
         foreach ($key in $Params.Keys) {
             if ([string] $key -eq '_meta') { continue }
@@ -189,7 +198,7 @@ function Invoke-McpClientRequest {
                 Invoke-McpClientNotificationHandler -Session $Session -Message $message -ProgressToken $progressToken -OnProgress $OnProgress
             }
             'Request' {
-                Write-Warning "Ignoring a request '$($message['method'])' from the server: servers do not send requests in protocol version $($Session.ProtocolVersion)."
+                Invoke-McpClientServerRequest -Session $Session -Message $message -RequestMethod $Method
             }
             default {
                 Write-Warning 'Ignoring an invalid JSON-RPC message from the server.'
@@ -221,6 +230,11 @@ function Invoke-McpClientNotificationHandler {
             Receive-McpSubscriptionNotification -Session $Session -Subscription $subscription -Message $Message
             return
         }
+    }
+    if ($Session.Era -eq 'Legacy' -and ($method -in @($script:McpListenFilterFlags.Values) -or $method -eq 'notifications/resources/updated')) {
+        # Legacy servers send list changes and resource updates unsolicited, without a subscription id.
+        Send-McpLegacyNotificationToSubscription -Session $Session -Message $Message
+        return
     }
     switch ($method) {
         'notifications/cancelled' {
@@ -798,6 +812,7 @@ function ConvertTo-McpInputRequestObject {
         [System.Collections.IDictionary] $Request,
 
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string] $RequestMethod
     )
 

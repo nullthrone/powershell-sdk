@@ -43,7 +43,8 @@
     Skip Pester tests with one of these tags.
 
 .PARAMETER ConformanceRequirements
-    Requirement sets of the Conformance task (default: 2026-07-28). Each set runs the server and the client leg.
+    Requirement sets of the Conformance task (default: 2026-07-28 and 2025-11-25). Each set runs the server and
+    the client leg; both server legs run against the same dual-era fixture.
 
 .PARAMETER ConformanceLeg
     Restrict the Conformance task to the Server or the Client leg.
@@ -78,7 +79,7 @@ param(
 
     [string[]] $ExcludeTestTag,
 
-    [string[]] $ConformanceRequirements = @('2026-07-28'),
+    [string[]] $ConformanceRequirements = @('2026-07-28', '2025-11-25'),
 
     [ValidateSet('Server', 'Client')]
     [string[]] $ConformanceLeg,

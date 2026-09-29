@@ -23,7 +23,12 @@ function New-McpServer {
     .PARAMETER Instructions
         Natural-language guidance for clients and their models, returned by server/discover.
     .PARAMETER SupportedVersions
-        The protocol revisions the server speaks. This milestone supports 2026-07-28 only.
+        The protocol revisions the server speaks (default: 2026-07-28, 2025-11-25 and 2025-06-18). With both
+        2026-07-28 and a legacy revision the server is dual-era: requests with the per-request _meta of
+        2026-07-28 are served statelessly, an initialize request opens a legacy session (process-wide over stdio,
+        one per Mcp-Session-Id over Streamable HTTP). Only 2026-07-28 makes it modern-only (initialize is
+        answered with -32022 and the supported versions), only legacy revisions make it legacy-only. A server
+        with any legacy revision also accepts 2025-03-26 in initialize.
     .PARAMETER MaxConcurrency
         The maximum number of handlers running at the same time (the size of the worker runspace pool).
     .PARAMETER RequestTimeoutSeconds
@@ -76,7 +81,7 @@ function New-McpServer {
         [string] $Instructions,
 
         [ValidateNotNullOrEmpty()]
-        [string[]] $SupportedVersions = @('2026-07-28'),
+        [string[]] $SupportedVersions = @('2026-07-28', '2025-11-25', '2025-06-18'),
 
         [ValidateRange(1, 64)]
         [int] $MaxConcurrency = [System.Math]::Max(1, [System.Environment]::ProcessorCount),
@@ -105,9 +110,10 @@ function New-McpServer {
         [switch] $SetDefault
     )
 
+    $known = @($script:McpModernProtocolVersions) + @($script:McpLegacyProtocolVersions)
     foreach ($candidate in $SupportedVersions) {
-        if ($candidate -notin $script:McpModernProtocolVersions) {
-            throw [System.ArgumentException]::new("Protocol version '$candidate' is not supported by this milestone; supported: $($script:McpModernProtocolVersions -join ', ').")
+        if ($candidate -notin $known) {
+            throw [System.ArgumentException]::new("Protocol version '$candidate' is not supported; supported: $($known -join ', ').")
         }
     }
 
@@ -120,7 +126,7 @@ function New-McpServer {
         WebsiteUrl        = $WebsiteUrl
         Icons             = ConvertTo-McpIconList -Icons $Icons
         Instructions      = $Instructions
-        SupportedVersions = [string[]] $SupportedVersions
+        SupportedVersions = [string[]] @($SupportedVersions | Select-Object -Unique)
         Tools             = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         Resources         = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         ResourceTemplates = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)

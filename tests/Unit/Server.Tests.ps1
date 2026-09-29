@@ -10,7 +10,7 @@ Describe 'New-McpServer' {
     It 'creates a server object with defaults' {
         $server = New-McpServer -Name 'demo' -Version '0.1.0'
         $server.PSObject.TypeNames | Should -Contain 'Mcp.Server'
-        $server.SupportedVersions | Should -Be @('2026-07-28')
+        $server.SupportedVersions | Should -Be @('2026-07-28', '2025-11-25', '2025-06-18')
         $server.Tools.Count | Should -Be 0
         $server.Options.MaxConcurrency | Should -BeGreaterOrEqual 1
         $server.Options.PageSize | Should -Be 100
@@ -19,8 +19,14 @@ Describe 'New-McpServer' {
         $server.Options.LogLevel | Should -Be ([McpLoggingLevel]::Warning)
     }
 
-    It 'rejects protocol versions this milestone does not support' {
-        { New-McpServer -Name 'demo' -Version '1' -SupportedVersions '2025-11-25' } | Should -Throw -ExpectedMessage '*not supported*'
+    It 'rejects protocol versions it does not know and accepts the legacy revisions' {
+        { New-McpServer -Name 'demo' -Version '1' -SupportedVersions '2024-11-05' } | Should -Throw -ExpectedMessage '*not supported*'
+        (New-McpServer -Name 'demo' -Version '1' -SupportedVersions '2025-11-25', '2025-03-26').SupportedVersions | Should -Be @('2025-11-25', '2025-03-26')
+    }
+
+    It 'lists only the modern versions in server/discover' {
+        $server = New-McpServer -Name 'demo' -Version '1'
+        (Invoke-McpInModule { param($s) Get-McpDiscoverResult -Server $s } $server)['supportedVersions'] | Should -Be @('2026-07-28')
     }
 
     It 'sets the default server with -SetDefault' {

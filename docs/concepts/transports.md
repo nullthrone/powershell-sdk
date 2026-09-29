@@ -43,7 +43,9 @@ runspace hosts it. Besides stdio there is an in-memory transport (a pair of chan
   response travel through the outbound queue to the channel, like over stdio.
 - Screening order per request: path (404), `Origin` (403; absent or loopback origins and the server's own
   origin are accepted by default, `-AllowedOrigins` overrides), method (GET and DELETE answer 405 with
-  `Allow: POST`; revision 2026-07-28 has neither a GET stream nor sessions), content type (415), size (413),
+  `Allow: POST`; revision 2026-07-28 has neither a GET stream nor sessions, and only a request with the
+  `Mcp-Session-Id` of a legacy session reaches the legacy GET and DELETE handling, see
+  [dual-era.md](dual-era.md)), content type (415), size (413),
   JSON (400 with `-32700`), message kind (notifications answer 202 and are not processed further, JSON-RPC
   responses and invalid messages 400 with `-32600`).
 - Header validation (`-32020`, HTTP 400): `MCP-Protocol-Version` present and equal to
@@ -52,10 +54,13 @@ runspace hosts it. Besides stdio there is an in-memory transport (a pair of chan
   or `params.uri` after decoding the `=?base64?...?=` sentinel, and for `tools/call` every `x-mcp-header`
   annotated argument that is present in the body must arrive as `Mcp-Param-{Name}` with the same value
   (integers compare numerically, strings exactly; a header without a body value, a missing header, a
-  malformed sentinel or invalid characters are mismatches). `initialize` is answered before the header checks
-  with `-32601` naming the supported versions, so that legacy clients get a diagnostic.
+  malformed sentinel or invalid characters are mismatches). `initialize` without the modern `_meta` skips
+  these checks: it opens a legacy session, or a modern-only server answers `-32022` with the supported
+  versions. Requests of a legacy session (with `Mcp-Session-Id`) skip them too.
 - HTTP status by JSON-RPC error code: 400 for `-32700`, `-32600`, `-32602`, `-32020`, `-32021` and `-32022`;
-  404 for `-32601`; 200 for everything else (including `-32603` and tool errors reported with `isError`).
+  404 for `-32601`; 200 for everything else (including `-32603` and tool errors reported with `isError`). In
+  a legacy session only `-32700` and `-32600` are 400 and every other error is 200: a 404 tells a client of
+  those revisions that its session is gone.
 - Response mode: a single JSON object (`application/json`) unless the handler sends a notification
   (progress, log message), which starts an SSE stream (`text/event-stream`, `event: message` + `data:` lines,
   `X-Accel-Buffering: no`); the response is the last event and closes the stream. A request that outlives
@@ -74,11 +79,13 @@ runspace hosts it. Besides stdio there is an in-memory transport (a pair of chan
   `Mcp-Param-*` headers of the call.
 - The response is read with `ResponseHeadersRead`: `application/json` bodies are one JSON-RPC message
   (error responses on any status become `McpProtocolException`), `text/event-stream` bodies are parsed event
-  by event (`data:` lines joined, comments and `id`/`retry` fields ignored) with notifications dispatched to
+  by event (`data:` lines joined, comments ignored, `id`/`retry` kept for the resumption of legacy sessions) with notifications dispatched to
   the progress and log callbacks until the response with the request id arrives. A deadline cancels the
   request and disposes the response, which closes the stream: the cancellation signal of this transport.
 - `Get-McpTool` validates the `x-mcp-header` annotations of every tool (`Get-McpToolHeaderParameter`) and
   excludes invalid tools with a warning; `Invoke-McpTool` derives the `Mcp-Param-*` headers from the cached
   annotations and, after a `-32020` from the server, refreshes the list and retries once.
-- Not implemented on purpose: the removed GET stream, `Mcp-Session-Id`, `Last-Event-ID` resumption; the
-  legacy `initialize` fallback arrives with milestone M5 (dual era).
+- In a legacy session (see [dual-era.md](dual-era.md)) requests carry `Mcp-Session-Id` and the negotiated
+  `MCP-Protocol-Version` instead of the per-request headers; the `id` and `retry` fields of SSE events are
+  kept, and a response stream that ends before its response is resumed with GET and `Last-Event-ID` after
+  the announced retry time. Modern sessions use none of this.

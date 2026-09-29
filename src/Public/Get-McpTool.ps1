@@ -38,7 +38,7 @@ function Get-McpTool {
         $converted = [System.Collections.Generic.List[object]]::new()
         $headers = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
         foreach ($tool in $list.Items) {
-            if ($target.Kind -eq 'Http') {
+            if ($target.Kind -eq 'Http' -and $target.Era -ne 'Legacy') {
                 $toolName = if ($tool.Contains('name')) { [string] $tool['name'] } else { '(unnamed)' }
                 $headerParameters = @()
                 try {

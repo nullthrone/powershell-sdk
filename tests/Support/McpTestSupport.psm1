@@ -195,7 +195,9 @@ function Test-McpSpecShape {
     )
 
     $definitions = Get-McpSpecDefinition -Revision $Revision
-    $schema = @{ '$ref' = "#/`$defs/$Definition"; '$defs' = $definitions }
+    # The references inside the definitions point at $defs (2020-12 schemas) or definitions (draft-07 schemas).
+    $container = if ((Get-McpSpecSchema -Revision $Revision).ContainsKey('$defs')) { '$defs' } else { 'definitions' }
+    $schema = @{ '$ref' = "#/$container/$Definition"; $container = $definitions }
     Invoke-McpInModule { param($s, $i) Test-McpJsonSchema -Schema $s -Instance $i } -Parameters @{ s = $schema; i = $Instance }
 }
 

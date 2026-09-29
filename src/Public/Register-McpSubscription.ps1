@@ -17,6 +17,11 @@ function Register-McpSubscription {
 
         The subscription ends with Unregister-McpSubscription, Disconnect-McpServer or when the server closes it
         (State Closed).
+
+        In a legacy session (a server of revision 2025-11-25 or earlier) there is no listen request: the server
+        sends list changes unsolicited and resource updates after resources/subscribe, which this command sends
+        for -ResourceUri (Unregister-McpSubscription sends resources/unsubscribe). Over Streamable HTTP they arrive
+        on the session's GET stream, which the session opens after initialize.
     .PARAMETER ToolsListChanged
         Subscribe to notifications/tools/list_changed.
     .PARAMETER PromptsListChanged
@@ -92,6 +97,27 @@ function Register-McpSubscription {
         Cts           = $null
         Reader        = $null
         Session       = $target
+        Legacy        = $target.Era -eq 'Legacy'
+    }
+    if ($subscription.Legacy) {
+        # A legacy server sends list changes unsolicited and resource updates after resources/subscribe; the
+        # subscription filters what it sees from them.
+        $capabilities = $target.InitializeResult['capabilities']
+        $honoured = [ordered]@{}
+        foreach ($flag in 'toolsListChanged', 'promptsListChanged', 'resourcesListChanged') {
+            if ($filter.Contains($flag) -and (Get-McpWireValue -Object (Get-McpWireValue -Object $capabilities -Key $flag.Substring(0, $flag.Length - 'ListChanged'.Length)) -Key 'listChanged')) { $honoured[$flag] = $true }
+        }
+        if ($filter.Contains('resourceSubscriptions') -and (Get-McpWireValue -Object (Get-McpWireValue -Object $capabilities -Key 'resources') -Key 'subscribe')) {
+            foreach ($uri in $filter['resourceSubscriptions']) {
+                $null = Invoke-McpClientRequest -Session $target -Method 'resources/subscribe' -Params ([ordered]@{ uri = $uri })
+            }
+            $honoured['resourceSubscriptions'] = $filter['resourceSubscriptions']
+        }
+        $subscription.Honoured = $honoured
+        $subscription.State = 'Open'
+        $target.Subscriptions[[string] $id] = $subscription
+        if ($target.Kind -eq 'Http') { Start-McpLegacyClientStream -Session $target } else { Start-McpTransportPump -Transport $target.Transport }
+        return $subscription
     }
     $target.Subscriptions[[string] $id] = $subscription
     $target.SubscriptionIds[[string] $id] = $subscription

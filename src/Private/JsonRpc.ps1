@@ -15,6 +15,11 @@ $script:McpErrorCode = @{
     UnsupportedProtocolVersion      = -32022
 }
 
+# Codes of the legacy revisions (2025-11-25 and earlier) that revision 2026-07-28 retired: never sent to modern clients.
+$script:McpLegacyErrorCode = @{
+    ResourceNotFound = -32002
+}
+
 function Get-McpErrorCode {
     [CmdletBinding()]
     [OutputType([int])]
@@ -201,9 +206,19 @@ function ConvertTo-McpErrorObject {
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory)]
-        [System.Exception] $Exception
+        [System.Exception] $Exception,
+
+        # Legacy: an unknown resource is -32002, and the codes of revision 2026-07-28 become -32600.
+        [ValidateSet('Modern', 'Legacy')]
+        [string] $Era = 'Modern'
     )
 
+    if ($Era -eq 'Legacy') {
+        if ($Exception -is [McpResourceNotFoundException]) {
+            return New-McpError -Code $script:McpLegacyErrorCode.ResourceNotFound -Message $Exception.Message -Data $Exception.Data
+        }
+        return ConvertTo-McpLegacyErrorObject -ErrorObject (ConvertTo-McpErrorObject -Exception $Exception)
+    }
     if ($Exception -is [McpProtocolException]) {
         if ($null -ne $Exception.Data -and $Exception.Data -isnot [System.Collections.IDictionary] -and $Exception.Data -isnot [string] -and $Exception.Data -isnot [System.Collections.IList]) {
             return New-McpError -Code $Exception.Code -Message $Exception.Message

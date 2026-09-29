@@ -2,13 +2,16 @@
 <#
 .SYNOPSIS
     The conformance fixture server: the tools, resources, prompts and completions that the server scenarios of
-    @modelcontextprotocol/conformance exercise for revision 2026-07-28, served over Streamable HTTP.
+    @modelcontextprotocol/conformance exercise for revisions 2026-07-28 and 2025-11-25, served over Streamable
+    HTTP by one dual-era server (both requirement sets run against the same instance).
 .DESCRIPTION
     The Conformance build task and .github/workflows/conformance.yml start it with
         pwsh -NoLogo -NoProfile -NonInteractive -File tests/Conformance/everything-server.ps1 -Port 3001
     and run the suite against http://127.0.0.1:3001/mcp. The module is imported from $env:MCP_MODULE_MANIFEST
     when set (the build sets it to the built module), otherwise from the installed ModelContextProtocol module.
     Scenarios of later milestones are listed in conformance-baseline.yml until their milestone lands.
+.PARAMETER Era
+    Dual (default) serves 2026-07-28 and the legacy revisions; Modern and Legacy restrict the server to one era.
 .PARAMETER Port
     The TCP port on the loopback interface.
 .PARAMETER Hostname
@@ -18,6 +21,9 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('Dual', 'Modern', 'Legacy')]
+    [string] $Era = 'Dual',
+
     [ValidateRange(1, 65535)]
     [int] $Port = 3001,
 
@@ -36,7 +42,12 @@ if ($env:MCP_MODULE_MANIFEST) {
 # Handlers run in worker runspaces and see nothing but their parameters, so the payloads (a 1x1 red PNG and a
 # 44-byte silent WAV header, the smallest valid payloads of their types) are inlined below.
 
-$server = New-McpServer -Name 'ModelContextProtocol-everything-server' -Version '0.1.0' -Title 'Conformance fixture' -Instructions 'A fixture for the MCP conformance suite.' -LogLevel $LogLevel -DefaultTtlMs 0 -DefaultCacheScope private -SetDefault
+$versions = switch ($Era) {
+    'Modern' { @('2026-07-28') }
+    'Legacy' { @('2025-11-25', '2025-06-18') }
+    default { @('2026-07-28', '2025-11-25', '2025-06-18') }
+}
+$server = New-McpServer -Name 'ModelContextProtocol-everything-server' -Version '0.1.0' -Title 'Conformance fixture' -Instructions 'A fixture for the MCP conformance suite.' -SupportedVersions $versions -LogLevel $LogLevel -DefaultTtlMs 0 -DefaultCacheScope private -SetDefault
 
 Register-McpTool -Name 'test_simple_text' -Description 'Returns a simple text response.' -ScriptBlock {
     'This is a simple text response for testing.'
@@ -165,6 +176,77 @@ Register-McpTool -Name 'test_input_required_result_capabilities' -Description 'A
     if ($asked) { 'All declared input types answered.' } else { 'The client declared no input capability.' }
 }
 
+# The legacy scenarios (requirement set 2025-11-25): the same era-agnostic cmdlets, sent to the client as
+# server-initiated requests in a legacy session.
+
+Register-McpTool -Name 'test_tool_with_logging' -Description 'Logs three messages at info level while it runs (after logging/setLevel).' -ScriptBlock {
+    param($Context)
+    Write-McpLog -Context $Context -Level info -Message 'Tool execution started'
+    Start-Sleep -Milliseconds 50
+    Write-McpLog -Context $Context -Level info -Message 'Tool processing data'
+    Start-Sleep -Milliseconds 50
+    Write-McpLog -Context $Context -Level info -Message 'Tool execution completed'
+    'Logging test completed'
+}
+
+Register-McpTool -Name 'test_sampling' -Description 'Asks the client to sample a completion for the prompt.' -ScriptBlock {
+    param(
+        [Parameter(Mandatory)]
+        [string] $prompt,
+
+        $Context
+    )
+    $answer = Request-McpSampling -Context $Context -Key 'sampling' -Messages $prompt -MaxTokens 100
+    "LLM response: $($answer.Text)"
+}
+
+Register-McpTool -Name 'test_elicitation' -Description 'Asks the user for a user name and an email address.' -ScriptBlock {
+    param(
+        [Parameter(Mandatory)]
+        [string] $message,
+
+        $Context
+    )
+    $schema = [ordered]@{
+        username = [ordered]@{ type = 'string'; description = "User's response" }
+        email    = [ordered]@{ type = 'string'; description = "User's email address" }
+    }
+    $answer = Request-McpElicitation -Context $Context -Key 'user' -Message $message -Schema $schema -Required username, email
+    "User response: action=$($answer.Action), content=$(ConvertTo-Json -InputObject $answer.Content -Compress -Depth 5)"
+}
+
+Register-McpTool -Name 'test_elicitation_sep1034_defaults' -Description 'Asks for values whose schemas carry defaults (SEP-1034).' -ScriptBlock {
+    param($Context)
+    $schema = [ordered]@{
+        name     = [ordered]@{ type = 'string'; default = 'John Doe' }
+        age      = [ordered]@{ type = 'integer'; default = 30 }
+        score    = [ordered]@{ type = 'number'; default = 95.5 }
+        status   = [ordered]@{ type = 'string'; enum = @('active', 'inactive', 'pending'); default = 'active' }
+        verified = [ordered]@{ type = 'boolean'; default = $true }
+    }
+    $answer = Request-McpElicitation -Context $Context -Key 'defaults' -Message 'Please review the defaults.' -Schema $schema
+    "Elicitation completed: action=$($answer.Action), content=$(ConvertTo-Json -InputObject $answer.Content -Compress -Depth 5)"
+}
+
+Register-McpTool -Name 'test_elicitation_sep1330_enums' -Description 'Asks for values of the five enum schema variants (SEP-1330).' -ScriptBlock {
+    param($Context)
+    $schema = [ordered]@{
+        untitledSingle = [ordered]@{ type = 'string'; enum = @('option1', 'option2', 'option3') }
+        titledSingle   = [ordered]@{ type = 'string'; oneOf = @([ordered]@{ const = 'value1'; title = 'First Option' }, [ordered]@{ const = 'value2'; title = 'Second Option' }, [ordered]@{ const = 'value3'; title = 'Third Option' }) }
+        legacyEnum     = [ordered]@{ type = 'string'; enum = @('opt1', 'opt2', 'opt3'); enumNames = @('Option One', 'Option Two', 'Option Three') }
+        untitledMulti  = [ordered]@{ type = 'array'; items = [ordered]@{ type = 'string'; enum = @('option1', 'option2', 'option3') } }
+        titledMulti    = [ordered]@{ type = 'array'; items = [ordered]@{ anyOf = @([ordered]@{ const = 'value1'; title = 'First Choice' }, [ordered]@{ const = 'value2'; title = 'Second Choice' }, [ordered]@{ const = 'value3'; title = 'Third Choice' }) } }
+    }
+    $answer = Request-McpElicitation -Context $Context -Key 'enums' -Message 'Please choose.' -Schema $schema
+    "Elicitation completed: action=$($answer.Action), content=$(ConvertTo-Json -InputObject $answer.Content -Compress -Depth 5)"
+}
+
+# server-sse-polling (pending in the suite) expects a stream that closes before the response and resumes on GET
+# with Last-Event-ID; the server does not implement resumability, so the tool simply answers.
+Register-McpTool -Name 'test_reconnection' -Description 'Answers at once (the server does not implement SSE resumability).' -ScriptBlock {
+    'Reconnection test completed'
+}
+
 # subscriptions/listen: these tools make the server announce list changes to the open listen streams.
 
 Register-McpTool -Name 'test_trigger_tool_change' -Description 'Announces a change of the tool list to subscribers.' -ScriptBlock {
@@ -224,6 +306,7 @@ Register-McpTool -Name 'json_schema_2020_12_tool' -Description 'Tool with JSON S
 $png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=='
 Register-McpResource -Uri 'test://static-text' -Name 'Static text resource' -Description 'A static text resource.' -Content 'This is the content of the static text resource.'
 Register-McpResource -Uri 'test://static-binary' -Name 'Static binary resource' -Description 'A 1x1 PNG image.' -MimeType 'image/png' -Content ([System.Convert]::FromBase64String($png))
+Register-McpResource -Uri 'test://watched-resource' -Name 'Watched resource' -Description 'A resource for resources/subscribe.' -Content 'Watched resource content.'
 Register-McpResource -UriTemplate 'test://template/{id}/data' -Name 'Template resource' -Description 'Data for an ID.' -MimeType 'application/json' -ScriptBlock {
     param([string] $id)
     [ordered]@{ id = $id; templateTest = $true; data = "Data for ID: $id" }
