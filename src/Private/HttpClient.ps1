@@ -93,6 +93,37 @@ function Wait-McpTask {
     $true
 }
 
+function Stop-McpHttpSendTask {
+    <#
+    .SYNOPSIS
+        Cancels a send that missed its deadline and disposes its response should the send complete anyway.
+    .DESCRIPTION
+        Cancelling cannot undo a send whose response headers arrived just before the cancellation: the task then
+        completes with a response, and its connection stays open until that response is disposed. The server
+        detects a client that gave up only through a failing write, which an open connection never produces.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal request bookkeeping.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Threading.Tasks.Task] $Task,
+
+        [Parameter(Mandatory)]
+        [System.Threading.CancellationTokenSource] $Cts,
+
+        # How long a cancelled send may take to settle; it ends at once unless the connection is stuck.
+        [int] $SettleMs = 1000
+    )
+
+    try { $Cts.Cancel() } catch { Write-Debug 'Cancelling the send failed.' }
+    if (-not $Task.IsCompleted) {
+        try { $null = $Task.Wait($SettleMs) } catch [System.AggregateException] { Write-Debug 'The cancelled send ended with an error.' }
+    }
+    if ($Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion -and $null -ne $Task.Result) {
+        try { $Task.Result.Dispose() } catch { Write-Debug 'Disposing the late response failed.' }
+    }
+}
+
 function Get-McpTaskFailure {
     [CmdletBinding()]
     [OutputType([System.Exception], [System.OperationCanceledException])]
@@ -450,7 +481,7 @@ function Open-McpHttpResumedStream {
         Write-Debug "-> GET $($Session.Transport.Url) Last-Event-ID $LastEventId (resuming '$Method' id=$Id)"
         $task = $Session.Transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $Cts.Token)
         if (-not (Wait-McpTask -Task $task -Deadline $Deadline)) {
-            $Cts.Cancel()
+            Stop-McpHttpSendTask -Task $task -Cts $Cts
             throw [System.TimeoutException]::new("Resuming the response stream of '$Method' (id $Id) timed out.")
         }
         $failure = Get-McpTaskFailure -Task $task
@@ -571,10 +602,8 @@ function Invoke-McpHttpClientRequest {
         $sendTask = $transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cts.Token)
         if (-not (Wait-McpTask -Task $sendTask -Deadline $deadline -OnTick $tick)) {
             Write-McpReproTrace "client id=$id header timeout; sendTask before Cancel: $($sendTask.Status)"
-            $cts.Cancel()
-            Write-McpReproTrace "client id=$id sendTask after Cancel: $($sendTask.Status)"
-            try { $null = $sendTask.Wait(200) } catch { Write-Debug 'ignored' }
-            Write-McpReproTrace "client id=$id sendTask 200 ms after Cancel: $($sendTask.Status)$(if ($sendTask.Status -eq 'RanToCompletion') { ' -> LEAKED RESPONSE (never disposed)' })"
+            Stop-McpHttpSendTask -Task $sendTask -Cts $cts
+            Write-McpReproTrace "client id=$id sendTask after Stop-McpHttpSendTask: $($sendTask.Status)$(if ($sendTask.Status -eq 'RanToCompletion') { ' -> late response DISPOSED (fix path)' })"
             throw [System.TimeoutException]::new("No response headers from $($transport.Url) for '$Method' (id $id) within $TimeoutMs ms.")
         }
         $failure = Get-McpTaskFailure -Task $sendTask
@@ -672,7 +701,7 @@ function Send-McpHttpClientMessage {
     try {
         $sendTask = $transport.Client.SendAsync($message, [System.Net.Http.HttpCompletionOption]::ResponseContentRead, $cts.Token)
         if (-not (Wait-McpTask -Task $sendTask -Deadline ([datetime]::UtcNow.AddMilliseconds($TimeoutMs)))) {
-            $cts.Cancel()
+            Stop-McpHttpSendTask -Task $sendTask -Cts $cts
             throw [System.TimeoutException]::new("Posting the notification '$Method' timed out after $TimeoutMs ms.")
         }
         $failure = Get-McpTaskFailure -Task $sendTask
