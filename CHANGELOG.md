@@ -157,6 +157,10 @@ support, dependency and breaking-change policy.
 
 ### Fixed
 
+- A Streamable HTTP request that timed out while its response headers were arriving left the response
+  undisposed, so its connection stayed open and the server never noticed that the client had given up; the
+  handler ran to completion. The client now disposes such a late response. The race was mostly hit on
+  Windows, where the HTTP cancellation test failed intermittently (#7).
 - A request id can be reused as soon as its response was sent; before, a request that arrived while the
   previous request with the same id was still winding down in its worker was rejected with `-32600`.
 - `Connect-McpServer -Server` fails at once for a server object that is already running, instead of waiting

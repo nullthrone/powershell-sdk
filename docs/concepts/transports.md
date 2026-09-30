@@ -66,7 +66,9 @@ runspace hosts it. Besides stdio there is an in-memory transport (a pair of chan
   `X-Accel-Buffering: no`); the response is the last event and closes the stream. A request that outlives
   `-KeepAliveSeconds` (default 5) also switches to SSE and receives keep-alive comments: a failed keep-alive
   write means the client closed the connection, which cancels the handler (token and pipeline stop). The
-  same happens when the final write fails.
+  same happens when the final write fails. On Windows, http.sys still accepts one write after the client
+  closed the connection and fails the next, so a closed connection is noticed one keep-alive interval later
+  than with the managed listener on Linux and macOS.
 - Shutdown (`Stop-McpServer`): the listener stops accepting, running handlers get the grace period, open
   channels receive an error response (`-32603`, "shutting down") and are closed.
 
@@ -82,6 +84,8 @@ runspace hosts it. Besides stdio there is an in-memory transport (a pair of chan
   by event (`data:` lines joined, comments ignored, `id`/`retry` kept for the resumption of legacy sessions) with notifications dispatched to
   the progress and log callbacks until the response with the request id arrives. A deadline cancels the
   request and disposes the response, which closes the stream: the cancellation signal of this transport.
+  This includes a response whose headers arrive while the send is being cancelled (the send then completes
+  anyway): an undisposed response would keep the connection open, so the server's writes would never fail.
 - `Get-McpTool` validates the `x-mcp-header` annotations of every tool (`Get-McpToolHeaderParameter`) and
   excludes invalid tools with a warning; `Invoke-McpTool` derives the `Mcp-Param-*` headers from the cached
   annotations and, after a `-32020` from the server, refreshes the list and retries once.
